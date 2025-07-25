@@ -1,3 +1,13 @@
+bl_info = {
+    "name": "UV Translator",
+    "author": "Your Name",
+    "version": (1, 0, 0),
+    "blender": (3, 0, 0),  # Adjust for your Blender version
+    "location": "UV Editor > Tools Tab",
+    "description": "Translates selected UVs in the UV Editor",
+    "category": "UV",
+}
+
 import bpy
 
 # --- 1. Custom Operator for UV Translation ---
