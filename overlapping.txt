@@ -1,0 +1,154 @@
+bl_info = {
+    "name": "Overlapper for Armature",
+    "blender": (3, 0, 0),
+    "category": "Animation",
+    "author": "Based on Dmitrii Kolpakov's Maya MEL tool, ported for Blender",
+    "version": (1, 0, 0),
+    "description": "Procedural secondary overlapping animation for armatures (bones)",
+}
+
+import bpy
+import math
+import random
+
+class OVERLAP_PT_panel(bpy.types.Panel):
+    bl_label = "Overlapper Animation"
+    bl_idname = "VIEW3D_PT_overlapper_anim"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Tool"
+
+    def draw(self, context):
+        layout = self.layout
+        scn = context.scene.overlapper_settings
+        layout.operator("pose.overlapper_anim", text="Apply Overlapper", icon='MOD_WAVE')
+        layout.prop(scn, "softness")
+        layout.prop(scn, "scale")
+        layout.prop(scn, "add_wind")
+        if scn.add_wind:
+            layout.prop(scn, "wind_strength")
+            layout.prop(scn, "wind_speed")
+        layout.prop(scn, "bake_anim")
+
+class OverlapperSettings(bpy.types.PropertyGroup):
+    softness: bpy.props.FloatProperty(
+        name="Softness (Frame Delay)",
+        description="Higher value = more lag",
+        default=3.0,
+        min=0.0,
+    )
+    scale: bpy.props.FloatProperty(
+        name="Scale (Amplitude)",
+        description="Scales the overlap amplitude",
+        default=1.0,
+        min=0.01,
+    )
+    add_wind: bpy.props.BoolProperty(
+        name="Add Wind Effect",
+        description="Adds procedural wind (randomness)",
+        default=False,
+    )
+    wind_strength: bpy.props.FloatProperty(
+        name="Wind Strength",
+        default=1.0,
+        min=0.0,
+    )
+    wind_speed: bpy.props.FloatProperty(
+        name="Wind Speed",
+        default=1.0,
+        min=0.01,
+    )
+    bake_anim: bpy.props.BoolProperty(
+        name="Bake Animation After Overlap",
+        default=True,
+    )
+
+class POSE_OT_overlapper_anim(bpy.types.Operator):
+    bl_idname = "pose.overlapper_anim"
+    bl_label = "Apply Overlapper"
+    bl_description = "Apply overlapping action to selected bones"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        scn = context.scene.overlapper_settings
+        obj = context.object
+
+        if obj is None or obj.type != 'ARMATURE' or context.mode != 'POSE':
+            self.report({'ERROR'}, "Select an armature and enter pose mode")
+            return {'CANCELLED'}
+
+        bones = [b for b in obj.pose.bones if b.bone.select]
+        if len(bones) < 2:
+            self.report({'ERROR'}, "Select at least two bones")
+            return {'CANCELLED'}
+
+        # Fetch frame range
+        action = obj.animation_data.action if obj.animation_data else None
+        if not action:
+            self.report({'ERROR'}, "No action/animation found")
+            return {'CANCELLED'}
+
+        frame_start = int(context.scene.frame_start)
+        frame_end = int(context.scene.frame_end)
+
+        delay = scn.softness
+        scale = scn.scale
+
+        # For each selected bone, offset/bake their FCurve data
+        for idx, bone in enumerate(bones):
+            for axis in ['location', 'rotation_euler', 'rotation_quaternion']:
+                # Find FCurves for this bone and axis
+                for i in range(3 if axis != 'rotation_quaternion' else 4):
+                    fc_path = f'pose.bones["{bone.name}"].{axis}'
+                    if axis == 'rotation_quaternion' and i == 3:
+                        # z, w, x, y mapping - Blender's quaternions have 4 channels
+                        pass
+                    fcurve = next((fc for fc in action.fcurves 
+                                   if fc.data_path == fc_path and fc.array_index == i), None)
+                    if not fcurve:
+                        continue
+                    keypoints = [kp for kp in fcurve.keyframe_points if frame_start <= kp.co.x <= frame_end]
+                    for kp in keypoints:
+                        # Offset time according to selection order
+                        original_x = kp.co.x
+                        kp.co.x = original_x + idx * delay
+                        # Amplitude scaling (except for quaternion w)
+                        if axis != 'rotation_quaternion' or i != 3:
+                            kp.co.y *= scale
+
+                        # Add wind effect if enabled (random value based on frame, scaled)
+                        if scn.add_wind:
+                            # Simple wind: add sin noise + random
+                            noise_val = math.sin((kp.co.x + idx)*scn.wind_speed*0.13) * scn.wind_strength
+                            noise_val += random.uniform(-scn.wind_strength, scn.wind_strength)*0.5
+                            kp.co.y += noise_val
+
+        # Optionally bake the result
+        if scn.bake_anim:
+            bone_names = [bone.name for bone in bones]
+            bpy.ops.nla.bake(frame_start=frame_start, frame_end=frame_end,
+                             only_selected=False,
+                             visual_keying=True,
+                             clear_constraints=False,
+                             use_current_action=True,
+                             bake_types={'POSE'})
+            self.report({'INFO'}, "Overlapping action and baking complete.")
+        else:
+            self.report({'INFO'}, "Overlapping action applied. No bake.")
+
+        return {'FINISHED'}
+
+def register():
+    bpy.utils.register_class(OverlapperSettings)
+    bpy.utils.register_class(POSE_OT_overlapper_anim)
+    bpy.utils.register_class(OVERLAP_PT_panel)
+    bpy.types.Scene.overlapper_settings = bpy.props.PointerProperty(type=OverlapperSettings)
+
+def unregister():
+    bpy.utils.unregister_class(OverlapperSettings)
+    bpy.utils.unregister_class(POSE_OT_overlapper_anim)
+    bpy.utils.unregister_class(OVERLAP_PT_panel)
+    del bpy.types.Scene.overlapper_settings
+
+if __name__ == "__main__":
+    register()
