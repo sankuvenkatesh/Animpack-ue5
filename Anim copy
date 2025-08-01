@@ -1,9 +1,9 @@
 bl_info = {
     "name": "Copy & Mirror Pose",
-    "author": "OpenAI + Community",
+    "author": "Venkatesh sanku",
     "version": (1, 0),
     "blender": (2, 80, 0),
-    "location": "View3D > Sidebar > BL",
+    "location": "View3D > Sidebar > Venky Anim Toolz",
     "description": "Copy and mirror pose for armature objects",
     "category": "Animation"
 }
@@ -48,7 +48,7 @@ class ANIM_PT_ToolsPanel(bpy.types.Panel):
     bl_idname = "ANIM_PT_tools_panel"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
-    bl_category = "BL"
+    bl_category = "Venky Anim Toolz"
     @classmethod
     def poll(cls, context):
         return context.object and context.object.type == 'ARMATURE' and context.mode == 'POSE'
