@@ -1,0 +1,150 @@
+bl_info = {
+    "name": "Overlapper",
+    "author": "Venkatesh Sanku (refactored)",
+    "version": (1, 0, 1),
+    "blender": (2, 80, 0),
+    "location": "View3D > Sidebar > Venky Anim Toolz",
+    "description": "Apply overlapping wave action to bones for any rig, with user-adjustable parameters.",
+    "category": "Animation",
+}
+
+import bpy
+import math
+from bpy.props import (
+    IntProperty,
+    FloatProperty,
+    PointerProperty,
+)
+
+class VenkyOverlapSettings(bpy.types.PropertyGroup):
+    frame_start: IntProperty(
+        name="Start Frame",
+        default=1,
+        min=1,
+        description="First animation frame"
+    )
+    frame_end: IntProperty(
+        name="End Frame",
+        default=100,
+        min=1,
+        description="Last animation frame"
+    )
+    amplitude: FloatProperty(
+        name="Amplitude (deg)",
+        default=30.0,
+        min=0.0,
+        max=180.0,
+        description="Maximum wave swing in degrees"
+    )
+    frequency: FloatProperty(
+        name="Frequency",
+        default=0.2,
+        min=0.0,
+        max=10.0,
+        description="Wave frequency (cycles per animation)"
+    )
+    speed: FloatProperty(
+        name="Speed",
+        default=1.0,
+        min=0.0,
+        max=5.0,
+        description="Wave speed (controls propagation down bones)"
+    )
+    overlap: FloatProperty(
+        name="Overlap (deg)",
+        default=45.0,
+        min=0.0,
+        max=180.0,
+        description="Phase lag per bone (in degrees)"
+    )
+    influence: FloatProperty(
+        name="Influence",
+        default=0.5,
+        min=0.0,
+        max=1.0,
+        description="0 = no effect, 1 = full wave"
+    )
+
+class VENKY_OT_ApplyOverlap(bpy.types.Operator):
+    bl_idname = "venky.apply_overlap"
+    bl_label = "Apply Bone Wave Overlap"
+    bl_description = "Apply overlapping wave motion to selected bones"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        obj = context.active_object
+        if not obj or obj.type != 'ARMATURE':
+            self.report({'ERROR'}, "Select an armature object.")
+            return {'CANCELLED'}
+
+        s = context.scene.venky_overlap_settings
+
+        amplitude_rad = math.radians(s.amplitude)
+        overlap_rad = math.radians(s.overlap)
+
+        # Switch to POSE mode if not already
+        if bpy.context.mode != 'POSE':
+            bpy.ops.object.posemode_toggle()
+
+        selected_bones = bpy.context.selected_pose_bones
+        if selected_bones:
+            bone_chain = [b.name for b in selected_bones]
+        else:
+            bone_chain = [b.name for b in obj.pose.bones]
+
+        for bone_index, bone_name in enumerate(bone_chain):
+            pbone = obj.pose.bones[bone_name]
+            # Optionally, store original rotation as base (currently using zero offset)
+            for frame in range(s.frame_start, s.frame_end + 1):
+                bpy.context.scene.frame_set(frame)
+                framespan = max(1, s.frame_end - s.frame_start)
+                # Compute phase (in radians)
+                phase = bone_index * overlap_rad + s.speed * frame * s.frequency * 2 * math.pi / framespan
+                wave_rot = amplitude_rad * math.sin(phase)
+                # Only set Z (twist) rotation; assumes rotation mode XYZ
+                if pbone.rotation_mode != 'XYZ':
+                    pbone.rotation_mode = 'XYZ'
+                # Influence between 0 (no effect) and 1 (full effect)
+                pbone.rotation_euler[2] = s.influence * wave_rot
+                pbone.keyframe_insert(data_path="rotation_euler", index=2)
+
+        self.report({'INFO'}, f"Wave animation applied to bones: {bone_chain}")
+        return {'FINISHED'}
+
+class VENKY_PT_OverlapPanel(bpy.types.Panel):
+    bl_label = "Overlapper"
+    bl_idname = "VENKY_PT_overlap_panel"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Venky Anim Toolz"
+
+    def draw(self, context):
+        layout = self.layout
+        s = context.scene.venky_overlap_settings
+        layout.prop(s, "frame_start")
+        layout.prop(s, "frame_end")
+        layout.prop(s, "amplitude")
+        layout.prop(s, "frequency")
+        layout.prop(s, "speed")
+        layout.prop(s, "overlap")
+        layout.prop(s, "influence")
+        layout.operator("venky.apply_overlap", icon='MOD_WAVE')
+
+classes = (
+    VenkyOverlapSettings,
+    VENKY_OT_ApplyOverlap,
+    VENKY_PT_OverlapPanel,
+)
+
+def register():
+    for cls in classes:
+        bpy.utils.register_class(cls)
+    bpy.types.Scene.venky_overlap_settings = PointerProperty(type=VenkyOverlapSettings)
+
+def unregister():
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)
+    del bpy.types.Scene.venky_overlap_settings
+
+if __name__ == "__main__":
+    register()
