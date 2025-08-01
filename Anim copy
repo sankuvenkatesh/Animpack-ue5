@@ -1,17 +1,14 @@
 bl_info = {
-    "name": "Copy & Mirror Animation/Pose",
+    "name": "Copy & Mirror Pose",
     "author": "OpenAI + Community",
     "version": (1, 0),
     "blender": (2, 80, 0),
     "location": "View3D > Sidebar > BL",
-    "description": "Copy and mirror animation or pose for armature objects",
+    "description": "Copy and mirror pose for armature objects",
     "category": "Animation"
 }
 
 import bpy
-
-# Use a module-level global for animation transfer
-copied_fcurves = []
 
 def copy_pose(context):
     bpy.ops.pose.copy()
@@ -21,45 +18,6 @@ def paste_pose(context):
 
 def paste_mirror_pose(context):
     bpy.ops.pose.paste(flipped=True)
-
-def copy_animation(context):
-    global copied_fcurves
-    obj = context.object
-    if not obj.animation_data or not obj.animation_data.action:
-        return
-    action = obj.animation_data.action
-    copied_fcurves = [
-        (fc.array_index, fc.data_path, [(k.co.x, k.co.y) for k in fc.keyframe_points])
-        for fc in action.fcurves
-    ]
-
-def paste_animation(context):
-    global copied_fcurves
-    obj = context.object
-    if not copied_fcurves:
-        return
-    action = bpy.data.actions.new(name="CopiedAction")
-    obj.animation_data_create()
-    obj.animation_data.action = action
-    for arr_idx, data_path, keys in copied_fcurves:
-        fc = action.fcurves.new(data_path, index=arr_idx)
-        for x, y in keys:
-            k = fc.keyframe_points.insert(x, y)
-            k.interpolation = 'BEZIER'
-    copied_fcurves = []
-
-def mirror_animation(context, axis='X'):
-    obj = context.object
-    if not obj.animation_data or not obj.animation_data.action:
-        return
-    action = obj.animation_data.action
-    for fc in action.fcurves:
-        mirrored_keys = []
-        for k in fc.keyframe_points:
-            mirrored_y = -k.co.y  # Negate rotation/position
-            mirrored_keys.append((k.co.x, mirrored_y))
-        for i, k in enumerate(fc.keyframe_points):
-            k.co.y = mirrored_keys[i][1]
 
 class ANIM_OT_CopyPose(bpy.types.Operator):
     bl_idname = "anim.copy_pose_custom"
@@ -85,36 +43,12 @@ class ANIM_OT_PasteMirrorPose(bpy.types.Operator):
         self.report({'INFO'}, "Mirrored (Flipped) Pose")
         return {'FINISHED'}
 
-class ANIM_OT_CopyAnimation(bpy.types.Operator):
-    bl_idname = "anim.copy_animation_custom"
-    bl_label = "Copy Animation"
-    def execute(self, context):
-        copy_animation(context)
-        self.report({'INFO'}, "Copied Animation")
-        return {'FINISHED'}
-
-class ANIM_OT_PasteAnimation(bpy.types.Operator):
-    bl_idname = "anim.paste_animation_custom"
-    bl_label = "Paste Copied Animation"
-    def execute(self, context):
-        paste_animation(context)
-        self.report({'INFO'}, "Pasted Animation")
-        return {'FINISHED'}
-
-class ANIM_OT_MirrorAnimation(bpy.types.Operator):
-    bl_idname = "anim.mirror_animation_custom"
-    bl_label = "Mirror Animation (Approximate)"
-    def execute(self, context):
-        mirror_animation(context)
-        self.report({'INFO'}, "Mirrored Animation (Approximate)")
-        return {'FINISHED'}
-
 class ANIM_PT_ToolsPanel(bpy.types.Panel):
-    bl_label = "Copy & Mirror Animation/Pose"
+    bl_label = "Copy & Mirror Pose"
     bl_idname = "ANIM_PT_tools_panel"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
-    bl_category = "BL"  # Custom category
+    bl_category = "BL"
     @classmethod
     def poll(cls, context):
         return context.object and context.object.type == 'ARMATURE' and context.mode == 'POSE'
@@ -125,19 +59,11 @@ class ANIM_PT_ToolsPanel(bpy.types.Panel):
         row.operator("anim.paste_pose_custom")
         row = layout.row()
         row.operator("anim.paste_mirror_pose_custom")
-        row = layout.row()
-        row.operator("anim.copy_animation_custom")
-        row.operator("anim.paste_animation_custom")
-        row = layout.row()
-        row.operator("anim.mirror_animation_custom")
 
 classes = (
     ANIM_OT_CopyPose,
     ANIM_OT_PastePose,
     ANIM_OT_PasteMirrorPose,
-    ANIM_OT_CopyAnimation,
-    ANIM_OT_PasteAnimation,
-    ANIM_OT_MirrorAnimation,
     ANIM_PT_ToolsPanel,
 )
 
