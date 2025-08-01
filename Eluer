@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Smart Euler Filter",
     "author": "Venkatesh Sanku",
-    "version": (1, 5),
+    "version": (1, 6),
     "blender": (2, 80, 0),
     "location": "Graph Editor > Sidebar > Rotation Continuity Tab",
-    "description": "Unwrap/smooth selected Euler or Quaternion rotation f-curves for continuity, preserving handles. Works with any number of selected channels.",
+    "description": "Unwrap/smooth selected Euler or Quaternion rotation f-curves for objects or pose bones, preserving handles. Works with any number of selected channels.",
     "category": "Animation"
 }
 
@@ -12,7 +12,7 @@ import bpy
 import math
 from mathutils import Euler, Quaternion
 
-# ---------- Utility Functions ----------
+# ------ Utility Functions ------
 
 def nearest_equivalent_euler(a1, a2):
     twopi = 2 * math.pi
@@ -22,15 +22,45 @@ def nearest_equivalent_euler(a1, a2):
         a2 += twopi
     return a2
 
-def get_selected_rotation_fcurves(context, mode_code):
+def find_datapath_entity(context):
+    """Returns (entity, rotation_mode) for object or pose bone, and its RNA path, given the Graph Editor context."""
     obj = context.active_object
     if not obj or not obj.animation_data or not obj.animation_data.action:
-        return None, "No animated object with keyframes selected."
+        return None, None, None
+
+    # Determine if we're dealing with a bone
+    for area in context.screen.areas:
+        if area.type == "DOPESHEET_EDITOR" or area.type == "GRAPH_EDITOR":
+            space = area.spaces.active
+            if hasattr(space, "mode") and space.mode == 'POSE':
+                # Look for selected pose bone
+                # Try context.active_pose_bone (Blender 2.8+) for armature pose
+                bone = getattr(context, "active_pose_bone", None)
+                if bone:
+                    path = 'pose.bones["%s"]' % bone.name
+                    return bone, bone.rotation_mode, path
+    # Otherwise, use object
+    return obj, obj.rotation_mode, ""  # path is "" for object
+
+def get_selected_rotation_fcurves(context, mode_code, entity_rnapath):
+    obj = context.active_object
+    if not obj or not obj.animation_data or not obj.animation_data.action:
+        return None, "No animated object or bone with keyframes selected."
     suffix = "rotation_euler" if mode_code == "EULER" else "rotation_quaternion"
     all_fcurves = obj.animation_data.action.fcurves
-    selected_fcurves = [fc for fc in all_fcurves if fc.select and fc.data_path.endswith(suffix)]
+    # If bone, matcher requires prefix
+    if entity_rnapath:
+        selected_fcurves = [
+            fc for fc in all_fcurves
+            if fc.select and fc.data_path.startswith(entity_rnapath) and fc.data_path.endswith(suffix)
+        ]
+    else:
+        selected_fcurves = [
+            fc for fc in all_fcurves
+            if fc.select and fc.data_path == suffix
+        ]
     if not selected_fcurves:
-        return None, f"No selected {suffix} f-curves found."
+        return None, f"No selected {suffix} f-curves found for active object/bone."
     selected_fcurves.sort(key=lambda fc: fc.array_index)
     return selected_fcurves, None
 
@@ -43,7 +73,7 @@ def collect_keyframes_with_handles(curves):
     keyframe_info = []
     for f in frames:
         kps = [mapping.get(f) for mapping in axis_keyframes]
-        if all(kps):  # Only at frames where all selected curves have a key
+        if all(kps):
             value = [kp.co[1] for kp in kps]
             handles = [{
                 'handle_left_type': kp.handle_left_type,
@@ -76,12 +106,11 @@ def unwrap_keyframe_values_euler(keyframes):
     return out
 
 def unwrap_keyframe_values_quaternion(keyframes):
-    # If fewer than 4 channels are selected, try to smooth each independently
     out = []
     prev = None
     for info in keyframes:
         v = info['value']
-        # If 4 channels, interpret as quaternion
+        # If 4 channels, treat as Quaternion; otherwise, smooth each channel
         if len(v) == 4:
             q = Quaternion(v)
             if prev is not None and prev.dot(q) < 0.0:
@@ -89,7 +118,6 @@ def unwrap_keyframe_values_quaternion(keyframes):
             values = [q.w, q.x, q.y, q.z]
             prev = Quaternion(q)
         else:
-            # Partial quaternion: smooth each selected channel
             values = v if prev is None else [
                 -v[i] if abs(v[i] + prev[i]) < abs(v[i] - prev[i]) else v[i]
                 for i in range(len(v))
@@ -118,30 +146,29 @@ def preserve_and_update_fcurve_points(curves, keyframe_infos):
                 kp.handle_right = kph['handle_right']
         fc.update()
 
-# ---------- Main Operator ----------
+# ------ Main Operator ------
 
 class ROTATION_OT_preserve_continuity_partial(bpy.types.Operator):
-    """Unwraps/smooths selected Euler or Quaternion rotation channels for continuity. Works for any number of selected channels. Handles are preserved."""
+    """Unwraps/smooths selected Euler or Quaternion rotation channels for objects or bones. Handles preserved."""
     bl_idname = "graph.rotation_continuity_partial"
     bl_label = "Preserve Rotation Continuity"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-        obj = context.active_object
-        if not obj:
-            self.report({'ERROR'}, "No active object.")
+        entity, rot_mode, rna_path = find_datapath_entity(context)
+        if not entity:
+            self.report({'ERROR'}, "No active object or pose bone found.")
             return {'CANCELLED'}
 
-        mode = obj.rotation_mode
-        if mode == "QUATERNION":
+        if rot_mode == "QUATERNION":
             mode_code = "QUATERNION"
-        elif mode in {"XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"}:
+        elif rot_mode in {"XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"}:
             mode_code = "EULER"
         else:
-            self.report({'ERROR'}, f"Unsupported rotation mode: {mode}")
+            self.report({'ERROR'}, f"Unsupported rotation mode: {rot_mode}")
             return {'CANCELLED'}
 
-        selected_fcurves, err = get_selected_rotation_fcurves(context, mode_code)
+        selected_fcurves, err = get_selected_rotation_fcurves(context, mode_code, rna_path)
         if selected_fcurves is None:
             self.report({'ERROR'}, err)
             return {'CANCELLED'}
@@ -157,11 +184,12 @@ class ROTATION_OT_preserve_continuity_partial(bpy.types.Operator):
             unwrapped = unwrap_keyframe_values_quaternion(keyframes)
 
         preserve_and_update_fcurve_points(selected_fcurves, unwrapped)
+        context.area.tag_redraw()
 
-        self.report({'INFO'}, f"{mode_code} continuity applied to {len(selected_fcurves)} selected channel(s).")
+        self.report({'INFO'}, f"{mode_code} continuity applied to {len(selected_fcurves)} selected channel(s) of {'bone' if rna_path else 'object'}.")
         return {'FINISHED'}
 
-# ---------- Panel ----------
+# ------ Panel ------
 
 class ROTATION_PT_continuity_panel(bpy.types.Panel):
     bl_label = "Rotation Continuity"
@@ -175,8 +203,9 @@ class ROTATION_PT_continuity_panel(bpy.types.Panel):
         col.label(text="Preserve/correct continuity (Euler or Quaternion):")
         col.operator("graph.rotation_continuity_partial", icon='CON_ROTLIKE')
         col.label(text="Handles/tangents are always preserved.")
+        col.label(text="Supports objects and pose bones.")
 
-# ---------- Registration ----------
+# ------ Registration ------
 
 classes = [
     ROTATION_OT_preserve_continuity_partial,
