@@ -1,13 +1,13 @@
 bl_info = {
     "name": "Euler Filter",
-    "author": "Manuel Odendahl (update: OpenAI user)",
+    "author": "Venkatesh",
     "version": (0, 2, 0),
     "blender": (3, 0, 0),
     "location": "Graph Editor > Search > Euler Filter",
     "description": "Filter Euler rotations to remove gimbal lock artifacts",
     "warning": "",
     "doc_url": "",
-    "category": "Animation"
+    "category": "Venky Anim Toolz"
 }
 
 import bpy
@@ -89,7 +89,10 @@ def split_data_path(data_path):
 
 def get_bone_from_fcurve(obj, fcurve):
     bone_path, _ = split_data_path(fcurve.data_path)
-    return obj.path_resolve(bone_path)
+    try:
+        return obj.path_resolve(bone_path)
+    except (AttributeError, ValueError):
+        return obj
 
 def get_selected_rotation_fcurves(context):
     obj = context.active_object
@@ -110,7 +113,7 @@ def get_selected_rotation_fcurves(context):
         bone, prop = split_data_path(fc.data_path)
         if prop != "rotation_euler":
             continue
-        if not selected_bone:
+        if selected_bone is None:
             selected_bone = bone
         if bone != selected_bone:
             return None, "Only select the rotation of a single object/bone"
@@ -149,8 +152,10 @@ class GRAPH_OT_EulerFilter(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        fcus, _ = get_selected_rotation_fcurves(context)
-        return (fcus is not None)
+        if context and context.active_object:
+            fcus, _ = get_selected_rotation_fcurves(context)
+            return (fcus is not None)
+        return False
 
     def execute(self, context):
         kfs, fcus, error = get_selected_rotation_keyframes(context)
