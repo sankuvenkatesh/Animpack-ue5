@@ -1,0 +1,195 @@
+bl_info = {
+    "name": "Continuity Multi-Rotation & Euler/Quaternion Helper",
+    "author": "Adapted by Perplexity (2025)",
+    "version": (1, 1),
+    "blender": (2, 80, 0),
+    "location": "Graph Editor > Sidebar > Rotation Continuity Tab",
+    "description": "Ensures continuity in Euler or Quaternion rotation animation curves. Allows multi-revolution spins (360, 720...) and offers quick conversion.",
+    "category": "Animation"
+}
+
+import bpy
+import math
+from mathutils import Euler
+
+# ========== Utility Functions ==========
+
+def nearest_equivalent(a1, a2):
+    # Choose a2 shifted by 360k to be closest to a1
+    twopi = 2 * math.pi
+    while a2 - a1 > math.pi:
+        a2 -= twopi
+    while a2 - a1 < -math.pi:
+        a2 += twopi
+    return a2
+
+def unwrap_fcurve_values(curves):
+    """No normalization! Retains 0, 360, 720... as input by user."""
+    values = []
+    frames = sorted({k.co[0] for fc in curves for k in fc.keyframe_points})
+    for frame in frames:
+        eul = [fc.evaluate(frame) for fc in curves]
+        values.append((frame, eul))
+    return values
+
+def write_fcurve_values(curves, values):
+    for axis, fc in enumerate(curves):
+        fc.keyframe_points.clear()
+        for frame, eul in values:
+            fc.keyframe_points.insert(frame, eul[axis], options={'FAST'})
+
+def get_rot_fcurves(context):
+    obj = context.active_object
+    if not obj or not obj.animation_data or not obj.animation_data.action:
+        return None, "No animated object with keyframes selected."
+    rcurves = [fc for fc in obj.animation_data.action.fcurves
+               if fc.select and fc.data_path.endswith("rotation_euler")]
+    if len(rcurves) != 3:
+        return None, "Select X, Y, Z Euler curves at once."
+    rcurves.sort(key=lambda fc: fc.array_index)
+    return rcurves, None
+
+def set_object_rotation_mode(context, mode='QUATERNION'):
+    obj = getattr(context, 'active_object', None)
+    if obj and obj.rotation_mode != mode:
+        obj.rotation_mode = mode
+
+def convert_keyframes_euler_to_quat(obj):
+    # Bake each Euler Euler keyframe to quaternion
+    if not obj.animation_data or not obj.animation_data.action:
+        return "No action for baking."
+    action = obj.animation_data.action
+    quats = []
+    # Only process selected frames in 'rotation_euler'
+    fc_euler = [fc for fc in action.fcurves if fc.data_path.endswith('rotation_euler')]
+    if len(fc_euler) != 3:
+        return "Object must have all three Euler fcurves."
+    frames = sorted(set(int(k.co[0]) for fc in fc_euler for k in fc.keyframe_points))
+    for f in frames:
+        e = [fc.evaluate(f) for fc in fc_euler]
+        quat = Euler(e, obj.rotation_mode).to_quaternion()
+        quats.append((f, quat))
+    # Write quaternion keyframes
+    obj.rotation_mode = 'QUATERNION'
+    quat_curves = []
+    for i in range(4):  # WXYZ
+        fc = None
+        dp = f'rotation_quaternion'
+        for fcurve in action.fcurves:
+            if fcurve.data_path.endswith(dp) and fcurve.array_index == i:
+                fc = fcurve
+                break
+        if fc is None:
+            fc = action.fcurves.new(data_path=dp, index=i)
+        quat_curves.append(fc)
+    for i, fc in enumerate(quat_curves):
+        fc.keyframe_points.clear()
+        for f, quat in quats:
+            fc.keyframe_points.insert(f, quat[i], options={'FAST'})
+    return None
+
+# ========== Operators ==========
+
+class ROTATION_OT_preserve_continuity(bpy.types.Operator):
+    """Unwraps selected Euler curves so they increase monotonically (0, 360, 720...)"""
+    bl_idname = "graph.rotation_continuity"
+    bl_label = "Preserve Multi-Rotation (Euler Continuity)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        fcu, err = get_rot_fcurves(context)
+        if fcu is None:
+            self.report({'ERROR'}, err)
+            return {'CANCELLED'}
+        values = unwrap_fcurve_values(fcu)
+        prev = None
+        out = []
+        for frame, e in values:
+            if prev is None:
+                fixed = list(e)
+            else:
+                fixed = [nearest_equivalent(prev[i], e[i]) for i in range(3)]
+            out.append((frame, fixed))
+            prev = fixed
+        write_fcurve_values(fcu, out)
+        self.report({'INFO'}, "Euler curves unwrapped: continuity preserved for multi-rotations.")
+        return {'FINISHED'}
+
+class ROTATION_OT_convert_to_quaternion(bpy.types.Operator):
+    """Converts all Euler rotation keyframes to Quaternion keyframes to reduce gimbal lock risk."""
+    bl_idname = "object.convert_euler_to_quat"
+    bl_label = "Convert To Quaternion Keys"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        obj = context.active_object
+        error = convert_keyframes_euler_to_quat(obj)
+        if error:
+            self.report({'ERROR'}, error)
+            return {'CANCELLED'}
+        self.report({'INFO'}, "Converted Euler keys to Quaternion keys.")
+        return {'FINISHED'}
+
+class ROTATION_OT_set_quaternion_mode(bpy.types.Operator):
+    """Set active object rotation mode to Quaternion (WXYZ)"""
+    bl_idname = "object.set_quaternion_mode"
+    bl_label = "Set Quaternion Mode"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        set_object_rotation_mode(context, 'QUATERNION')
+        self.report({'INFO'}, "Object set to Quaternion rotation mode.")
+        return {'FINISHED'}
+
+class ROTATION_OT_set_euler_mode(bpy.types.Operator):
+    """Set active object rotation mode to Euler XYZ"""
+    bl_idname = "object.set_euler_mode"
+    bl_label = "Set Euler XYZ Mode"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        set_object_rotation_mode(context, 'XYZ')
+        self.report({'INFO'}, "Object set to Euler XYZ rotation mode.")
+        return {'FINISHED'}
+
+# ========== Panel ==========
+
+class ROTATION_PT_continuity_panel(bpy.types.Panel):
+    bl_label = "Rotation Continuity / Quat Helper"
+    bl_space_type = 'GRAPH_EDITOR'
+    bl_region_type = 'UI'
+    bl_category = "Rotation"
+
+    def draw(self, context):
+        layout = self.layout
+        col = layout.column(align=True)
+        col.label(text="Preserve/correct multi-rotations (Euler only):")
+        col.operator("graph.rotation_continuity", icon='CON_ROTLIKE')
+        col.separator()
+        col.label(text="Quick Rotation Mode Switch:")
+        row = col.row(align=True)
+        row.operator("object.set_euler_mode", icon='DRIVER_TRANSFORM')
+        row.operator("object.set_quaternion_mode", icon='FORCE_MAGNETIC')
+        col.separator()
+        col.label(text="Minimize gimbal lock (use quaternion):")
+        col.operator("object.convert_euler_to_quat", icon='CON_VERTLIKE')
+        col.label(text="See tooltip/documentation for workflow tips.")
+
+# ========== Registration ==========
+
+classes = [
+    ROTATION_OT_preserve_continuity,
+    ROTATION_OT_convert_to_quaternion,
+    ROTATION_OT_set_quaternion_mode,
+    ROTATION_OT_set_euler_mode,
+    ROTATION_PT_continuity_panel,
+]
+
+def register():
+    for cls in classes:
+        bpy.utils.register_class(cls)
+def unregister():
+    for cls in classes:
+        bpy.utils.unregister_class(cls)
+if __name__ == "__main__":
+    register()
