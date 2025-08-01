@@ -1,10 +1,10 @@
 bl_info = {
-    "name": "Rotation Continuity (Euler and Quaternion, Preserve Handles)",
+    "name": "Rotation Continuity (Euler and Quaternion, Partial Selection, Preserve Handles)",
     "author": "Adapted by Perplexity (2025)",
-    "version": (1, 3),
+    "version": (1, 4),
     "blender": (2, 80, 0),
     "location": "Graph Editor > Sidebar > Rotation Continuity Tab",
-    "description": "Unwraps rotation curves for multi-rotations (Euler 360, 720... or smooth quaternion), preserving original handle types and positions.",
+    "description": "Unwraps or smooths selected rotation channels in Euler or Quaternion modes for continuity, preserving handle types and positions.",
     "category": "Animation"
 }
 
@@ -22,28 +22,38 @@ def nearest_equivalent_euler(a1, a2):
         a2 += twopi
     return a2
 
-def get_rot_fcurves(context, mode):
+def get_selected_rotation_fcurves(context, mode_code):
     obj = context.active_object
     if not obj or not obj.animation_data or not obj.animation_data.action:
         return None, "No animated object with keyframes selected."
-    suffix = "rotation_euler" if mode == "EULER" else "rotation_quaternion"
-    expected = 3 if mode == "EULER" else 4
-    curves = [fc for fc in obj.animation_data.action.fcurves if fc.select and fc.data_path.endswith(suffix)]
-    if len(curves) != expected:
-        return None, f"Select {'X,Y,Z' if mode=='EULER' else 'W,X,Y,Z'} {mode} curves at once."
-    curves.sort(key=lambda fc: fc.array_index)
-    return curves, None
+    suffix = "rotation_euler" if mode_code == "EULER" else "rotation_quaternion"
+    expected_count = 3 if mode_code == "EULER" else 4
+    all_fcurves = obj.animation_data.action.fcurves
+
+    # Get only selected fcurves that match suffix
+    selected_fcurves = [fc for fc in all_fcurves if fc.select and fc.data_path.endswith(suffix)]
+    if not selected_fcurves:
+        return None, f"No selected {suffix} f-curves found."
+    # Sort by array_index for predictable order
+    selected_fcurves.sort(key=lambda fc: fc.array_index)
+
+    # For quaternion mode: ideally all 4 channels selected for reliable continuity
+    if mode_code == "QUATERNION" and len(selected_fcurves) != expected_count:
+        return None, "Select all 4 quaternion channels (W, X, Y, Z) for continuity filtering."
+
+    return selected_fcurves, None
 
 def get_fcurve_keyframe_map(fcurve):
     return {int(round(kp.co[0])): kp for kp in fcurve.keyframe_points}
 
-def collect_keyframes_with_handles(curves, count):
+def collect_keyframes_with_handles(curves):
+    # Collect all unique frames that have keyframes in selected curves
     axis_keyframes = [get_fcurve_keyframe_map(fc) for fc in curves]
     frames = sorted({f for mapping in axis_keyframes for f in mapping})
     keyframe_info = []
     for f in frames:
         kps = [mapping.get(f) for mapping in axis_keyframes]
-        if all(kps):
+        if all(kps):  # Only consider frames where all selected curves have keyframes
             value = [kp.co[1] for kp in kps]
             handles = [{
                 'handle_left_type': kp.handle_left_type,
@@ -66,7 +76,7 @@ def unwrap_keyframe_values_euler(keyframes):
         if prev is None:
             fixed = list(e)
         else:
-            fixed = [nearest_equivalent_euler(prev[i], e[i]) for i in range(3)]
+            fixed = [nearest_equivalent_euler(prev[i], e[i]) for i in range(len(e))]
         out.append({
             'frame': info['frame'],
             'value': fixed,
@@ -81,7 +91,6 @@ def unwrap_keyframe_values_quaternion(keyframes):
     for info in keyframes:
         q = Quaternion(info['value'])
         if prev is not None:
-            # Always use the closest quaternion hemisphere
             if prev.dot(q) < 0.0:
                 q = -q
         out.append({
@@ -110,39 +119,45 @@ def preserve_and_update_fcurve_points(curves, keyframe_infos):
 
 # ---------- Main Operator ----------
 
-class ROTATION_OT_preserve_continuity(bpy.types.Operator):
-    """Unwraps selected Euler curves or smooths quaternion curves, preserving original handle types and positions."""
-    bl_idname = "graph.rotation_continuity"
-    bl_label = "Preserve Rotation Continuity"
+class ROTATION_OT_preserve_continuity_partial(bpy.types.Operator):
+    """Unwraps selected rotation channels for continuity. Supports any number of selected channels in Euler or Quaternion mode. Preserves handles."""
+    bl_idname = "graph.rotation_continuity_partial"
+    bl_label = "Preserve Rotation Continuity (Partial Selection)"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
         obj = context.active_object
+        if not obj:
+            self.report({'ERROR'}, "No active object.")
+            return {'CANCELLED'}
+
         mode = obj.rotation_mode
         if mode == "QUATERNION":
             mode_code = "QUATERNION"
-            needed_count = 4
         elif mode in {"XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"}:
             mode_code = "EULER"
-            needed_count = 3
         else:
             self.report({'ERROR'}, f"Unsupported rotation mode: {mode}")
             return {'CANCELLED'}
 
-        fcu, err = get_rot_fcurves(context, mode_code)
-        if fcu is None:
+        selected_fcurves, err = get_selected_rotation_fcurves(context, mode_code)
+        if selected_fcurves is None:
             self.report({'ERROR'}, err)
             return {'CANCELLED'}
-        keyframes = collect_keyframes_with_handles(fcu, needed_count)
+
+        keyframes = collect_keyframes_with_handles(selected_fcurves)
         if not keyframes:
-            self.report({'ERROR'}, "No matching keyframes for all axes/channels.")
+            self.report({'ERROR'}, "No matching keyframes found on all selected channels.")
             return {'CANCELLED'}
+
         if mode_code == "EULER":
             unwrapped = unwrap_keyframe_values_euler(keyframes)
         else:
             unwrapped = unwrap_keyframe_values_quaternion(keyframes)
-        preserve_and_update_fcurve_points(fcu, unwrapped)
-        self.report({'INFO'}, f"{mode_code} curves continuity processed and handles preserved.")
+
+        preserve_and_update_fcurve_points(selected_fcurves, unwrapped)
+
+        self.report({'INFO'}, f"{mode_code} continuity applied on {len(selected_fcurves)} selected channel(s).")
         return {'FINISHED'}
 
 # ---------- Optional: Set Euler Operator ----------
@@ -172,7 +187,7 @@ class ROTATION_PT_continuity_panel(bpy.types.Panel):
         layout = self.layout
         col = layout.column(align=True)
         col.label(text="Preserve/correct multi-rotations (Euler or Quaternion):")
-        col.operator("graph.rotation_continuity", icon='CON_ROTLIKE')
+        col.operator("graph.rotation_continuity_partial", icon='CON_ROTLIKE')
         col.separator()
         col.label(text="Quick Rotation Mode Switch:")
         row = col.row(align=True)
@@ -182,7 +197,7 @@ class ROTATION_PT_continuity_panel(bpy.types.Panel):
 # ---------- Registration ----------
 
 classes = [
-    ROTATION_OT_preserve_continuity,
+    ROTATION_OT_preserve_continuity_partial,
     ROTATION_OT_set_euler_mode,
     ROTATION_PT_continuity_panel,
 ]
