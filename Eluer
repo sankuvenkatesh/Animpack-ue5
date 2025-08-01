@@ -1,10 +1,10 @@
 bl_info = {
-    "name": "Rotation Continuity (Euler and Quaternion, Partial Selection, Preserve Handles)",
-    "author": "Adapted by Perplexity (2025)",
-    "version": (1, 4),
+    "name": "Smart Euler Filter",
+    "author": "Venkatesh Sanku",
+    "version": (1, 5),
     "blender": (2, 80, 0),
     "location": "Graph Editor > Sidebar > Rotation Continuity Tab",
-    "description": "Unwraps or smooths selected rotation channels in Euler or Quaternion modes for continuity, preserving handle types and positions.",
+    "description": "Unwrap/smooth selected Euler or Quaternion rotation f-curves for continuity, preserving handles. Works with any number of selected channels.",
     "category": "Animation"
 }
 
@@ -27,33 +27,23 @@ def get_selected_rotation_fcurves(context, mode_code):
     if not obj or not obj.animation_data or not obj.animation_data.action:
         return None, "No animated object with keyframes selected."
     suffix = "rotation_euler" if mode_code == "EULER" else "rotation_quaternion"
-    expected_count = 3 if mode_code == "EULER" else 4
     all_fcurves = obj.animation_data.action.fcurves
-
-    # Get only selected fcurves that match suffix
     selected_fcurves = [fc for fc in all_fcurves if fc.select and fc.data_path.endswith(suffix)]
     if not selected_fcurves:
         return None, f"No selected {suffix} f-curves found."
-    # Sort by array_index for predictable order
     selected_fcurves.sort(key=lambda fc: fc.array_index)
-
-    # For quaternion mode: ideally all 4 channels selected for reliable continuity
-    if mode_code == "QUATERNION" and len(selected_fcurves) != expected_count:
-        return None, "Select all 4 quaternion channels (W, X, Y, Z) for continuity filtering."
-
     return selected_fcurves, None
 
 def get_fcurve_keyframe_map(fcurve):
     return {int(round(kp.co[0])): kp for kp in fcurve.keyframe_points}
 
 def collect_keyframes_with_handles(curves):
-    # Collect all unique frames that have keyframes in selected curves
     axis_keyframes = [get_fcurve_keyframe_map(fc) for fc in curves]
     frames = sorted({f for mapping in axis_keyframes for f in mapping})
     keyframe_info = []
     for f in frames:
         kps = [mapping.get(f) for mapping in axis_keyframes]
-        if all(kps):  # Only consider frames where all selected curves have keyframes
+        if all(kps):  # Only at frames where all selected curves have a key
             value = [kp.co[1] for kp in kps]
             handles = [{
                 'handle_left_type': kp.handle_left_type,
@@ -86,19 +76,30 @@ def unwrap_keyframe_values_euler(keyframes):
     return out
 
 def unwrap_keyframe_values_quaternion(keyframes):
+    # If fewer than 4 channels are selected, try to smooth each independently
     out = []
     prev = None
     for info in keyframes:
-        q = Quaternion(info['value'])
-        if prev is not None:
-            if prev.dot(q) < 0.0:
+        v = info['value']
+        # If 4 channels, interpret as quaternion
+        if len(v) == 4:
+            q = Quaternion(v)
+            if prev is not None and prev.dot(q) < 0.0:
                 q = -q
+            values = [q.w, q.x, q.y, q.z]
+            prev = Quaternion(q)
+        else:
+            # Partial quaternion: smooth each selected channel
+            values = v if prev is None else [
+                -v[i] if abs(v[i] + prev[i]) < abs(v[i] - prev[i]) else v[i]
+                for i in range(len(v))
+            ]
+            prev = values
         out.append({
             'frame': info['frame'],
-            'value': [q.w, q.x, q.y, q.z],
+            'value': values,
             'handles': info['handles'],
         })
-        prev = Quaternion(q)
     return out
 
 def preserve_and_update_fcurve_points(curves, keyframe_infos):
@@ -120,9 +121,9 @@ def preserve_and_update_fcurve_points(curves, keyframe_infos):
 # ---------- Main Operator ----------
 
 class ROTATION_OT_preserve_continuity_partial(bpy.types.Operator):
-    """Unwraps selected rotation channels for continuity. Supports any number of selected channels in Euler or Quaternion mode. Preserves handles."""
+    """Unwraps/smooths selected Euler or Quaternion rotation channels for continuity. Works for any number of selected channels. Handles are preserved."""
     bl_idname = "graph.rotation_continuity_partial"
-    bl_label = "Preserve Rotation Continuity (Partial Selection)"
+    bl_label = "Preserve Rotation Continuity"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
@@ -157,22 +158,7 @@ class ROTATION_OT_preserve_continuity_partial(bpy.types.Operator):
 
         preserve_and_update_fcurve_points(selected_fcurves, unwrapped)
 
-        self.report({'INFO'}, f"{mode_code} continuity applied on {len(selected_fcurves)} selected channel(s).")
-        return {'FINISHED'}
-
-# ---------- Optional: Set Euler Operator ----------
-
-class ROTATION_OT_set_euler_mode(bpy.types.Operator):
-    """Set active object's rotation mode to Euler XYZ."""
-    bl_idname = "object.set_euler_mode"
-    bl_label = "Set Euler XYZ Mode"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        obj = context.active_object
-        if obj and obj.rotation_mode != 'XYZ':
-            obj.rotation_mode = 'XYZ'
-        self.report({'INFO'}, "Object set to Euler XYZ rotation mode.")
+        self.report({'INFO'}, f"{mode_code} continuity applied to {len(selected_fcurves)} selected channel(s).")
         return {'FINISHED'}
 
 # ---------- Panel ----------
@@ -186,19 +172,14 @@ class ROTATION_PT_continuity_panel(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         col = layout.column(align=True)
-        col.label(text="Preserve/correct multi-rotations (Euler or Quaternion):")
+        col.label(text="Preserve/correct continuity (Euler or Quaternion):")
         col.operator("graph.rotation_continuity_partial", icon='CON_ROTLIKE')
-        col.separator()
-        col.label(text="Quick Rotation Mode Switch:")
-        row = col.row(align=True)
-        row.operator("object.set_euler_mode", icon='DRIVER_TRANSFORM')
         col.label(text="Handles/tangents are always preserved.")
 
 # ---------- Registration ----------
 
 classes = [
     ROTATION_OT_preserve_continuity_partial,
-    ROTATION_OT_set_euler_mode,
     ROTATION_PT_continuity_panel,
 ]
 
