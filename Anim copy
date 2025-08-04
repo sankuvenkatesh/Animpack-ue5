@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Copy & Mirror Pose",
     "author": "Venkatesh sanku",
-    "version": (1, 0),
+    "version": (1, 1),
     "blender": (2, 80, 0),
     "location": "View3D > Sidebar > Venky Anim Toolz",
-    "description": "Copy and mirror pose for armature objects",
+    "description": "Copy, mirror, and reset pose for armature objects",
     "category": "Animation"
 }
 
@@ -18,6 +18,14 @@ def paste_pose(context):
 
 def paste_mirror_pose(context):
     bpy.ops.pose.paste(flipped=True)
+
+def reset_pose(context):
+    for bone in context.active_object.pose.bones:
+        bone.location = (0.0, 0.0, 0.0)
+        bone.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
+        bone.rotation_axis_angle = (0.0, 0.0, 1.0, 0.0)
+        bone.rotation_euler = (0.0, 0.0, 0.0)
+        bone.scale = (1.0, 1.0, 1.0)
 
 class ANIM_OT_CopyPose(bpy.types.Operator):
     bl_idname = "anim.copy_pose_custom"
@@ -43,6 +51,15 @@ class ANIM_OT_PasteMirrorPose(bpy.types.Operator):
         self.report({'INFO'}, "Mirrored (Flipped) Pose")
         return {'FINISHED'}
 
+class ANIM_OT_ResetPose(bpy.types.Operator):
+    bl_idname = "anim.reset_pose_custom"
+    bl_label = "Reset Pose"
+    bl_description = "Reset selected bones to their rest pose"
+    def execute(self, context):
+        reset_pose(context)
+        self.report({'INFO'}, "Reset Bones Pose")
+        return {'FINISHED'}
+
 class ANIM_PT_ToolsPanel(bpy.types.Panel):
     bl_label = "Copy & Mirror Pose"
     bl_idname = "ANIM_PT_tools_panel"
@@ -59,11 +76,14 @@ class ANIM_PT_ToolsPanel(bpy.types.Panel):
         row.operator("anim.paste_pose_custom")
         row = layout.row()
         row.operator("anim.paste_mirror_pose_custom")
+        row = layout.row()
+        row.operator("anim.reset_pose_custom")    # Reset Pose Button
 
 classes = (
     ANIM_OT_CopyPose,
     ANIM_OT_PastePose,
     ANIM_OT_PasteMirrorPose,
+    ANIM_OT_ResetPose,
     ANIM_PT_ToolsPanel,
 )
 
