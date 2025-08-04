@@ -1,36 +1,14 @@
 bl_info = {
     "name": "Copy & Mirror Pose",
-    "author": "Venkatesh sanku, UI+Image: Upgrade",
+    "author": "Venkatesh sanku, UI improvements by AI",
     "version": (1, 2),
     "blender": (2, 80, 0),
     "location": "View3D > Sidebar > Venky Anim Toolz",
-    "description": "Copy, mirror, and reset pose for armature objects with image buttons",
+    "description": "Copy, mirror, and reset pose for armature objects with improved UI",
     "category": "Animation"
 }
 
 import bpy
-import os
-
-# Place your PNG icons in this folder and update the path
-icons_dir = os.path.join(os.path.dirname(__file__), "icons")
-
-custom_icons = None
-
-def load_icons():
-    import bpy.utils.previews
-    pcoll = bpy.utils.previews.new()
-    for icon_name in ["copy", "paste", "mirror", "reset"]:
-        filepath = os.path.join(icons_dir, f"{icon_name}.png")
-        if os.path.exists(filepath):
-            pcoll.load(icon_name, filepath, 'IMAGE')
-    return pcoll
-
-def unload_icons():
-    global custom_icons
-    if custom_icons is not None:
-        import bpy.utils.previews
-        bpy.utils.previews.remove(custom_icons)
-        custom_icons = None
 
 def copy_pose(context):
     bpy.ops.pose.copy()
@@ -42,16 +20,22 @@ def paste_mirror_pose(context):
     bpy.ops.pose.paste(flipped=True)
 
 def reset_pose(context):
-    for bone in context.active_object.pose.bones:
-        bone.location = (0.0, 0.0, 0.0)
-        bone.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
-        bone.rotation_axis_angle = (0.0, 0.0, 1.0, 0.0)
-        bone.rotation_euler = (0.0, 0.0, 0.0)
-        bone.scale = (1.0, 1.0, 1.0)
+    ob = context.active_object
+    if ob and ob.type == 'ARMATURE' and ob.mode == 'POSE':
+        for bone in ob.pose.bones:
+            bone.location = (0.0, 0.0, 0.0)
+            bone.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
+            bone.rotation_axis_angle = (0.0, 0.0, 1.0, 0.0)
+            bone.rotation_euler = (0.0, 0.0, 0.0)
+            bone.scale = (1.0, 1.0, 1.0)
+    else:
+        return {'CANCELLED'}
+    return {'FINISHED'}
 
 class ANIM_OT_CopyPose(bpy.types.Operator):
     bl_idname = "anim.copy_pose_custom"
     bl_label = "Copy Pose"
+    bl_description = "Copy selected bones' pose"
     def execute(self, context):
         copy_pose(context)
         self.report({'INFO'}, "Copied Pose")
@@ -60,6 +44,7 @@ class ANIM_OT_CopyPose(bpy.types.Operator):
 class ANIM_OT_PastePose(bpy.types.Operator):
     bl_idname = "anim.paste_pose_custom"
     bl_label = "Paste Pose"
+    bl_description = "Paste pose to selected bones"
     def execute(self, context):
         paste_pose(context)
         self.report({'INFO'}, "Pasted Pose")
@@ -68,6 +53,7 @@ class ANIM_OT_PastePose(bpy.types.Operator):
 class ANIM_OT_PasteMirrorPose(bpy.types.Operator):
     bl_idname = "anim.paste_mirror_pose_custom"
     bl_label = "Mirror Pose"
+    bl_description = "Paste mirrored pose to selected bones"
     def execute(self, context):
         paste_mirror_pose(context)
         self.report({'INFO'}, "Mirrored (Flipped) Pose")
@@ -76,9 +62,10 @@ class ANIM_OT_PasteMirrorPose(bpy.types.Operator):
 class ANIM_OT_ResetPose(bpy.types.Operator):
     bl_idname = "anim.reset_pose_custom"
     bl_label = "Reset Pose"
+    bl_description = "Reset all pose bones to rest pose"
     def execute(self, context):
         reset_pose(context)
-        self.report({'INFO'}, "Reset Bones Pose")
+        self.report({'INFO'}, "Bones Reset to Rest Pose")
         return {'FINISHED'}
 
 class ANIM_PT_ToolsPanel(bpy.types.Panel):
@@ -90,31 +77,18 @@ class ANIM_PT_ToolsPanel(bpy.types.Panel):
 
     @classmethod
     def poll(cls, context):
-        return context.object and context.object.type == 'ARMATURE' and context.mode == 'POSE'
+        ob = context.active_object
+        return ob is not None and ob.type == 'ARMATURE' and context.mode == 'POSE'
 
     def draw(self, context):
         layout = self.layout
-        global custom_icons
-
-        if custom_icons is None:
-            layout.label(text="Icons not loaded, using built-in icons.")
-            # Fallback to standard icons if previews not loaded
-            row = layout.row(align=True)
-            row.operator("anim.copy_pose_custom", text="Copy", icon='COPYDOWN')
-            row.operator("anim.paste_pose_custom", text="Paste", icon='PASTEDOWN')
-            row = layout.row(align=True)
-            row.operator("anim.paste_mirror_pose_custom", text="Mirror Pose", icon='ARROW_LEFTRIGHT')
-            row = layout.row(align=True)
-            row.operator("anim.reset_pose_custom", text="Reset", icon='LOOP_BACK')
-        else:
-            # If previews loaded, show as icon buttons
-            row = layout.row(align=True)
-            row.operator("anim.copy_pose_custom", text="", icon_value=custom_icons["copy"].icon_id)
-            row.operator("anim.paste_pose_custom", text="", icon_value=custom_icons["paste"].icon_id)
-            row = layout.row(align=True)
-            row.operator("anim.paste_mirror_pose_custom", text="", icon_value=custom_icons["mirror"].icon_id)
-            row = layout.row(align=True)
-            row.operator("anim.reset_pose_custom", text="", icon_value=custom_icons["reset"].icon_id)
+        col = layout.column(align=True)
+        row = col.row(align=True)
+        row.operator("anim.copy_pose_custom", text="Copy", icon='COPYDOWN')
+        row.operator("anim.paste_pose_custom", text="Paste", icon='PASTEDOWN')
+        row = col.row(align=True)
+        row.operator("anim.paste_mirror_pose_custom", text="Mirror", icon='ARROW_LEFTRIGHT')
+        row.operator("anim.reset_pose_custom", text="Reset", icon='LOOP_BACK')
 
 classes = (
     ANIM_OT_CopyPose,
@@ -125,19 +99,12 @@ classes = (
 )
 
 def register():
-    global custom_icons
     for cls in classes:
         bpy.utils.register_class(cls)
-    try:
-        custom_icons = load_icons()
-    except Exception:
-        custom_icons = None
 
 def unregister():
-    global custom_icons
     for cls in classes:
         bpy.utils.unregister_class(cls)
-    unload_icons()
 
 if __name__ == "__main__":
     register()
