@@ -5,19 +5,17 @@ def smooth_selected_keyframes(fcurve, iterations, strength, sensitivity, preserv
     Smooth only the selected keyframes in the given F-Curve by iteratively averaging keyframe points values.
 
     Parameters:
-    - fcurve: The F-Curve to smooth.
     - iterations: Number of smoothing passes.
     - strength: Smoothing intensity (0 to 1), controls how much each keyframe moves toward neighbor average.
-    - sensitivity: Sensitivity falloff for smoothing (0 to 1), modulates smoothing sensitivity around keyframes.
+    - sensitivity: Sensitivity falloff for smoothing (0 to 1), reversed effect:
+                  higher sensitivity means less smoothing (so it reduces intensity).
     - preserve_ends: If True, do not smooth first and last selected keyframe.
     """
-
     keyframes = fcurve.keyframe_points
     n = len(keyframes)
     if n < 3:
         return  # Not enough keyframes to smooth meaningfully
 
-    # Indices of selected keyframes
     selected_indices = [i for i, kp in enumerate(keyframes) if kp.select_control_point]
 
     if len(selected_indices) < 3:
@@ -25,13 +23,12 @@ def smooth_selected_keyframes(fcurve, iterations, strength, sensitivity, preserv
 
     values = [kp.co[1] for kp in keyframes]
 
-    # Cubic easing for strength slider to reduce sensitivity on low values
     strength_factor = strength ** 3
-    smooth_factor = sensitivity  # renamed from smoothness
+    # Reverse sensitivity effect: higher sensitivity reduces smoothing weight
+    reversed_sensitivity = 1.0 - sensitivity
 
     for _ in range(iterations):
         new_values = values[:]
-        # Iterate over selected keys except the ends when preserve_ends is enabled
         for idx_pos in range(1, len(selected_indices) - 1):
             i = selected_indices[idx_pos]
 
@@ -50,15 +47,13 @@ def smooth_selected_keyframes(fcurve, iterations, strength, sensitivity, preserv
             diff = abs(center - average)
             base = abs(center) if center != 0 else 1.0
 
-            # Weight modulated by strength and sensitivity, creating nuanced smoothing
-            weight = strength_factor * (1 - smooth_factor + smooth_factor * (diff / base))
+            # Weight modulated by strength and reversed sensitivity
+            weight = strength_factor * (1 - reversed_sensitivity + reversed_sensitivity * (diff / base))
 
-            # Blend current value toward calculated average by weight
             new_values[i] = center * (1 - weight) + average * weight
 
         values = new_values
 
-    # Update only the selected keyframes to new smoothed values
     for i in selected_indices:
         keyframes[i].co[1] = values[i]
 
@@ -78,7 +73,7 @@ class CurveSmoothProperties(bpy.types.PropertyGroup):
     )
     sensitivity: bpy.props.FloatProperty(
         name="Sensitivity",
-        description="Smoothing sensitivity falloff",
+        description="Controls smoothing sensitivity falloff (reversed effect)",
         default=0.5, min=0.0, max=1.0
     )
     preserve_ends: bpy.props.BoolProperty(
@@ -86,6 +81,12 @@ class CurveSmoothProperties(bpy.types.PropertyGroup):
         description="Do not smooth the first and last selected keyframes",
         default=True
     )
+
+    def reset(self):
+        self.iterations = 5
+        self.strength = 0.5
+        self.sensitivity = 0.5
+        self.preserve_ends = True
 
 
 class CurveSmoothOperator(bpy.types.Operator):
@@ -123,6 +124,17 @@ class CurveSmoothOperator(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class ResetValuesOperator(bpy.types.Operator):
+    """Reset smoothing parameters to default values"""
+    bl_idname = "graph.reset_smooth_values"
+    bl_label = "Reset Values"
+
+    def execute(self, context):
+        context.scene.curve_smooth_settings.reset()
+        self.report({'INFO'}, "Smoothing parameters reset to default")
+        return {'FINISHED'}
+
+
 class CurveSmoothPanel(bpy.types.Panel):
     """Panel in Graph Editor for Curve Smoothing"""
     bl_label = "Curve Smooth Filter"
@@ -135,22 +147,27 @@ class CurveSmoothPanel(bpy.types.Panel):
         settings = context.scene.curve_smooth_settings
 
         layout.label(text="Adjust smoothing parameters and apply to selected keys:")
-        layout.prop(settings, "iterations")
-        layout.prop(settings, "strength")
-        layout.prop(settings, "sensitivity")
-        layout.prop(settings, "preserve_ends")
-        layout.operator("graph.smooth_selected_keyframes", text="Apply Smooth")
+        layout.prop(settings, "iterations", icon='FILE_TICK')
+        layout.prop(settings, "strength", icon='GREASEPENCIL')
+        layout.prop(settings, "sensitivity", icon='SNAP_INC')
+        layout.prop(settings, "preserve_ends", icon='LOCKED')
+
+        row = layout.row()
+        row.operator("graph.smooth_selected_keyframes", text="Apply Smooth", icon='MOD_SMOOTH')
+        row.operator("graph.reset_smooth_values", text="Reset Values", icon='LOOP_BACK')
 
 
 def register():
     bpy.utils.register_class(CurveSmoothProperties)
     bpy.types.Scene.curve_smooth_settings = bpy.props.PointerProperty(type=CurveSmoothProperties)
     bpy.utils.register_class(CurveSmoothOperator)
+    bpy.utils.register_class(ResetValuesOperator)
     bpy.utils.register_class(CurveSmoothPanel)
 
 
 def unregister():
     bpy.utils.unregister_class(CurveSmoothPanel)
+    bpy.utils.unregister_class(ResetValuesOperator)
     bpy.utils.unregister_class(CurveSmoothOperator)
     del bpy.types.Scene.curve_smooth_settings
     bpy.utils.unregister_class(CurveSmoothProperties)
