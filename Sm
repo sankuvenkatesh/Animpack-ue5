@@ -143,9 +143,6 @@ def preserve_and_update_fcurve_points_any(curves, keyframe_infos):
         fc.update()
 
 def ensure_rotation_keyframes(context, entity, mode_code, rna_path_prefix):
-    '''
-    If rotation fcurves do not exist, create them by inserting a keyframe for current rotation type.
-    '''
     frame = context.scene.frame_current
     if rna_path_prefix:  # It's a bone
         data_path = 'rotation_quaternion' if mode_code == "QUATERNION" else 'rotation_euler'
@@ -178,16 +175,21 @@ class ROTATION_OT_preserve_continuity_partial(bpy.types.Operator):
             self.report({'ERROR'}, f"Unsupported rotation mode: {rot_mode}")
             return {'CANCELLED'}
 
-        rotation_fcurves, err = get_rotation_fcurves(mode_code, all_fcurves, rna_path_prefix)
-        if rotation_fcurves is None:
-            # Try to insert at least one keyframe to create fcurves, then check again
+        rotation_fcurves_all, err = get_rotation_fcurves(mode_code, all_fcurves, rna_path_prefix)
+        if rotation_fcurves_all is None:
             ensure_rotation_keyframes(context, entity, mode_code, rna_path_prefix)
-            # Refresh references
             all_fcurves = obj.animation_data.action.fcurves
-            rotation_fcurves, err = get_rotation_fcurves(mode_code, all_fcurves, rna_path_prefix)
-            if rotation_fcurves is None:
+            rotation_fcurves_all, err = get_rotation_fcurves(mode_code, all_fcurves, rna_path_prefix)
+            if rotation_fcurves_all is None:
                 self.report({'ERROR'}, err)
                 return {'CANCELLED'}
+
+        # Filter fcurves: use only selected if any selected
+        selected_fcurves = [fc for fc in rotation_fcurves_all if fc.select]
+        if selected_fcurves:
+            rotation_fcurves = selected_fcurves
+        else:
+            rotation_fcurves = rotation_fcurves_all
 
         keyframes = collect_keyframes_with_handles_any(rotation_fcurves)
         if not keyframes:
@@ -200,7 +202,8 @@ class ROTATION_OT_preserve_continuity_partial(bpy.types.Operator):
         preserve_and_update_fcurve_points_any(rotation_fcurves, unwrapped)
         if context.area:
             context.area.tag_redraw()
-        self.report({'INFO'}, f"{mode_code} continuity applied to {len(rotation_fcurves)} channel(s) of {'bone' if rna_path_prefix else 'object'} (selected or not), over all keyframes.")
+        self.report({'INFO'}, f"{mode_code} continuity applied to {len(rotation_fcurves)} channel(s) of {'bone' if rna_path_prefix else 'object'} "
+                              f"({ 'selected only' if selected_fcurves else 'all channels'}), over all keyframes.")
         return {'FINISHED'}
 
 class ROTATION_PT_continuity_panel(bpy.types.Panel):
