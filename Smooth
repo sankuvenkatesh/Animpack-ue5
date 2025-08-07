@@ -1,113 +1,117 @@
-bl_info = {
-    "name": "Smart Curve Filters",
-    "blender": (3, 0, 0),  # Adjust for your Blender version
-    "category": "Animation",
-    "description": "Smart animation curve filters (smooth, intensity, interpolation) using quaternion math.",
-}
-
 import bpy
-from mathutils import Quaternion
+import math
 
-class CurveFilterSettings(bpy.types.PropertyGroup):
-    smooth_steps: bpy.props.IntProperty(
-        name="Smooth Steps", default=3, min=1, max=10,
-        description="Number of smoothing iterations"
-    )
-    intensity: bpy.props.FloatProperty(
-        name="Intensity", default=1.0, min=0.0, max=1.0,
-        description="Blend between original and smoothed"
-    )
-    interpolate: bpy.props.FloatProperty(
-        name="Interpolation", default=0.5, min=0.0, max=1.0,
-        description="Interpolation (future expansion)"
-    )
+def smooth_fcurve(fcurve, iterations, strength, smoothness, preserve_ends=True):
+    """
+    Smooth the given F-Curve by iteratively averaging keyframe points values.
 
-class CURVE_OT_apply_filters(bpy.types.Operator):
-    bl_idname = "curve.apply_filters"
-    bl_label = "Apply Smart Curve Filters"
+    Parameters:
+    - fcurve: The F-Curve to smooth.
+    - iterations: How many times smoothing is applied (more = smoother).
+    - strength: Intensity of smoothing (0..1), non-linearly mapped.
+    - smoothness: Controls falloff sensitivity around each keyframe (0..1).
+    - preserve_ends: Whether to keep first/last keyframes untouched.
+    """
+
+    keyframes = fcurve.keyframe_points
+    n = len(keyframes)
+    if n < 3:
+        return  # Need at least 3 points to smooth meaningfully
+
+    # Extract Y-values of keyframes
+    values = [kp.co[1] for kp in keyframes]
+
+    # Nonlinear smoothing factors for better user control
+    strength_factor = strength ** 3
+    smoothness_factor = smoothness ** 2
+
+    for _ in range(iterations):
+        new_values = values[:]
+        for i in range(1, n - 1):
+            if preserve_ends and (i == 0 or i == n - 1):
+                continue
+
+            left = values[i - 1]
+            center = values[i]
+            right = values[i + 1]
+
+            # Calculate weighted average with smoothness acting as a falloff factor
+            weighted_average = (left + center + right) / 3
+
+            # Interpolate between original and average by strength adjusted by smoothness proximity
+            # Smoothness modulates sensitivity around center value (can be enhanced further)
+            weight = strength_factor * (1.0 - smoothness_factor)
+            new_values[i] = center * (1 - weight) + weighted_average * weight
+
+        values = new_values
+
+    # Update fcurve keyframe values after smoothing
+    for i, kp in enumerate(keyframes):
+        kp.co[1] = values[i]
+
+    fcurve.update()  # Refresh the curve data
+
+
+class CurveSmoothOperator(bpy.types.Operator):
+    """Smooth Selected F-Curves in Graph Editor"""
+    bl_idname = "graph.smooth_fcurves"
+    bl_label = "Smooth F-Curves"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    iterations: bpy.props.IntProperty(name="Iterations", default=5, min=1, max=50)
+    strength: bpy.props.FloatProperty(name="Strength", default=0.5, min=0.0, max=1.0, description="Smoothing intensity")
+    smoothness: bpy.props.FloatProperty(name="Smoothness", default=0.5, min=0.0, max=1.0,
+                                        description="Sensitivity falloff of smoothing")
+    preserve_ends: bpy.props.BoolProperty(name="Preserve Ends", default=True,
+                                          description="Prevent smoothing of first and last keyframes")
 
     def execute(self, context):
-        settings = context.scene.curve_filter_settings
-        obj = context.object
-        if not obj or not obj.animation_data:
-            self.report({"ERROR"}, "Active object has no animation data")
+        # Get selected editable fcurves in the current Graph Editor area
+        fcurves = context.selected_editable_fcurves
+        if not fcurves:
+            self.report({'WARNING'}, "No editable F-Curves selected")
             return {'CANCELLED'}
 
-        fcurves = obj.animation_data.action.fcurves
-        rot_fcurves = [f for f in fcurves if f.data_path.endswith("rotation_quaternion")]
-        if len(rot_fcurves) < 4:
-            self.report({"ERROR"}, "Need 4 quaternion rotation fcurves")
-            return {'CANCELLED'}
-        
-        # Gather all unique frame numbers and corresponding quaternions
-        keyframes = {}
-        for fcurve in rot_fcurves:
-            idx = fcurve.array_index
-            for kp in fcurve.keyframe_points:
-                frame = kp.co.x
-                val = kp.co.y
-                if frame not in keyframes:
-                    keyframes[frame] = [0, 0, 0, 0]
-                keyframes[frame][idx] = val
+        # Apply smoothing to each selected F-Curve
+        for fcurve in fcurves:
+            smooth_fcurve(fcurve, self.iterations, self.strength, self.smoothness, self.preserve_ends)
 
-        frames_sorted = sorted(keyframes)
-        quat_keys = [Quaternion(keyframes[f]) for f in frames_sorted]
-
-        # Smoothing function (moving average for quaternions)
-        def smooth_quaternions(quats, steps):
-            smoothed = quats[:]
-            for _ in range(steps):
-                new = smoothed[:]
-                for i in range(1, len(smoothed) - 1):
-                    left = smoothed[i - 1]
-                    mid = smoothed[i]
-                    right = smoothed[i + 1]
-                    avg = left.slerp(mid, 0.5).slerp(right, 0.5)
-                    new[i] = avg
-                smoothed = new
-            return smoothed
-
-        smoothed_quats = smooth_quaternions(quat_keys, settings.smooth_steps)
-        # Blend original & smoothed by intensity
-        blended_quats = [
-            orig.slerp(smooth, settings.intensity)
-            for orig, smooth in zip(quat_keys, smoothed_quats)
-        ]
-
-        # Write back to fcurves
-        for i, fcurve in enumerate(rot_fcurves):
-            fcurve.keyframe_points.clear()
-        for frame, quat in zip(frames_sorted, blended_quats):
-            for i, fcurve in enumerate(rot_fcurves):
-                fcurve.keyframe_points.insert(frame, quat[i])
-
-        self.report({"INFO"}, "Smart curve filters applied!")
+        self.report({'INFO'}, f"Smoothed {len(fcurves)} F-Curve(s)")
         return {'FINISHED'}
 
-class CURVE_PT_filter_panel(bpy.types.Panel):
-    bl_label = "Smart Curve Filters"
-    bl_idname = "CURVE_PT_filter_panel"
+
+class CurveSmoothPanel(bpy.types.Panel):
+    """Panel in the Graph Editor for Curve Smoothing"""
+    bl_label = "Curve Smooth Filter"
     bl_space_type = 'GRAPH_EDITOR'
     bl_region_type = 'UI'
-    bl_category = 'Filters'
+    bl_category = "Smooth Tools"
 
     def draw(self, context):
         layout = self.layout
-        s = context.scene.curve_filter_settings
-        layout.prop(s, "smooth_steps")
-        layout.prop(s, "intensity")
-        layout.prop(s, "interpolate")
-        layout.operator("curve.apply_filters", icon='MOD_SMOOTH')
 
-classes = [CurveFilterSettings, CURVE_OT_apply_filters, CURVE_PT_filter_panel]
+        # Add descriptive labels
+        layout.label(text="Adjust smoothing parameters and apply:")
+
+        # Create operator with adjustable properties
+        op = layout.operator("graph.smooth_fcurves", text="Apply Smooth")
+
+        # Show sliders for iterations, strength, smoothness
+        layout.prop(op, "iterations")
+        layout.prop(op, "strength")
+        layout.prop(op, "smoothness")
+        layout.prop(op, "preserve_ends")
+
 
 def register():
-    for cls in classes: bpy.utils.register_class(cls)
-    bpy.types.Scene.curve_filter_settings = bpy.props.PointerProperty(type=CurveFilterSettings)
+    bpy.utils.register_class(CurveSmoothOperator)
+    bpy.utils.register_class(CurveSmoothPanel)
+
 
 def unregister():
-    for cls in reversed(classes): bpy.utils.unregister_class(cls)
-    del bpy.types.Scene.curve_filter_settings
+    bpy.utils.unregister_class(CurveSmoothOperator)
+    bpy.utils.unregister_class(CurveSmoothPanel)
+
 
 if __name__ == "__main__":
     register()
