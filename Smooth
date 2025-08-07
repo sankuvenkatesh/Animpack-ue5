@@ -1,54 +1,69 @@
 import bpy
 
-def smooth_fcurve(fcurve, iterations, strength, smoothness, preserve_ends=True):
+def smooth_selected_keyframes(fcurve, iterations, strength, sensitivity, preserve_ends=True):
     """
-    Smooth the given F-Curve by iteratively averaging keyframe points values,
-    with corrected use of strength and smoothness parameters.
+    Smooth only the selected keyframes in the given F-Curve by iteratively averaging keyframe points values.
 
     Parameters:
-    - iterations (int): Number of smoothing passes.
-    - strength (float): Intensity of smoothing (0.0 to 1.0), controls how much each keyframe moves toward neighbor average.
-    - smoothness (float): Falloff factor (0.0 to 1.0), modulates smoothing sensitivity around keyframes.
-    - preserve_ends (bool): If True, first and last keyframes are unchanged.
+    - fcurve: The F-Curve to smooth.
+    - iterations: Number of smoothing passes.
+    - strength: Smoothing intensity (0 to 1), controls how much each keyframe moves toward neighbor average.
+    - sensitivity: Sensitivity falloff for smoothing (0 to 1), modulates smoothing sensitivity around keyframes.
+    - preserve_ends: If True, do not smooth first and last selected keyframe.
     """
 
     keyframes = fcurve.keyframe_points
     n = len(keyframes)
     if n < 3:
-        return  # Cannot smooth fewer than 3 keyframes meaningfully
+        return  # Not enough keyframes to smooth meaningfully
+
+    # Indices of selected keyframes
+    selected_indices = [i for i, kp in enumerate(keyframes) if kp.select_control_point]
+
+    if len(selected_indices) < 3:
+        return  # Need at least 3 selected keys to smooth effectively
 
     values = [kp.co[1] for kp in keyframes]
 
-    strength_factor = strength ** 3  # Cubic easing for strength slider
-    smooth_factor = smoothness
+    # Cubic easing for strength slider to reduce sensitivity on low values
+    strength_factor = strength ** 3
+    smooth_factor = sensitivity  # renamed from smoothness
 
     for _ in range(iterations):
         new_values = values[:]
-        for i in range(1, n - 1):
-            if preserve_ends and (i == 0 or i == n - 1):
+        # Iterate over selected keys except the ends when preserve_ends is enabled
+        for idx_pos in range(1, len(selected_indices) - 1):
+            i = selected_indices[idx_pos]
+
+            if preserve_ends and (idx_pos == 0 or idx_pos == len(selected_indices) - 1):
                 continue
 
-            left = values[i - 1]
+            left_i = selected_indices[idx_pos - 1]
+            right_i = selected_indices[idx_pos + 1]
+
+            left = values[left_i]
             center = values[i]
-            right = values[i + 1]
+            right = values[right_i]
 
             average = (left + center + right) / 3
 
-            # Adjust weight based on smoothness and difference magnitude
             diff = abs(center - average)
             base = abs(center) if center != 0 else 1.0
+
+            # Weight modulated by strength and sensitivity, creating nuanced smoothing
             weight = strength_factor * (1 - smooth_factor + smooth_factor * (diff / base))
 
-            # Apply weighted smoothing blend
+            # Blend current value toward calculated average by weight
             new_values[i] = center * (1 - weight) + average * weight
 
         values = new_values
 
-    # Update the F-Curve keyframe values
-    for i, kp in enumerate(keyframes):
-        kp.co[1] = values[i]
+    # Update only the selected keyframes to new smoothed values
+    for i in selected_indices:
+        keyframes[i].co[1] = values[i]
 
     fcurve.update()
+
 
 class CurveSmoothProperties(bpy.types.PropertyGroup):
     iterations: bpy.props.IntProperty(
@@ -61,21 +76,22 @@ class CurveSmoothProperties(bpy.types.PropertyGroup):
         description="Smoothing intensity",
         default=0.5, min=0.0, max=1.0
     )
-    smoothness: bpy.props.FloatProperty(
-        name="Smoothness",
+    sensitivity: bpy.props.FloatProperty(
+        name="Sensitivity",
         description="Smoothing sensitivity falloff",
         default=0.5, min=0.0, max=1.0
     )
     preserve_ends: bpy.props.BoolProperty(
         name="Preserve Ends",
-        description="Do not smooth the first and last keyframes",
+        description="Do not smooth the first and last selected keyframes",
         default=True
     )
 
+
 class CurveSmoothOperator(bpy.types.Operator):
-    """Smooth Selected F-Curves in Graph Editor"""
-    bl_idname = "graph.smooth_fcurves"
-    bl_label = "Smooth F-Curves"
+    """Smooth Selected Keyframes of Selected F-Curves in Graph Editor"""
+    bl_idname = "graph.smooth_selected_keyframes"
+    bl_label = "Smooth Selected Keyframes"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
@@ -85,16 +101,27 @@ class CurveSmoothOperator(bpy.types.Operator):
             self.report({'WARNING'}, "No editable F-Curves selected")
             return {'CANCELLED'}
 
+        smoothed_count = 0
+
         for fcurve in fcurves:
-            smooth_fcurve(
-                fcurve,
-                settings.iterations,
-                settings.strength,
-                settings.smoothness,
-                settings.preserve_ends
-            )
-        self.report({'INFO'}, f"Smoothed {len(fcurves)} F-Curve(s)")
+            selected_keys = [kp for kp in fcurve.keyframe_points if kp.select_control_point]
+            if len(selected_keys) >= 3:
+                smooth_selected_keyframes(
+                    fcurve,
+                    settings.iterations,
+                    settings.strength,
+                    settings.sensitivity,
+                    settings.preserve_ends
+                )
+                smoothed_count += 1
+
+        if smoothed_count == 0:
+            self.report({'WARNING'}, "Not enough selected keyframes to smooth")
+            return {'CANCELLED'}
+
+        self.report({'INFO'}, f"Smoothed selected keys in {smoothed_count} F-Curve(s)")
         return {'FINISHED'}
+
 
 class CurveSmoothPanel(bpy.types.Panel):
     """Panel in Graph Editor for Curve Smoothing"""
@@ -107,12 +134,13 @@ class CurveSmoothPanel(bpy.types.Panel):
         layout = self.layout
         settings = context.scene.curve_smooth_settings
 
-        layout.label(text="Adjust smoothing parameters and apply:")
+        layout.label(text="Adjust smoothing parameters and apply to selected keys:")
         layout.prop(settings, "iterations")
         layout.prop(settings, "strength")
-        layout.prop(settings, "smoothness")
+        layout.prop(settings, "sensitivity")
         layout.prop(settings, "preserve_ends")
-        layout.operator("graph.smooth_fcurves", text="Apply Smooth")
+        layout.operator("graph.smooth_selected_keyframes", text="Apply Smooth")
+
 
 def register():
     bpy.utils.register_class(CurveSmoothProperties)
@@ -120,11 +148,13 @@ def register():
     bpy.utils.register_class(CurveSmoothOperator)
     bpy.utils.register_class(CurveSmoothPanel)
 
+
 def unregister():
     bpy.utils.unregister_class(CurveSmoothPanel)
     bpy.utils.unregister_class(CurveSmoothOperator)
     del bpy.types.Scene.curve_smooth_settings
     bpy.utils.unregister_class(CurveSmoothProperties)
+
 
 if __name__ == "__main__":
     register()
