@@ -4,7 +4,10 @@ bl_info = {
     "version": (2, 0),
     "blender": (2, 80, 0),
     "location": "Graph Editor > Sidebar > Rotation Continuity Tab",
-    "description": "Unwrap/smooth Euler or Quaternion rotation f-curves for objects/pose bones, preserving handles. Works with all channels and handles all matching keyframes.",
+    "description": (
+        "Unwrap/smooth Euler or Quaternion rotation f-curves for objects/pose bones, preserving handles. "
+        "Works with all channels and handles all matching keyframes."
+    ),
     "category": "Animation"
 }
 
@@ -182,7 +185,7 @@ class ROTATION_PT_continuity_panel(bpy.types.Panel):
     bl_label = "Rotation Continuity"
     bl_space_type = 'GRAPH_EDITOR'
     bl_region_type = 'UI'
-    bl_category = "Rotation"
+    bl_category = "Rotation Continuity"  # For clarity, matches UI
 
     def draw(self, context):
         layout = self.layout
@@ -199,8 +202,10 @@ classes = [
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
+
 def unregister():
-    for cls in classes:
+    for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
+
 if __name__ == "__main__":
     register()
