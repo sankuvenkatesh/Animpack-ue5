@@ -24,8 +24,7 @@ def smooth_selected_keyframes(fcurve, iterations, strength, sensitivity, preserv
     values = [kp.co[1] for kp in keyframes]
 
     strength_factor = strength ** 3
-    # Reverse sensitivity effect: higher sensitivity reduces smoothing weight
-    reversed_sensitivity = 1.0 - sensitivity
+    reversed_sensitivity = 1.0 - sensitivity  # Reverse sensitivity effect
 
     for _ in range(iterations):
         new_values = values[:]
@@ -47,7 +46,6 @@ def smooth_selected_keyframes(fcurve, iterations, strength, sensitivity, preserv
             diff = abs(center - average)
             base = abs(center) if center != 0 else 1.0
 
-            # Weight modulated by strength and reversed sensitivity
             weight = strength_factor * (1 - reversed_sensitivity + reversed_sensitivity * (diff / base))
 
             new_values[i] = center * (1 - weight) + average * weight
@@ -140,13 +138,14 @@ class CurveSmoothPanel(bpy.types.Panel):
     bl_label = "Curve Smooth Filter"
     bl_space_type = 'GRAPH_EDITOR'
     bl_region_type = 'UI'
-    bl_category = "Smooth Tools"
+    bl_category = "SmoothTools"  # No spaces for tab name
 
     def draw(self, context):
         layout = self.layout
         settings = context.scene.curve_smooth_settings
 
         layout.label(text="Adjust smoothing parameters and apply to selected keys:")
+
         layout.prop(settings, "iterations", icon='FILE_TICK')
         layout.prop(settings, "strength", icon='GREASEPENCIL')
         layout.prop(settings, "sensitivity", icon='SNAP_INC')
