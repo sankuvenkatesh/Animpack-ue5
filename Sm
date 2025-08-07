@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Smart Euler Filter",
-    "author": "Venkatesh Sanku, plus matching keyframes extension",
-    "version": (1, 9),
+    "author": "Venkatesh Sanku, plus universal FCurve & keyframe extension",
+    "version": (2, 0),
     "blender": (2, 80, 0),
     "location": "Graph Editor > Sidebar > Rotation Continuity Tab",
-    "description": "Unwrap/smooth selected Euler or Quaternion rotation f-curves for objects or pose bones, preserving handles. Works with any number of selected channels, and on all matching keyframes.",
+    "description": "Unwrap/smooth Euler or Quaternion rotation f-curves for objects/pose bones, preserving handles. Works with all channels and handles all matching keyframes.",
     "category": "Animation"
 }
 
@@ -30,33 +30,35 @@ def get_selection_info(context):
     else:
         return None, None, None
 
-def get_selected_rotation_fcurves(mode_code, all_fcurves, rna_path_prefix):
+def get_rotation_fcurves(mode_code, all_fcurves, rna_path_prefix):
     if mode_code == "EULER":
         channel = "rotation_euler"
+        num_channels = 3
     else:
         channel = "rotation_quaternion"
+        num_channels = 4
     if rna_path_prefix:
         prefix = rna_path_prefix
-        selected = [
+        found = [
             fc for fc in all_fcurves
-            if fc.select and fc.data_path.startswith(f'{prefix}.') and fc.data_path.endswith(channel)
+            if fc.data_path.startswith(f'{prefix}.') and fc.data_path.endswith(channel)
         ]
     else:
-        selected = [
+        found = [
             fc for fc in all_fcurves
-            if fc.select and fc.data_path == channel
+            if fc.data_path == channel
         ]
-    if not selected:
-        return None, f"No selected {channel} f-curves found for {'bone' if rna_path_prefix else 'object'}."
-    selected.sort(key=lambda fc: fc.array_index)
-    return selected, None
+    found = sorted(found, key=lambda fc: fc.array_index)
+    found = found[:num_channels]
+    if not found or (mode_code == "EULER" and len(found) < 3) or (mode_code == "QUATERNION" and len(found) < 4):
+        return None, f"No {channel} f-curves found for {'bone' if rna_path_prefix else 'object'}."
+    return found, None
 
 def get_fcurve_keyframe_map(fcurve):
     return {int(round(kp.co[0])): kp for kp in fcurve.keyframe_points}
 
 def collect_keyframes_with_handles_any(curves):
     axis_keyframes = [get_fcurve_keyframe_map(fc) for fc in curves]
-    # Use union (not intersection) of all frames across all channels
     frames = sorted({f for mapping in axis_keyframes for f in mapping})
     keyframe_info = []
     for f in frames:
@@ -80,7 +82,6 @@ def unwrap_keyframe_values_euler_any(keyframes):
     prev = None
     for info in keyframes:
         e = info['value']
-        # Only unwrap channels with values (preserve None)
         if prev is None:
             fixed = list(e)
         else:
@@ -91,7 +92,6 @@ def unwrap_keyframe_values_euler_any(keyframes):
             'value': fixed,
             'handles': info['handles'],
         })
-        # Use current frame's values as prev if present, else keep the last for each channel.
         prev = [fixed[i] if fixed[i] is not None else (prev[i] if prev else None) for i in range(len(fixed))]
     return out
 
@@ -140,8 +140,8 @@ def preserve_and_update_fcurve_points_any(curves, keyframe_infos):
         fc.update()
 
 class ROTATION_OT_preserve_continuity_partial(bpy.types.Operator):
-    """Unwrap/smooth selected Euler or Quaternion rotation channels for objects or pose bones. Handles preserved.
-       Now works with all matching keyframes on any channels."""
+    """Unwrap/smooth Euler or Quaternion rotation for objects/pose bones.
+    Handles preserved. Works with all curves (selected or not), all keyframes."""
     bl_idname = "graph.rotation_continuity_partial"
     bl_label = "Preserve Rotation Continuity"
     bl_options = {'REGISTER', 'UNDO'}
@@ -160,22 +160,22 @@ class ROTATION_OT_preserve_continuity_partial(bpy.types.Operator):
         else:
             self.report({'ERROR'}, f"Unsupported rotation mode: {rot_mode}")
             return {'CANCELLED'}
-        selected_fcurves, err = get_selected_rotation_fcurves(mode_code, all_fcurves, rna_path_prefix)
-        if selected_fcurves is None:
+        rotation_fcurves, err = get_rotation_fcurves(mode_code, all_fcurves, rna_path_prefix)
+        if rotation_fcurves is None:
             self.report({'ERROR'}, err)
             return {'CANCELLED'}
-        keyframes = collect_keyframes_with_handles_any(selected_fcurves)
+        keyframes = collect_keyframes_with_handles_any(rotation_fcurves)
         if not keyframes:
-            self.report({'ERROR'}, "No matching keyframes found in any selected channel.")
+            self.report({'ERROR'}, "No matching keyframes found in any channel.")
             return {'CANCELLED'}
         if mode_code == "EULER":
             unwrapped = unwrap_keyframe_values_euler_any(keyframes)
         else:
             unwrapped = unwrap_keyframe_values_quaternion_any(keyframes)
-        preserve_and_update_fcurve_points_any(selected_fcurves, unwrapped)
+        preserve_and_update_fcurve_points_any(rotation_fcurves, unwrapped)
         if context.area:
             context.area.tag_redraw()
-        self.report({'INFO'}, f"{mode_code} continuity applied to {len(selected_fcurves)} selected channel(s) of {'bone' if rna_path_prefix else 'object'}, over all matching keyframes.")
+        self.report({'INFO'}, f"{mode_code} continuity applied to {len(rotation_fcurves)} channel(s) of {'bone' if rna_path_prefix else 'object'} (selected or not), over all keyframes.")
         return {'FINISHED'}
 
 class ROTATION_PT_continuity_panel(bpy.types.Panel):
