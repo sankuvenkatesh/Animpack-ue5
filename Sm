@@ -142,6 +142,20 @@ def preserve_and_update_fcurve_points_any(curves, keyframe_infos):
                     kp.handle_right = kph['handle_right']
         fc.update()
 
+def ensure_rotation_keyframes(context, entity, mode_code, rna_path_prefix):
+    '''
+    If rotation fcurves do not exist, create them by inserting a keyframe for current rotation type.
+    '''
+    frame = context.scene.frame_current
+    if rna_path_prefix:  # It's a bone
+        data_path = 'rotation_quaternion' if mode_code == "QUATERNION" else 'rotation_euler'
+        bone = entity
+        bone.keyframe_insert(data_path=data_path, frame=frame)
+    else:
+        obj = entity
+        data_path = 'rotation_quaternion' if mode_code == "QUATERNION" else 'rotation_euler'
+        obj.keyframe_insert(data_path=data_path, frame=frame)
+
 class ROTATION_OT_preserve_continuity_partial(bpy.types.Operator):
     """Unwrap/smooth Euler or Quaternion rotation for objects/pose bones.
     Handles preserved. Works with all curves (selected or not), all keyframes."""
@@ -163,10 +177,18 @@ class ROTATION_OT_preserve_continuity_partial(bpy.types.Operator):
         else:
             self.report({'ERROR'}, f"Unsupported rotation mode: {rot_mode}")
             return {'CANCELLED'}
+
         rotation_fcurves, err = get_rotation_fcurves(mode_code, all_fcurves, rna_path_prefix)
         if rotation_fcurves is None:
-            self.report({'ERROR'}, err)
-            return {'CANCELLED'}
+            # Try to insert at least one keyframe to create fcurves, then check again
+            ensure_rotation_keyframes(context, entity, mode_code, rna_path_prefix)
+            # Refresh references
+            all_fcurves = obj.animation_data.action.fcurves
+            rotation_fcurves, err = get_rotation_fcurves(mode_code, all_fcurves, rna_path_prefix)
+            if rotation_fcurves is None:
+                self.report({'ERROR'}, err)
+                return {'CANCELLED'}
+
         keyframes = collect_keyframes_with_handles_any(rotation_fcurves)
         if not keyframes:
             self.report({'ERROR'}, "No matching keyframes found in any channel.")
@@ -185,7 +207,7 @@ class ROTATION_PT_continuity_panel(bpy.types.Panel):
     bl_label = "Rotation Continuity"
     bl_space_type = 'GRAPH_EDITOR'
     bl_region_type = 'UI'
-    bl_category = "Rotation Continuity"  # For clarity, matches UI
+    bl_category = "Rotation Continuity"
 
     def draw(self, context):
         layout = self.layout
