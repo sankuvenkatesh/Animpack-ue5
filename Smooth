@@ -2,17 +2,25 @@ import bpy
 
 def smooth_fcurve(fcurve, iterations, strength, smoothness, preserve_ends=True):
     """
-    Smooth the given F-Curve by iteratively averaging keyframe points values.
+    Smooth the given F-Curve by iteratively averaging keyframe points values,
+    with corrected use of strength and smoothness parameters.
+
+    Parameters:
+    - iterations (int): Number of smoothing passes.
+    - strength (float): Intensity of smoothing (0.0 to 1.0), controls how much each keyframe moves toward neighbor average.
+    - smoothness (float): Falloff factor (0.0 to 1.0), modulates smoothing sensitivity around keyframes.
+    - preserve_ends (bool): If True, first and last keyframes are unchanged.
     """
+
     keyframes = fcurve.keyframe_points
     n = len(keyframes)
     if n < 3:
-        return  # Need at least 3 points to smooth meaningfully
+        return  # Cannot smooth fewer than 3 keyframes meaningfully
 
     values = [kp.co[1] for kp in keyframes]
 
-    strength_factor = strength ** 3
-    smoothness_factor = smoothness ** 2
+    strength_factor = strength ** 3  # Cubic easing for strength slider
+    smooth_factor = smoothness
 
     for _ in range(iterations):
         new_values = values[:]
@@ -23,13 +31,20 @@ def smooth_fcurve(fcurve, iterations, strength, smoothness, preserve_ends=True):
             left = values[i - 1]
             center = values[i]
             right = values[i + 1]
-            weighted_average = (left + center + right) / 3
 
-            weight = strength_factor * (1.0 - smoothness_factor)
-            new_values[i] = center * (1 - weight) + weighted_average * weight
+            average = (left + center + right) / 3
+
+            # Adjust weight based on smoothness and difference magnitude
+            diff = abs(center - average)
+            base = abs(center) if center != 0 else 1.0
+            weight = strength_factor * (1 - smooth_factor + smooth_factor * (diff / base))
+
+            # Apply weighted smoothing blend
+            new_values[i] = center * (1 - weight) + average * weight
 
         values = new_values
 
+    # Update the F-Curve keyframe values
     for i, kp in enumerate(keyframes):
         kp.co[1] = values[i]
 
@@ -48,12 +63,12 @@ class CurveSmoothProperties(bpy.types.PropertyGroup):
     )
     smoothness: bpy.props.FloatProperty(
         name="Smoothness",
-        description="Sensitivity falloff of smoothing",
+        description="Smoothing sensitivity falloff",
         default=0.5, min=0.0, max=1.0
     )
     preserve_ends: bpy.props.BoolProperty(
         name="Preserve Ends",
-        description="Prevent smoothing of first and last keyframes",
+        description="Do not smooth the first and last keyframes",
         default=True
     )
 
@@ -76,13 +91,13 @@ class CurveSmoothOperator(bpy.types.Operator):
                 settings.iterations,
                 settings.strength,
                 settings.smoothness,
-                settings.preserve_ends,
+                settings.preserve_ends
             )
         self.report({'INFO'}, f"Smoothed {len(fcurves)} F-Curve(s)")
         return {'FINISHED'}
 
 class CurveSmoothPanel(bpy.types.Panel):
-    """Panel in the Graph Editor for Curve Smoothing"""
+    """Panel in Graph Editor for Curve Smoothing"""
     bl_label = "Curve Smooth Filter"
     bl_space_type = 'GRAPH_EDITOR'
     bl_region_type = 'UI'
