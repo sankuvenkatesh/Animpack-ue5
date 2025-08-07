@@ -152,7 +152,7 @@ class CurveSmoothPanel(bpy.types.Panel):
         layout.prop(settings, "sensitivity", icon='SNAP_INC')
         layout.prop(settings, "preserve_ends", icon='LOCKED')
 
-        row = layout.row()
+        row = layout.row(align=True)
         row.operator("graph.smooth_selected_keyframes", text="Apply Smooth", icon='MOD_SMOOTH')
         row.operator("graph.reset_smooth_values", text="Reset Values", icon='LOOP_BACK')
 
