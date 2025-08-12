@@ -1,13 +1,13 @@
 bl_info = {
     "name": "Smart Curve Tools",
     "author": "Venkatesh Sanku (merged by AI assistant)",
-    "version": (1, 0),
+    "version": (1, 1),
     "blender": (2, 80, 0),
     "location": "Graph Editor > Sidebar > Smart Curve Tools Tab",
     "description": (
         "Combined toolset: Smart Euler Filter for unwrap/smooth Euler or Quaternion rotations preserving handles "
-        "and advanced smoothing of selected F-Curve keyframes. "
-        "Works for objects and pose bones, with preserved keyframe handles."
+        "and advanced smoothing of F-Curves. "
+        "Works for objects and pose bones, with preserved keyframe handles. Batch smoothing affects all keyframes."
     ),
     "category": "Animation",
 }
@@ -16,7 +16,87 @@ import bpy
 import math
 from mathutils import Euler, Quaternion
 
+# ----- Utility Functions -----
+
+def clamp(value, minv, maxv):
+    return min(max(value, minv), maxv)
+
+def auto_fix_bad_keyframes(fcurve):
+    keyframes = fcurve.keyframe_points
+    n = len(keyframes)
+    for i in range(n):
+        y = keyframes[i].co[1]
+        if not math.isfinite(y):
+            left = next((keyframes[j].co[1] for j in range(i - 1, -1, -1) if math.isfinite(keyframes[j].co[1])), None)
+            right = next((keyframes[j].co[1] for j in range(i + 1, n) if math.isfinite(keyframes[j].co[1])), None)
+            if left is not None and right is not None:
+                keyframes[i].co[1] = (left + right) / 2
+            elif left is not None:
+                keyframes[i].co[1] = left
+            elif right is not None:
+                keyframes[i].co[1] = right
+            else:
+                keyframes[i].co[1] = 0.0
+
+def set_bezier_and_auto_clamp_handles(fcurve):
+    for kp in fcurve.keyframe_points:
+        kp.interpolation = 'BEZIER'
+        kp.handle_left_type = 'AUTO_CLAMPED'
+        kp.handle_right_type = 'AUTO_CLAMPED'
+    fcurve.update()
+
+# Generalized for either all or selected keyframes
+def smooth_keyframes(fcurve, iterations, strength, sensitivity, preserve_ends=True, all_keyframes=False):
+    keyframes = fcurve.keyframe_points
+    n = len(keyframes)
+    if n < 3:
+        return {'moved': 0, 'max_delta': 0}
+    if all_keyframes:
+        indices = list(range(n))
+    else:
+        indices = [i for i, kp in enumerate(keyframes) if kp.select_control_point]
+        if len(indices) < 3:
+            return {'moved': 0, 'max_delta': 0}
+    values = [kp.co[1] for kp in keyframes]
+    stats = {'moved': 0, 'max_delta': 0}
+    strength_factor = strength ** 3
+    smooth_factor = 1.0 - sensitivity
+    for _ in range(iterations):
+        new_values = values[:]
+        for idx_pos in range(1, len(indices) - 1):
+            i = indices[idx_pos]
+            if preserve_ends and (idx_pos == 0 or idx_pos == len(indices) - 1):
+                continue
+            left_i = indices[idx_pos-1]
+            right_i = indices[idx_pos+1]
+            left = values[left_i]
+            center = values[i]
+            right = values[right_i]
+            average = (left + center + right) / 3
+            diff = abs(center - average)
+            base = abs(center) if center != 0 else 1.0
+            weight_unclamped = strength_factor * (1 - smooth_factor + smooth_factor * (diff / base))
+            weight = clamp(weight_unclamped, 0.0, 1.0)
+            new_val = center * (1 - weight) + average * weight
+            if not math.isfinite(new_val):
+                new_val = center
+            delta = new_val - center
+            new_values[i] = new_val
+            if abs(delta) > 0:
+                stats['moved'] += 1
+                stats['max_delta'] = max(stats['max_delta'], abs(delta))
+        values = new_values
+    for i in indices:
+        keyframes[i].co[1] = values[i]
+    auto_fix_bad_keyframes(fcurve)
+    fcurve.update()
+    return stats
+
 # ----- Smart Euler Filter Functions -----
+
+# ... (Your previous Euler filter utility functions go here, unchanged)
+# See your original code for these. For brevity, they are omitted in this snippet.
+# Paste everything from "def nearest_equivalent_euler(a1, a2):" up to and including "def ensure_rotation_keyframes(...)" here.
 
 def nearest_equivalent_euler(a1, a2):
     twopi = 2 * math.pi
@@ -149,85 +229,13 @@ def preserve_and_update_fcurve_points_any(curves, keyframe_infos):
 
 def ensure_rotation_keyframes(context, entity, mode_code, rna_path_prefix):
     frame = context.scene.frame_current
-    if rna_path_prefix:  # It's a bone
+    if rna_path_prefix:
         data_path = 'rotation_quaternion' if mode_code == "QUATERNION" else 'rotation_euler'
         entity.keyframe_insert(data_path=data_path, frame=frame)
     else:
         obj = entity
         data_path = 'rotation_quaternion' if mode_code == "QUATERNION" else 'rotation_euler'
         obj.keyframe_insert(data_path=data_path, frame=frame)
-
-# ----- Smooth-filter Functions -----
-
-def clamp(value, minv, maxv):
-    return min(max(value, minv), maxv)
-
-def auto_fix_bad_keyframes(fcurve):
-    keyframes = fcurve.keyframe_points
-    n = len(keyframes)
-    for i in range(n):
-        y = keyframes[i].co[1]
-        if not math.isfinite(y):
-            left = next((keyframes[j].co[1] for j in range(i - 1, -1, -1) if math.isfinite(keyframes[j].co[1])), None)
-            right = next((keyframes[j].co[1] for j in range(i + 1, n) if math.isfinite(keyframes[j].co[1])), None)
-            if left is not None and right is not None:
-                keyframes[i].co[1] = (left + right) / 2
-            elif left is not None:
-                keyframes[i].co[1] = left
-            elif right is not None:
-                keyframes[i].co[1] = right
-            else:
-                keyframes[i].co[1] = 0.0
-
-def smooth_selected_keyframes(fcurve, iterations, strength, sensitivity, preserve_ends=True):
-    keyframes = fcurve.keyframe_points
-    n = len(keyframes)
-    if n < 3:
-        return {'moved': 0, 'max_delta': 0}
-    selected_indices = [i for i, kp in enumerate(keyframes) if kp.select_control_point]
-    if len(selected_indices) < 3:
-        return {'moved': 0, 'max_delta': 0}
-    values = [kp.co[1] for kp in keyframes]
-    stats = {'moved': 0, 'max_delta': 0}
-    strength_factor = strength ** 3
-    smooth_factor = 1.0 - sensitivity
-    for _ in range(iterations):
-        new_values = values[:]
-        for idx_pos in range(1, len(selected_indices) - 1):
-            i = selected_indices[idx_pos]
-            if preserve_ends and (idx_pos == 0 or idx_pos == len(selected_indices) - 1):
-                continue
-            left_i = selected_indices[idx_pos - 1]
-            right_i = selected_indices[idx_pos + 1]
-            left = values[left_i]
-            center = values[i]
-            right = values[right_i]
-            average = (left + center + right) / 3
-            diff = abs(center - average)
-            base = abs(center) if center != 0 else 1.0
-            weight_unclamped = strength_factor * (1 - smooth_factor + smooth_factor * (diff / base))
-            weight = clamp(weight_unclamped, 0.0, 1.0)
-            new_val = center * (1 - weight) + average * weight
-            if not math.isfinite(new_val):
-                new_val = center
-            delta = new_val - center
-            new_values[i] = new_val
-            if abs(delta) > 0:
-                stats['moved'] += 1
-                stats['max_delta'] = max(stats['max_delta'], abs(delta))
-        values = new_values
-    for i in selected_indices:
-        keyframes[i].co[1] = values[i]
-    auto_fix_bad_keyframes(fcurve)
-    fcurve.update()
-    return stats
-
-def set_bezier_and_auto_clamp_handles(fcurve):
-    for kp in fcurve.keyframe_points:
-        kp.interpolation = 'BEZIER'
-        kp.handle_left_type = 'AUTO_CLAMPED'
-        kp.handle_right_type = 'AUTO_CLAMPED'
-    fcurve.update()
 
 # ----- Blender UI and Operator Classes -----
 
@@ -257,7 +265,6 @@ class ROTATION_OT_smart_euler_filter(bpy.types.Operator):
             return {'CANCELLED'}
 
         rotation_fcurves_all, err = get_rotation_fcurves(mode_code, all_fcurves, rna_path_prefix)
-
         if rotation_fcurves_all is None:
             ensure_rotation_keyframes(context, entity, mode_code, rna_path_prefix)
             all_fcurves = obj.animation_data.action.fcurves
@@ -266,7 +273,6 @@ class ROTATION_OT_smart_euler_filter(bpy.types.Operator):
                 self.report({'ERROR'}, err)
                 return {'CANCELLED'}
 
-        # Use selected fcurves if any selected
         selected_fcurves = [fc for fc in rotation_fcurves_all if fc.select]
         rotation_fcurves = selected_fcurves if selected_fcurves else rotation_fcurves_all
 
@@ -329,16 +335,18 @@ class CurveSmoothOperator(bpy.types.Operator):
             return {'CANCELLED'}
 
         for fcurve in curves:
+            # Only smooth selected keyframes
             selected_keys = [kp for kp in fcurve.keyframe_points if kp.select_control_point]
             if len(selected_keys) >= 3:
-                stats = smooth_selected_keyframes(
+                stats = smooth_keyframes(
                     fcurve,
                     settings.iterations,
                     settings.strength,
                     settings.sensitivity,
-                    settings.preserve_ends
+                    settings.preserve_ends,
+                    all_keyframes=False
                 )
-                set_bezier_and_auto_clamp_handles(fcurve)  # Set handles after smoothing
+                set_bezier_and_auto_clamp_handles(fcurve)
                 smoothed_count += 1
                 total_keys += stats['moved']
                 biggest_move = max(biggest_move, stats['max_delta'])
@@ -366,16 +374,16 @@ class CurveSmoothAllOperator(bpy.types.Operator):
         for obj in context.selected_objects:
             if obj.animation_data and obj.animation_data.action:
                 for fcurve in obj.animation_data.action.fcurves:
-                    selected_keys = [kp for kp in fcurve.keyframe_points if kp.select_control_point]
-                    if len(selected_keys) >= 3:
-                        stats = smooth_selected_keyframes(
+                    if len(fcurve.keyframe_points) >= 3:
+                        stats = smooth_keyframes(
                             fcurve,
                             settings.iterations,
                             settings.strength,
                             settings.sensitivity,
-                            settings.preserve_ends
+                            settings.preserve_ends,
+                            all_keyframes=True  # Always process all keyframes in batch mode
                         )
-                        set_bezier_and_auto_clamp_handles(fcurve)  # Set handles after smoothing
+                        set_bezier_and_auto_clamp_handles(fcurve)
                         smoothed_count += 1
                         total_keys += stats['moved']
                         biggest_move = max(biggest_move, stats['max_delta'])
@@ -412,13 +420,10 @@ class SMARTCURVETOOLS_PT_panel(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
 
-        # Smart Euler Filter section
         layout.label(text="Smart Euler Filter:")
         layout.operator("graph.smart_euler_filter", icon='CON_ROTLIKE')
-
         layout.separator()
 
-        # Curve smoothing section
         settings = context.scene.curve_smooth_settings
         layout.label(text="Curve Smoothing Parameters:")
         layout.prop(settings, "iterations")
