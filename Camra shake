@@ -1,0 +1,119 @@
+bl_info = {
+    "name": "Advanced Camera Shake Addon",
+    "author": "Converted & Enhanced by Adrian, 2025",
+    "version": (1, 1, 0),
+    "blender": (2, 80, 0),
+    "description": "Add and control realistic camera shake via UI panel, noise, and random-based algorithms.",
+    "category": "Animation",
+}
+
+import bpy
+from bpy.props import FloatProperty, IntProperty, BoolProperty, EnumProperty
+import random
+
+def add_noise_modifier(fcurve, strength, scale, phase):
+    noise = fcurve.modifiers.new(type='NOISE')
+    noise.strength = strength
+    noise.scale = scale
+    noise.phase = phase
+    return noise
+
+class CAMERA_OT_add_advanced_shake(bpy.types.Operator):
+    """Add advanced shake properties to camera and apply shake"""
+    bl_idname = "camera.add_advanced_shake"
+    bl_label = "Apply Advanced Camera Shake"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    shake_strength: FloatProperty(
+        name="Shake Strength",
+        default=1.0, min=0.0, max=10.0)
+    shake_scale: FloatProperty(
+        name="Shake Scale",
+        default=10.0, min=1.0, max=100.0)
+    shake_phase: FloatProperty(
+        name="Shake Phase",
+        default=0.0, min=0.0, max=100.0)
+    shake_frames: IntProperty(
+        name="Shake Frames",
+        default=240, min=1, max=10000,
+        description="Frames to apply random shake for random mode"
+    )
+    shake_rotation: BoolProperty(
+        name="Affect Rotation",
+        default=True
+    )
+    shake_location: BoolProperty(
+        name="Affect Location",
+        default=True
+    )
+    shake_method: EnumProperty(
+        name="Shake Method",
+        items=[
+            ("NOISE", "Noise Modifier", "Add procedural noise to FCurves"),
+            ("RANDOM", "Random Keyframes", "Insert random offset keyframes")
+        ],
+        default="NOISE"
+    )
+
+    def execute(self, context):
+        sel = context.selected_objects
+        if len(sel) != 1 or sel[0].type != 'CAMERA':
+            self.report({'ERROR'}, "Select exactly one camera.")
+            return {'CANCELLED'}
+        cam = sel
+
+        if self.shake_method == "NOISE":
+            ad = cam.animation_data_create()
+            action = ad.action if ad.action else bpy.data.actions.new("CameraShakeAction")
+            ad.action = action
+
+            if self.shake_location:
+                for i in range(3):  # x, y, z
+                    fcurve = action.fcurves.find(data_path="location", index=i)
+                    if not fcurve:
+                        fcurve = action.fcurves.new(data_path="location", index=i)
+                    add_noise_modifier(fcurve, self.shake_strength, self.shake_scale, self.shake_phase + i * 10)
+            if self.shake_rotation:
+                for i in range(3):
+                    fcurve = action.fcurves.find(data_path="rotation_euler", index=i)
+                    if not fcurve:
+                        fcurve = action.fcurves.new(data_path="rotation_euler", index=i)
+                    add_noise_modifier(fcurve, self.shake_strength * 0.1, self.shake_scale, self.shake_phase + i * 20)
+
+        elif self.shake_method == "RANDOM":
+            scn = context.scene
+            frame_start = scn.frame_current
+            frame_end = frame_start + self.shake_frames
+
+            for frame in range(frame_start, frame_end + 1):
+                if self.shake_location:
+                    cam.location = [random.uniform(-self.shake_strength, self.shake_strength) for _ in range(3)]
+                    cam.keyframe_insert(data_path="location", frame=frame)
+                if self.shake_rotation:
+                    cam.rotation_euler = [random.uniform(-self.shake_strength * 0.1, self.shake_strength * 0.1) for _ in range(3)]
+                    cam.keyframe_insert(data_path="rotation_euler", frame=frame)
+
+        self.report({'INFO'}, "Advanced camera shake applied.")
+        return {'FINISHED'}
+
+class CAMERA_PT_advanced_shake_panel(bpy.types.Panel):
+    bl_label = "Advanced Camera Shake"
+    bl_idname = "OBJECT_PT_advanced_camera_shake"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Camera Shake"
+
+    def draw(self, context):
+        layout = self.layout
+        layout.operator(CAMERA_OT_add_advanced_shake.bl_idname)
+
+def register():
+    bpy.utils.register_class(CAMERA_OT_add_advanced_shake)
+    bpy.utils.register_class(CAMERA_PT_advanced_shake_panel)
+
+def unregister():
+    bpy.utils.unregister_class(CAMERA_OT_add_advanced_shake)
+    bpy.utils.unregister_class(CAMERA_PT_advanced_shake_panel)
+
+if __name__ == "__main__":
+    register()
