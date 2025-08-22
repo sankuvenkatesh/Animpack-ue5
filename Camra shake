@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Advanced Camera Shake Addon",
     "author": "Converted & Enhanced by Adrian, 2025",
-    "version": (1, 1, 0),
+    "version": (1, 1, 1),
     "blender": (2, 80, 0),
     "description": "Add and control realistic camera shake via UI panel, noise, and random-based algorithms.",
     "category": "Animation",
@@ -60,14 +60,15 @@ class CAMERA_OT_add_advanced_shake(bpy.types.Operator):
         if len(sel) != 1 or sel[0].type != 'CAMERA':
             self.report({'ERROR'}, "Select exactly one camera.")
             return {'CANCELLED'}
-        cam = sel
+        cam_obj = sel
 
         if self.shake_method == "NOISE":
-            if not cam.animation_data:
-                cam.animation_data_create()
-            if not cam.animation_data.action:
-                cam.animation_data.action = bpy.data.actions.new(name="CameraShakeAction")
-            action = cam.animation_data.action
+            if cam_obj.animation_data is None:
+                cam_obj.animation_data_create()
+
+            if cam_obj.animation_data.action is None:
+                cam_obj.animation_data.action = bpy.data.actions.new(name="CameraShakeAction")
+            action = cam_obj.animation_data.action
 
             if self.shake_location:
                 for i in range(3):  # x, y, z
@@ -89,11 +90,11 @@ class CAMERA_OT_add_advanced_shake(bpy.types.Operator):
 
             for frame in range(frame_start, frame_end + 1):
                 if self.shake_location:
-                    cam.location = [random.uniform(-self.shake_strength, self.shake_strength) for _ in range(3)]
-                    cam.keyframe_insert(data_path="location", frame=frame)
+                    cam_obj.location = [random.uniform(-self.shake_strength, self.shake_strength) for _ in range(3)]
+                    cam_obj.keyframe_insert(data_path="location", frame=frame)
                 if self.shake_rotation:
-                    cam.rotation_euler = [random.uniform(-self.shake_strength * 0.1, self.shake_strength * 0.1) for _ in range(3)]
-                    cam.keyframe_insert(data_path="rotation_euler", frame=frame)
+                    cam_obj.rotation_euler = [random.uniform(-self.shake_strength * 0.1, self.shake_strength * 0.1) for _ in range(3)]
+                    cam_obj.keyframe_insert(data_path="rotation_euler", frame=frame)
 
         self.report({'INFO'}, "Advanced camera shake applied.")
         return {'FINISHED'}
