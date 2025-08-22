@@ -63,9 +63,11 @@ class CAMERA_OT_add_advanced_shake(bpy.types.Operator):
         cam = sel
 
         if self.shake_method == "NOISE":
-            ad = cam.animation_data_create()
-            action = ad.action if ad.action else bpy.data.actions.new("CameraShakeAction")
-            ad.action = action
+            if not cam.animation_data:
+                cam.animation_data_create()
+            if not cam.animation_data.action:
+                cam.animation_data.action = bpy.data.actions.new(name="CameraShakeAction")
+            action = cam.animation_data.action
 
             if self.shake_location:
                 for i in range(3):  # x, y, z
