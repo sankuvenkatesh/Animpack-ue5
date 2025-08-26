@@ -1,0 +1,241 @@
+bl_info = {
+    "name": "Overlapper Picker",
+    "blender": (3, 0, 0),
+    "category": "Animation",
+    "author": "Your Name",
+    "version": (1, 0, 0),
+    "description": "Animate overlapping action with a custom controller picker, per-controller settings, and Euler/Quaternion support"
+}
+
+import bpy
+import mathutils
+
+# --------------------------------------------------------
+# Per-controller Settings Property Group
+# --------------------------------------------------------
+
+class OverlapItem(bpy.types.PropertyGroup):
+    obj_ref: bpy.props.PointerProperty(type=bpy.types.Object, name="Object")
+    delay: bpy.props.IntProperty(name="Delay", default=2, min=1, max=20)
+    damping: bpy.props.FloatProperty(name="Damping", default=0.8, min=0.0, max=1.0)
+    rotation_mode: bpy.props.EnumProperty(
+        name="Rotation Mode",
+        items=[
+            ('QUATERNION', 'Quaternion', ''),
+            ('XYZ', 'Euler XYZ', ''),
+            ('XZY', 'Euler XZY', ''),
+            ('YXZ', 'Euler YXZ', ''),
+            ('YZX', 'Euler YZX', ''),
+            ('ZXY', 'Euler ZXY', ''),
+            ('ZYX', 'Euler ZYX', ''),
+        ],
+        default='QUATERNION'
+    )
+
+# --------------------------------------------------------
+# Utilities
+# --------------------------------------------------------
+
+def get_frame_range(context):
+    scene = context.scene
+    if scene.use_preview_range:
+        return scene.frame_preview_start, scene.frame_preview_end
+    else:
+        return scene.frame_start, scene.frame_end
+
+def auto_scale_for_object(obj, f_start, f_end):
+    locs = []
+    for f in range(f_start, f_end + 1):
+        bpy.context.scene.frame_set(f)
+        locs.append(obj.matrix_world.translation.copy())
+    if not locs:
+        return 1.0
+    bbox = max((l - locs[0]).length for l in locs)
+    return max(bbox * 0.25, 0.01)
+
+def blend_cycle_values(values, cycle=True):
+    if cycle and len(values) > 2:
+        first = values[0]
+        last = values[-1]
+        values[-1] = (first * 0.5 + last * 0.5)
+    return values
+
+# --------------------------------------------------------
+# Overlap Algorithm with Per-Controller Settings
+# --------------------------------------------------------
+
+def apply_overlap_picker(items, f_start, f_end, affect_translation=True, affect_rotation=True, cycle=True):
+    for item in items:
+        obj = item.obj_ref
+        if not obj:
+            continue
+        if not obj.animation_data or not obj.animation_data.action:
+            continue
+        # Bake to a new action for safety
+        new_action = bpy.data.actions.new(name=f"{obj.name}_Overlapped")
+        if not obj.animation_data:
+            obj.animation_data_create()
+        obj.animation_data.action = new_action
+
+        translations = []
+        rotations = []
+        scale = auto_scale_for_object(obj, f_start, f_end)
+        delay = item.delay
+        damping = item.damping
+        rot_mode = item.rotation_mode
+
+        for f in range(f_start, f_end + 1):
+            src_f = max(f_start, f - delay)
+            bpy.context.scene.frame_set(src_f)
+            loc = obj.matrix_world.translation.copy()
+            if affect_translation:
+                translations.append(loc * damping)
+            else:
+                translations.append(obj.location.copy())
+
+            # Rotation
+            if affect_rotation:
+                if rot_mode == 'QUATERNION':
+                    obj.rotation_mode = 'QUATERNION'
+                    rot = obj.matrix_world.to_quaternion().copy()
+                    identity = mathutils.Quaternion((1,0,0,0))
+                    blended = rot.slerp(identity, 1.0 - damping)
+                    rotations.append(blended)
+                else:
+                    obj.rotation_mode = rot_mode
+                    rot = obj.matrix_world.to_euler(rot_mode).copy()
+                    zero_euler = mathutils.Euler((0,0,0), rot_mode)
+                    blended = zero_euler.lerp(rot, damping)
+                    rotations.append(blended)
+            else:
+                if rot_mode == 'QUATERNION':
+                    rotations.append(obj.rotation_quaternion.copy())
+                else:
+                    rotations.append(obj.rotation_euler.copy())
+        translations = blend_cycle_values(translations, cycle)
+        rotations = blend_cycle_values(rotations, cycle)
+        for idx, f in enumerate(range(f_start, f_end + 1)):
+            if affect_translation:
+                obj.location = translations[idx]
+                obj.keyframe_insert(data_path="location", frame=f)
+            if affect_rotation:
+                if rot_mode == 'QUATERNION':
+                    obj.rotation_mode = 'QUATERNION'
+                    obj.rotation_quaternion = rotations[idx]
+                    obj.keyframe_insert(data_path="rotation_quaternion", frame=f)
+                else:
+                    obj.rotation_mode = rot_mode
+                    obj.rotation_euler = rotations[idx]
+                    obj.keyframe_insert(data_path="rotation_euler", frame=f)
+    return True
+
+# --------------------------------------------------------
+# Picker List & UI
+# --------------------------------------------------------
+
+class ANIM_UL_OverlapperPicker(bpy.types.UIList):
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        obj = item.obj_ref
+        row = layout.row(align=True)
+        if obj:
+            row.prop(obj, "name", text="", emboss=False, icon='OBJECT_DATA')
+        row.prop(item, "delay", text="D")
+        row.prop(item, "damping", text="Da")
+        row.prop(item, "rotation_mode", text="Rot")
+
+class ANIM_OT_AddToPicker(bpy.types.Operator):
+    bl_idname = "anim.add_to_picker"
+    bl_label = "Add Selected To Picker"
+    bl_description = "Add selected objects to overlapper picker"
+    def execute(self, context):
+        picker = context.scene.overlapper_picker
+        existing_names = {item.obj_ref.name for item in picker if item.obj_ref}
+        for obj in context.selected_objects:
+            if obj.name not in existing_names:
+                new = picker.add()
+                new.obj_ref = obj
+        return {"FINISHED"}
+
+class ANIM_OT_RemoveFromPicker(bpy.types.Operator):
+    bl_idname = "anim.remove_from_picker"
+    bl_label = "Remove From Picker"
+    index: bpy.props.IntProperty()
+    def execute(self, context):
+        context.scene.overlapper_picker.remove(self.index)
+        return {"FINISHED"}
+
+class ANIM_OT_ClearPicker(bpy.types.Operator):
+    bl_idname = "anim.clear_picker"
+    bl_label = "Clear Picker"
+    def execute(self, context):
+        context.scene.overlapper_picker.clear()
+        return {"FINISHED"}
+
+class ANIM_OT_ApplyOverlapPicker(bpy.types.Operator):
+    bl_idname = "anim.apply_overlap_picker"
+    bl_label = "Apply Overlap (Picker)"
+    bl_options = {"REGISTER", "UNDO"}
+    affect_translation: bpy.props.BoolProperty(name="Affect Translation", default=True)
+    affect_rotation: bpy.props.BoolProperty(name="Affect Rotation", default=True)
+    cycle: bpy.props.BoolProperty(name="Seamless Cycle", default=True)
+    def execute(self, context):
+        f_start, f_end = get_frame_range(context)
+        items = context.scene.overlapper_picker
+        apply_overlap_picker(items, f_start, f_end,
+                            affect_translation=self.affect_translation,
+                            affect_rotation=self.affect_rotation,
+                            cycle=self.cycle)
+        return {"FINISHED"}
+
+class ANIM_PT_OverlapperPickerPanel(bpy.types.Panel):
+    bl_label = "Overlapper Picker"
+    bl_idname = "ANIM_PT_overlapper_picker"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Animation"
+
+    def draw(self, context):
+        layout = self.layout
+        picker = context.scene.overlapper_picker
+        row = layout.row()
+        row.template_list("ANIM_UL_OverlapperPicker", "overlapper_picker", context.scene,
+                          "overlapper_picker", context.scene, "overlapper_picker_index")
+        col = row.column(align=True)
+        col.operator("anim.add_to_picker", text="", icon="ADD")
+        if picker and len(picker) > 0:
+            col.operator("anim.remove_from_picker", text="", icon="REMOVE").index = context.scene.overlapper_picker_index
+        layout.operator("anim.clear_picker", text="Clear Picker", icon="TRASH")
+        layout.separator()
+        op = layout.operator("anim.apply_overlap_picker", text="Apply Overlap")
+        layout.prop(op, "affect_translation")
+        layout.prop(op, "affect_rotation")
+        layout.prop(op, "cycle")
+
+# --------------------------------------------------------
+# Registration
+# --------------------------------------------------------
+
+classes = (
+    OverlapItem,
+    ANIM_UL_OverlapperPicker,
+    ANIM_OT_AddToPicker,
+    ANIM_OT_RemoveFromPicker,
+    ANIM_OT_ClearPicker,
+    ANIM_OT_ApplyOverlapPicker,
+    ANIM_PT_OverlapperPickerPanel,
+)
+
+def register():
+    for cls in classes:
+        bpy.utils.register_class(cls)
+    bpy.types.Scene.overlapper_picker = bpy.props.CollectionProperty(type=OverlapItem)
+    bpy.types.Scene.overlapper_picker_index = bpy.props.IntProperty()
+
+def unregister():
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)
+    del bpy.types.Scene.overlapper_picker
+    del bpy.types.Scene.overlapper_picker_index
+
+if __name__ == "__main__":
+    register()
