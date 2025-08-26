@@ -85,7 +85,7 @@ def create_action_and_add_nla(arm_obj, new_action_name):
         except Exception:
             start_frame = bpy.context.scene.frame_start
 
-        start_frame = int(start_frame)  # Convert to int to fix API error
+        start_frame = int(start_frame)
 
         existing_names = {strip.name for strip in nla_track.strips}
         strip_name = anim_data.action.name
@@ -168,11 +168,12 @@ class OVERLAPPER_OT_RunOverlapper(bpy.types.Operator):
 
         overlap_group = get_or_create_bone_group(active_arm_obj, "Overlapper_BoneGroup")
 
+        sel_bone_names = {b.name for b in sel_bones}
         for pb in active_arm_obj.pose.bones:
-            if pb.bone in sel_bones:
+            if pb.name in sel_bone_names:
                 pb.bone_group = overlap_group
             else:
-                if hasattr(pb, 'bone_group') and pb.bone_group == overlap_group:
+                if pb.bone_group == overlap_group:
                     pb.bone_group = None
 
         for index, pb in enumerate(sel_bones):
@@ -194,7 +195,7 @@ class OVERLAPPER_OT_RunOverlapper(bpy.types.Operator):
                     wind_offset = (noise.noise(frame * 0.1 + index) - 0.5) * 2 * self.wind_scale * self.wind_speed
 
                 new_val = base_val + softness * self.global_scale + wind_offset
-                bake_frame = frame + (softness * index)
+                bake_frame = frame + int(softness * index)
                 if bake_frame > max_frame:
                     bake_frame = max_frame
 
@@ -277,11 +278,12 @@ class OVERLAPPER_OT_RunOverlapperHierarchy(bpy.types.Operator):
 
         overlap_group = get_or_create_bone_group(active_arm_obj, "Overlapper_BoneGroup")
 
+        all_bone_names = {b.name for b in all_bones}
         for pb in active_arm_obj.pose.bones:
-            if pb.bone in all_bones:
+            if pb.name in all_bone_names:
                 pb.bone_group = overlap_group
             else:
-                if hasattr(pb, 'bone_group') and pb.bone_group == overlap_group:
+                if pb.bone_group == overlap_group:
                     pb.bone_group = None
 
         for index, pb in enumerate(all_bones):
@@ -303,7 +305,7 @@ class OVERLAPPER_OT_RunOverlapperHierarchy(bpy.types.Operator):
                     wind_offset = (noise.noise(frame * 0.1 + index) - 0.5) * 2 * self.wind_scale * self.wind_speed
 
                 new_val = base_val + softness * self.global_scale + wind_offset
-                bake_frame = frame + (softness * index)
+                bake_frame = frame + int(softness * index)
                 if bake_frame > max_frame:
                     bake_frame = max_frame
 
