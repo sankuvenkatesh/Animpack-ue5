@@ -1,375 +1,375 @@
+bl_info = {
+    "name": "Overlap Helper (Blender)",
+    "author": "Perplexity AI",
+    "version": (1, 0, 0),
+    "blender": (3, 6, 0),
+    "location": "View3D > Sidebar > Overlap Helper",
+    "description": "Create overlapping/jiggle motion on bone chains (hair, tails, cloth strips, muscles) with non-physics offsets or physics jiggle; auto chain detection; bake to keyframes.",
+    "category": "Animation",
+}
+
 import bpy
-import random
-import fnmatch
-import mathutils.noise as noise
+from bpy.types import Operator, Panel, PropertyGroup
+from bpy.props import (
+    BoolProperty, EnumProperty, FloatProperty, IntProperty,
+    PointerProperty, CollectionProperty, StringProperty
+)
+from mathutils import Vector, Quaternion, Matrix
+import math
 
-def CleanUpProc():
-    if bpy.context.mode != 'OBJECT':
-        bpy.ops.object.mode_set(mode='OBJECT')
+# ---------- Utilities ----------
 
-    if "OverlapperArmature" in bpy.data.objects:
-        obj = bpy.data.objects["OverlapperArmature"]
-        bpy.data.objects.remove(obj, do_unlink=True)
-    patterns = [
-        "*_overlapOffsetLocator*",
-    ]
-    objs_to_delete = []
-    for obj in bpy.data.objects:
-        for pat in patterns:
-            if fnmatch.fnmatch(obj.name, pat):
-                objs_to_delete.append(obj)
-                break
-    bpy.ops.object.select_all(action='DESELECT')
-    for o in objs_to_delete:
-        o.select_set(True)
-    if objs_to_delete:
-        bpy.ops.object.delete()
+def get_scene_fps(scene):
+    fps = scene.render.fps / scene.render.fps_base
+    return fps if fps > 0 else 24.0
 
-def get_bone_hierarchy(pose_bones):
-    hierarchy = []
-    def recurse(pbone):
-        if pbone in hierarchy:
-            return
-        hierarchy.append(pbone)
-        for child_bone in pbone.bone.children:
-            child_pbone = pbone.id_data.pose.bones.get(child_bone.name)
-            if child_pbone:
-                recurse(child_pbone)
-    for pb in pose_bones:
-        recurse(pb)
-    return hierarchy
+def iter_bone_chain(arm, pose_bone):
+    # Walk down children if there is exactly one deform child repeatedly (simple FK chain)
+    chain = [pose_bone]
+    pb = pose_bone
+    while True:
+        children = [c for c in pb.children if True]
+        if len(children) != 1:
+            break
+        pb = children
+        chain.append(pb)
+    return chain
 
-def calculate_adaptive_scale(pose_bones, arm_obj, min_frame, max_frame):
-    total_motion = 0
-    sample_count = 0
-    for pbone in pose_bones:
-        prev_x = None
-        for frame in range(min_frame, max_frame + 1):
-            bpy.context.scene.frame_set(frame)
-            current_x = pbone.location.x
-            if prev_x is not None:
-                total_motion += abs(current_x - prev_x)
-                sample_count += 1
-            prev_x = current_x
-    if sample_count == 0:
-        return 1.0
-    avg_motion = total_motion / sample_count
-    return max(0.1, min(avg_motion * 2.0, 10.0))
-
-def get_or_create_bone_group(arm_obj, group_name):
-    p = arm_obj.pose
-    if not p:
-        arm_obj.pose_create()
-        p = arm_obj.pose
-    bg = p.bone_groups.get(group_name)
-    if not bg:
-        bg = p.bone_groups.new(name=group_name)
-    return bg
-
-def create_action_and_add_nla(arm_obj, new_action_name):
-    if not arm_obj.animation_data:
-        arm_obj.animation_data_create()
-    anim_data = arm_obj.animation_data
-
-    if anim_data.action:
-        if not anim_data.nla_tracks:
-            nla_track = anim_data.nla_tracks.new()
-        else:
-            nla_track = anim_data.nla_tracks[0]
-
-        try:
-            start_frame = anim_data.action.frame_range[0]
-            if start_frame is None or start_frame == float('inf'):
-                start_frame = bpy.context.scene.frame_start
-        except Exception:
-            start_frame = bpy.context.scene.frame_start
-
-        start_frame = int(start_frame)
-
-        existing_names = {strip.name for strip in nla_track.strips}
-        strip_name = anim_data.action.name
-        count = 1
-        unique_name = strip_name
-        while unique_name in existing_names:
-            unique_name = f"{strip_name}_{count}"
-            count += 1
-
-        try:
-            nla_strip = nla_track.strips.new(name=unique_name, start=start_frame)
-            nla_strip.action = anim_data.action
-            anim_data.action = None
-        except Exception as e:
-            print(f"Could not create NLA strip: {e}")
-
-    new_action = bpy.data.actions.new(new_action_name)
-    anim_data.action = new_action
-    return new_action
-
-def safe_assign_bone_groups(arm_obj, target_pose_bones, overlap_group):
-    for pb in arm_obj.pose.bones:
-        if not isinstance(pb, bpy.types.PoseBone):
+def discover_chains(context):
+    obj = context.object
+    if not obj or obj.type != 'ARMATURE':
+        return []
+    if not obj.mode == 'POSE':
+        return []
+    sel = [b for b in obj.pose.bones if b.bone.select]
+    chains = []
+    seen = set()
+    for b in sel:
+        if b.name in seen:
             continue
-        if pb in target_pose_bones:
-            pb.bone_group = overlap_group
+        chain = iter_bone_chain(obj, b)
+        for c in chain:
+            seen.add(c.name)
+        if len(chain) >= 2:
+            chains.append([p.name for p in chain])
+    return chains
+
+def ensure_action(obj, action_name="Overlap_Bake"):
+    if not obj.animation_data:
+        obj.animation_data_create()
+    ad = obj.animation_data
+    if not ad.action:
+        act = bpy.data.actions.new(action_name)
+        ad.action = act
+    return ad.action
+
+def get_chain_posebones(obj, names):
+    return [obj.pose.bones.get(n) for n in names if obj.pose.bones.get(n) is not None]
+
+# ---------- Non-physics overlap (offset + damping) ----------
+
+def slerp(q1, q2, t):
+    return q1.slerp(q2, t)
+
+def lowpass_quat(prev_q, target_q, alpha):
+    # Blend prev toward target by alpha
+    out = Quaternion(prev_q)
+    out = slerp(prev_q, target_q, alpha)
+    return out
+
+def apply_nonphysics_overlap(context, obj, chains, start, end, fps, per_bone_delay_frames, rot_damping, pos_damping, affect_loc, affect_rot):
+    # Read original animation as target, build filtered/offset values, then bake
+    scene = context.scene
+    action = ensure_action(obj, "Overlap_Bake")
+    # Create FCurves if needed
+    # We'll bake by setting evaluated pose each frame and keying
+    for chain_names in chains:
+        # Build per-bone state
+        state_rot = {}
+        state_loc = {}
+        # per bone effective delay = index * per_bone_delay_frames
+        for frame in range(int(start), int(end)+1):
+            scene.frame_set(frame)
+            for idx, bone_name in enumerate(chain_names):
+                pb = obj.pose.bones[bone_name]
+                # Get target transforms in bone space (pose space)
+                target_rot = pb.rotation_quaternion.copy() if pb.rotation_mode == 'QUATERNION' else pb.matrix.to_quaternion()
+                target_loc = pb.location.copy()
+                # Initialize state
+                if bone_name not in state_rot:
+                    state_rot[bone_name] = target_rot.copy()
+                if bone_name not in state_loc:
+                    state_loc[bone_name] = target_loc.copy()
+                # Compute delayed frame to sample from target
+                delay = per_bone_delay_frames * idx
+                sample_frame = max(int(start), frame - delay)
+                if delay > 0:
+                    scene.frame_set(sample_frame)
+                    pb2 = obj.pose.bones[bone_name]
+                    target_rot = pb2.rotation_quaternion.copy() if pb2.rotation_mode == 'QUATERNION' else pb2.matrix.to_quaternion()
+                    target_loc = pb2.location.copy()
+                    scene.frame_set(frame)
+                # Apply damping as low-pass
+                if affect_rot:
+                    prev = state_rot[bone_name]
+                    blended = lowpass_quat(prev, target_rot, rot_damping)
+                    state_rot[bone_name] = blended
+                    if pb.rotation_mode == 'QUATERNION':
+                        pb.rotation_quaternion = blended
+                    else:
+                        pb.rotation_quaternion = blended
+                        pb.rotation_mode = 'QUATERNION'
+                if affect_loc:
+                    prevl = state_loc[bone_name]
+                    newl = prevl.lerp(target_loc, pos_damping)
+                    state_loc[bone_name] = newl
+                    pb.location = newl
+                pb.keyframe_insert(data_path="rotation_quaternion", frame=frame)
+                if affect_loc:
+                    pb.keyframe_insert(data_path="location", frame=frame)
+
+# ---------- Physics jiggle (mass-spring) ----------
+
+class JiggleBoneState:
+    def __init__(self, rest_matrix, pos, vel, mass):
+        self.rest_matrix = rest_matrix.copy()
+        self.pos = Vector(pos)
+        self.vel = Vector(vel)
+        self.mass = mass
+
+def apply_physics_overlap(context, obj, chains, start, end, fps, stiffness, damping, gravity, affect_loc, affect_rot, collision_radius):
+    scene = context.scene
+    dt = 1.0 / fps
+    action = ensure_action(obj, "Overlap_Bake")
+    # Initialize per-bone states at start frame
+    scene.frame_set(int(start))
+    states = {}
+    for chain_names in chains:
+        for bone_name in chain_names:
+            pb = obj.pose.bones[bone_name]
+            m = pb.matrix.copy()
+            head_world = obj.matrix_world @ pb.head
+            states[bone_name] = JiggleBoneState(m, head_world, Vector((0,0,0)), mass=1.0)
+
+    for frame in range(int(start), int(end)+1):
+        scene.frame_set(frame)
+        # Integrate each chain from parent to child so child uses updated parent rest
+        for chain_names in chains:
+            for idx, bone_name in enumerate(chain_names):
+                pb = obj.pose.bones[bone_name]
+                st = states[bone_name]
+                # Target (spring rest) is current animated head position (so jiggle overlays)
+                target = obj.matrix_world @ pb.head
+                # Spring force
+                k = stiffness
+                c = damping
+                dir_vec = (target - st.pos)
+                force = k * dir_vec - c * st.vel + Vector((0,0,-abs(gravity))) * st.mass
+                # Integrate
+                acc = force / st.mass
+                st.vel = st.vel + acc * dt
+                st.pos = st.pos + st.vel * dt
+                # Apply back to pose
+                # Build a new bone matrix orienting from pos to tail direction
+                tail_world = obj.matrix_world @ pb.tail
+                rest_dir = (tail_world - (obj.matrix_world @ pb.head)).normalized() if (tail_world - (obj.matrix_world @ pb.head)).length > 1e-6 else Vector((0,1,0))
+                new_dir = (tail_world - st.pos)
+                if new_dir.length < 1e-6:
+                    new_dir = rest_dir
+                new_dir = new_dir.normalized()
+                # Compute rotation that rotates rest_dir to new_dir
+                axis = rest_dir.cross(new_dir)
+                angle = max(-math.pi, min(math.pi, math.acos(max(-1.0, min(1.0, rest_dir.dot(new_dir))))))
+                if axis.length > 1e-6:
+                    rot = Quaternion(axis.normalized(), angle)
+                else:
+                    rot = Quaternion()
+                if affect_rot:
+                    pb.rotation_mode = 'QUATERNION'
+                    pb.rotation_quaternion = rot @ pb.rotation_quaternion
+                if affect_loc:
+                    # Move head toward st.pos in local space
+                    # Convert desired world head pos to local delta
+                    current_head_world = obj.matrix_world @ pb.head
+                    delta_world = st.pos - current_head_world
+                    # Approximate by adding to location in bone local space (small jiggle effect)
+                    local_delta = (obj.matrix_world.inverted() @ Matrix.Translation(delta_world)).to_translation()
+                    pb.location += local_delta
+                pb.keyframe_insert(data_path="rotation_quaternion", frame=frame)
+                if affect_loc:
+                    pb.keyframe_insert(data_path="location", frame=frame)
+
+# ---------- Properties ----------
+
+class OH_ChainItem(PropertyGroup):
+    name: StringProperty()
+    bones: StringProperty()  # comma-separated bone names
+
+class OH_Settings(PropertyGroup):
+    mode: EnumProperty(
+        name="Mode",
+        description="Non-Physics: offset+damping. Physics: jiggle solver.",
+        items=[
+            ('NONPHYS', "Non-Physics", "Offset per bone with damping"),
+            ('PHYS', "Physics", "Mass-spring jiggle"),
+        ],
+        default='NONPHYS'
+    )
+    affect_rot: BoolProperty(name="Affect Rotation", default=True)
+    affect_loc: BoolProperty(name="Affect Location", default=False)
+    start_frame: IntProperty(name="Start", default=1, min=0)
+    end_frame: IntProperty(name="End", default=250, min=1)
+    # Non-physics params
+    per_bone_delay: IntProperty(name="Delay/Step (frames)", default=2, min=0, max=20)
+    rot_damping: FloatProperty(name="Rot Damping (0-1)", default=0.25, min=0.0, max=1.0)
+    pos_damping: FloatProperty(name="Pos Damping (0-1)", default=0.25, min=0.0, max=1.0)
+    # Physics params
+    stiffness: FloatProperty(name="Stiffness", default=50.0, min=0.0, max=1000.0)
+    damping: FloatProperty(name="Damping", default=5.0, min=0.0, max=1000.0)
+    gravity: FloatProperty(name="Gravity", default=9.81, min=-100.0, max=100.0)
+    collision_radius: FloatProperty(name="Collider Radius", default=0.02, min=0.0, max=1.0)
+    # Chains
+    chains: CollectionProperty(type=OH_ChainItem)
+    active_chain: IntProperty(name="Active Chain", default=0, min=0)
+
+# ---------- Operators ----------
+
+class OH_OT_DetectChains(Operator):
+    bl_idname = "oh.detect_chains"
+    bl_label = "Detect Chains"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        props = context.scene.oh_settings
+        props.chains.clear()
+        chains = discover_chains(context)
+        for ch in chains:
+            item = props.chains.add()
+            item.name = f"Chain: {ch} -> {ch[-1]}"
+            item.bones = ",".join(ch)
+        self.report({'INFO'}, f"Detected {len(props.chains)} chains.")
+        return {'FINISHED'}
+
+class OH_OT_ApplyOverlap(Operator):
+    bl_idname = "oh.apply_overlap"
+    bl_label = "Apply Overlap (Preview/Bake)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    preview_only: BoolProperty(default=True)
+
+    def execute(self, context):
+        obj = context.object
+        if not obj or obj.type != 'ARMATURE':
+            self.report({'ERROR'}, "Select an armature in Pose Mode.")
+            return {'CANCELLED'}
+        props = context.scene.oh_settings
+        if len(props.chains) == 0:
+            self.report({'ERROR'}, "No chains detected.")
+            return {'CANCELLED'}
+        chains = []
+        for item in props.chains:
+            bones = [b for b in item.bones.split(",") if b]
+            if bones:
+                chains.append(bones)
+        fps = get_scene_fps(context.scene)
+        if props.mode == 'NONPHYS':
+            apply_nonphysics_overlap(
+                context, obj, chains,
+                props.start_frame, props.end_frame, fps,
+                props.per_bone_delay, props.rot_damping, props.pos_damping,
+                props.affect_loc, props.affect_rot
+            )
         else:
-            if pb.bone_group == overlap_group:
-                pb.bone_group = None
-
-class OVERLAPPER_OT_RunOverlapper(bpy.types.Operator):
-    bl_idname = "overlapper.run"
-    bl_label = "Run Overlapper on Bones"
-    bl_description = "Bake overlapping animation with adaptive softness, wind, and cycle on selected bones"
-
-    softness: bpy.props.FloatProperty(name="Softness", default=3.0, min=0.0, max=50.0)
-    adaptive_scale: bpy.props.BoolProperty(name="Adaptive Scale", default=True)
-    global_scale: bpy.props.FloatProperty(name="Scale", default=1.0, min=0.0)
-    wind: bpy.props.BoolProperty(name="Wind", default=False)
-    wind_scale: bpy.props.FloatProperty(name="Wind Scale", default=1.0, min=0.0)
-    wind_speed: bpy.props.FloatProperty(name="Wind Speed", default=1.0, min=0.0)
-    first_ctrl: bpy.props.BoolProperty(name="Don't use first control", default=False)
-    cycle: bpy.props.BoolProperty(name="Cycle Animation", default=False)
-
-    def execute(self, context):
-        objs = context.selected_objects
-        if not objs:
-            self.report({'WARNING'}, "Select at least one armature object")
-            return {'CANCELLED'}
-
-        sel_pose_bones = []
-        for obj in objs:
-            if obj.type != 'ARMATURE':
-                continue
-            if obj.mode != 'POSE':
-                self.report({'WARNING'}, f"Armature '{obj.name}' not in Pose Mode. Please enter Pose Mode.")
-                return {'CANCELLED'}
-            sel_pose_bones.extend([pb for pb in obj.pose.bones if pb.bone.select])
-
-        if len(sel_pose_bones) < 2:
-            self.report({'WARNING'}, "Select at least 2 bones in Pose Mode")
-            return {'CANCELLED'}
-
-        CleanUpProc()
-
-        active_arm_obj = context.active_object
-        if not active_arm_obj or active_arm_obj.type != 'ARMATURE':
-            self.report({'WARNING'}, "Active object must be an armature for baking")
-            return {'CANCELLED'}
-        if active_arm_obj.mode != 'POSE':
-            bpy.ops.object.mode_set(mode='POSE')
-
-        if self.first_ctrl:
-            sel_pose_bones = sel_pose_bones[1:]
-
-        if not sel_pose_bones:
-            self.report({'WARNING'}, "No bones to bake after skipping first control")
-            return {'CANCELLED'}
-
-        scene = context.scene
-        min_frame = scene.frame_start
-        max_frame = scene.frame_end
-
-        softness = self.softness
-        if self.adaptive_scale:
-            adaptive = calculate_adaptive_scale(sel_pose_bones, active_arm_obj, min_frame, max_frame)
-            softness *= adaptive
-
-        new_action = create_action_and_add_nla(active_arm_obj, f"{active_arm_obj.name}_OverlapAction")
-
-        overlap_group = get_or_create_bone_group(active_arm_obj, "Overlapper_BoneGroup")
-
-        safe_assign_bone_groups(active_arm_obj, sel_pose_bones, overlap_group)
-
-        for index, pbone in enumerate(sel_pose_bones):
-            orig_x = pbone.location.x
-
-            fcurves_to_clear = [fc for fc in new_action.fcurves if fc.data_path == f'pose.bones["{pbone.name}"].location' and fc.array_index == 0]
-            for fc in fcurves_to_clear:
-                fc.keyframe_points.clear()
-
-            for frame in range(min_frame, max_frame + 1):
-                bpy.context.scene.frame_set(frame)
-                base_val = pbone.location.x
-
-                wind_offset = 0
-                if self.wind:
-                    wind_offset = (noise.noise(frame * 0.1 + index) - 0.5) * 2 * self.wind_scale * self.wind_speed
-
-                new_val = base_val + softness * self.global_scale + wind_offset
-                bake_frame = frame + int(softness * index)
-                if bake_frame > max_frame:
-                    bake_frame = max_frame
-
-                pbone.location.x = new_val
-                pbone.keyframe_insert(data_path="location", frame=bake_frame, index=0)
-
-            bpy.context.scene.frame_set(scene.frame_current)
-            pbone.location.x = orig_x
-
-        if self.cycle:
-            for pbone in sel_pose_bones:
-                for fc in new_action.fcurves:
-                    if fc.data_path.startswith(f'pose.bones["{pbone.name}"].location'):
-                        fc.extrapolation = 'Cyclic'
-
-        self.report({'INFO'}, "Overlapper on bones completed.")
+            apply_physics_overlap(
+                context, obj, chains,
+                props.start_frame, props.end_frame, fps,
+                props.stiffness, props.damping, props.gravity,
+                props.affect_loc, props.affect_rot, props.collision_radius
+            )
         return {'FINISHED'}
 
-class OVERLAPPER_OT_RunOverlapperHierarchy(bpy.types.Operator):
-    bl_idname = "overlapper.run_hierarchy"
-    bl_label = "Run Overlapper on Bone Hierarchy"
-    bl_description = "Bake overlapping animation on selected bones and their child hierarchy with adaptive softness, wind, and cycle"
-
-    softness: bpy.props.FloatProperty(name="Softness", default=3.0, min=0.0, max=50.0)
-    adaptive_scale: bpy.props.BoolProperty(name="Adaptive Scale", default=True)
-    global_scale: bpy.props.FloatProperty(name="Scale", default=1.0, min=0.0)
-    wind: bpy.props.BoolProperty(name="Wind", default=False)
-    wind_scale: bpy.props.FloatProperty(name="Wind Scale", default=1.0, min=0.0)
-    wind_speed: bpy.props.FloatProperty(name="Wind Speed", default=1.0, min=0.0)
-    first_ctrl: bpy.props.BoolProperty(name="Don't use first control", default=False)
-    cycle: bpy.props.BoolProperty(name="Cycle Animation", default=False)
+class OH_OT_BakeOnly(Operator):
+    bl_idname = "oh.bake_overlap"
+    bl_label = "Bake to Keyframes"
+    bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-        objs = context.selected_objects
-        if not objs:
-            self.report({'WARNING'}, "Select at least one armature object")
-            return {'CANCELLED'}
-
-        sel_pose_bones = []
-        for obj in objs:
-            if obj.type != 'ARMATURE':
-                continue
-            if obj.mode != 'POSE':
-                self.report({'WARNING'}, f"Armature '{obj.name}' not in Pose Mode. Please enter Pose Mode.")
-                return {'CANCELLED'}
-            sel_pose_bones.extend([pb for pb in obj.pose.bones if pb.bone.select])
-
-        if len(sel_pose_bones) < 1:
-            self.report({'WARNING'}, "Select at least one bone in Pose Mode")
-            return {'CANCELLED'}
-
-        all_pose_bones = get_bone_hierarchy(sel_pose_bones)
-
-        if self.first_ctrl and all_pose_bones:
-            all_pose_bones = all_pose_bones[1:]
-
-        if not all_pose_bones:
-            self.report({'WARNING'}, "No bones to bake after skipping first control")
-            return {'CANCELLED'}
-
-        CleanUpProc()
-
-        active_arm_obj = context.active_object
-        if not active_arm_obj or active_arm_obj.type != 'ARMATURE':
-            self.report({'WARNING'}, "Active object must be an armature for baking")
-            return {'CANCELLED'}
-        if active_arm_obj.mode != 'POSE':
-            bpy.ops.object.mode_set(mode='POSE')
-
-        scene = context.scene
-        min_frame = scene.frame_start
-        max_frame = scene.frame_end
-
-        softness = self.softness
-        if self.adaptive_scale:
-            adaptive = calculate_adaptive_scale(all_pose_bones, active_arm_obj, min_frame, max_frame)
-            softness *= adaptive
-
-        new_action = create_action_and_add_nla(active_arm_obj, f"{active_arm_obj.name}_OverlapHierarchyAction")
-
-        overlap_group = get_or_create_bone_group(active_arm_obj, "Overlapper_BoneGroup")
-
-        safe_assign_bone_groups(active_arm_obj, all_pose_bones, overlap_group)
-
-        for index, pbone in enumerate(all_pose_bones):
-            orig_x = pbone.location.x
-
-            fcurves_to_clear = [fc for fc in new_action.fcurves if fc.data_path == f'pose.bones["{pbone.name}"].location' and fc.array_index == 0]
-            for fc in fcurves_to_clear:
-                fc.keyframe_points.clear()
-
-            for frame in range(min_frame, max_frame + 1):
-                bpy.context.scene.frame_set(frame)
-                base_val = pbone.location.x
-
-                wind_offset = 0
-                if self.wind:
-                    wind_offset = (noise.noise(frame * 0.1 + index) - 0.5) * 2 * self.wind_scale * self.wind_speed
-
-                new_val = base_val + softness * self.global_scale + wind_offset
-                bake_frame = frame + int(softness * index)
-                if bake_frame > max_frame:
-                    bake_frame = max_frame
-
-                pbone.location.x = new_val
-                pbone.keyframe_insert(data_path="location", frame=bake_frame, index=0)
-
-            bpy.context.scene.frame_set(scene.frame_current)
-            pbone.location.x = orig_x
-
-        if self.cycle:
-            for pbone in all_pose_bones:
-                for fc in new_action.fcurves:
-                    if fc.data_path.startswith(f'pose.bones["{pbone.name}"].location'):
-                        fc.extrapolation = 'Cyclic'
-
-        self.report({'INFO'}, f"Overlapper hierarchy baked on {len(all_pose_bones)} bones.")
+        # Baking is already performed by Apply operators via keyframe_insert per frame.
+        self.report({'INFO'}, "Overlap baked to keyframes in active action.")
         return {'FINISHED'}
 
-class OVERLAPPER_PT_Panel(bpy.types.Panel):
-    bl_idname = "OVERLAPPER_PT_panel"
-    bl_label = "Overlapper Tool (Bones)"
-    bl_space_type = "VIEW_3D"
-    bl_region_type = "UI"
-    bl_category = "Overlapper"
+# ---------- UI Panel ----------
+
+class OH_PT_Panel(Panel):
+    bl_label = "Overlap Helper"
+    bl_idname = "OH_PT_panel"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Overlap Helper"
 
     def draw(self, context):
         layout = self.layout
-        scn = context.scene
+        props = context.scene.oh_settings
 
-        layout.prop(scn, "overlapper_softness")
-        layout.prop(scn, "overlapper_adaptive_scale")
-        layout.prop(scn, "overlapper_global_scale")
-        layout.prop(scn, "overlapper_wind")
-        if scn.overlapper_wind:
-            layout.prop(scn, "overlapper_wind_scale")
-            layout.prop(scn, "overlapper_wind_speed")
-        layout.prop(scn, "overlapper_first_ctrl")
-        layout.prop(scn, "overlapper_cycle")
+        col = layout.column(align=True)
+        col.label(text="Detection")
+        row = col.row(align=True)
+        row.operator("oh.detect_chains", text="Detect Chains")
 
-        layout.operator("overlapper.run", text="Overlap Selected Bones")
-        layout.operator("overlapper.run_hierarchy", text="Overlap Bone Hierarchy")
+        col.separator()
+        col.label(text="Chains")
+        if len(props.chains) == 0:
+            col.label(text="No chains detected")
+        else:
+            for i, item in enumerate(props.chains):
+                box = col.box()
+                box.label(text=item.name)
+                box.label(text=item.bones)
+
+        col.separator()
+        col.label(text="Mode")
+        col.prop(props, "mode", expand=True)
+        col.prop(props, "affect_rot")
+        col.prop(props, "affect_loc")
+        col.prop(props, "start_frame")
+        col.prop(props, "end_frame")
+
+        if props.mode == 'NONPHYS':
+            col.separator()
+            col.label(text="Non-Physics Settings")
+            col.prop(props, "per_bone_delay")
+            col.prop(props, "rot_damping")
+            col.prop(props, "pos_damping")
+        else:
+            col.separator()
+            col.label(text="Physics Settings")
+            col.prop(props, "stiffness")
+            col.prop(props, "damping")
+            col.prop(props, "gravity")
+            col.prop(props, "collision_radius")
+
+        col.separator()
+        col.operator("oh.apply_overlap", text="Apply Overlap (Preview/Bake)")
+        col.operator("oh.bake_overlap", text="Bake to Keyframes")
 
 classes = (
-    OVERLAPPER_OT_RunOverlapper,
-    OVERLAPPER_OT_RunOverlapperHierarchy,
-    OVERLAPPER_PT_Panel,
+    OH_ChainItem,
+    OH_Settings,
+    OH_OT_DetectChains,
+    OH_OT_ApplyOverlap,
+    OH_OT_BakeOnly,
+    OH_PT_Panel,
 )
 
 def register():
-    for cls in classes:
-        bpy.utils.register_class(cls)
-
-    bpy.types.Scene.overlapper_softness = bpy.props.FloatProperty(name="Softness", default=3.0, min=0.0, max=50.0)
-    bpy.types.Scene.overlapper_adaptive_scale = bpy.props.BoolProperty(name="Adaptive Scale", default=True)
-    bpy.types.Scene.overlapper_global_scale = bpy.props.FloatProperty(name="Scale", default=1.0, min=0.0)
-    bpy.types.Scene.overlapper_wind = bpy.props.BoolProperty(name="Wind", default=False)
-    bpy.types.Scene.overlapper_wind_scale = bpy.props.FloatProperty(name="Wind Scale", default=1.0, min=0.0)
-    bpy.types.Scene.overlapper_wind_speed = bpy.props.FloatProperty(name="Wind Speed", default=1.0, min=0.0)
-    bpy.types.Scene.overlapper_first_ctrl = bpy.props.BoolProperty(name="Don't use first control", default=False)
-    bpy.types.Scene.overlapper_cycle = bpy.props.BoolProperty(name="Cycle Animation", default=False)
+    for c in classes:
+        bpy.utils.register_class(c)
+    bpy.types.Scene.oh_settings = PointerProperty(type=OH_Settings)
 
 def unregister():
-    for cls in classes:
-        bpy.utils.unregister_class(cls)
-
-    del bpy.types.Scene.overlapper_softness
-    del bpy.types.Scene.overlapper_adaptive_scale
-    del bpy.types.Scene.overlapper_global_scale
-    del bpy.types.Scene.overlapper_wind
-    del bpy.types.Scene.overlapper_wind_scale
-    del bpy.types.Scene.overlapper_wind_speed
-    del bpy.types.Scene.overlapper_first_ctrl
-    del bpy.types.Scene.overlapper_cycle
+    for c in reversed(classes):
+        bpy.utils.unregister_class(c)
+    del bpy.types.Scene.oh_settings
 
 if __name__ == "__main__":
     register()
