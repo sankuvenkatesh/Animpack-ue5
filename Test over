@@ -4,6 +4,10 @@ import fnmatch
 import mathutils.noise as noise
 
 def CleanUpProc():
+    # Ensure Object Mode before selection and deletion ops
+    if bpy.context.mode != 'OBJECT':
+        bpy.ops.object.mode_set(mode='OBJECT')
+
     if "OverlapperArmature" in bpy.data.objects:
         obj = bpy.data.objects["OverlapperArmature"]
         bpy.data.objects.remove(obj, do_unlink=True)
@@ -88,10 +92,13 @@ class OVERLAPPER_OT_RunOverlapper(bpy.types.Operator):
             return {'CANCELLED'}
 
         CleanUpProc()
+
         active_arm_obj = context.active_object
         if not active_arm_obj or active_arm_obj.type != 'ARMATURE':
             self.report({'WARNING'}, "Active object must be an armature for baking")
             return {'CANCELLED'}
+        if active_arm_obj.mode != 'POSE':
+            bpy.ops.object.mode_set(mode='POSE')
 
         if self.first_ctrl:
             sel_bones = sel_bones[1:]
@@ -212,6 +219,8 @@ class OVERLAPPER_OT_RunOverlapperHierarchy(bpy.types.Operator):
         if not active_arm_obj or active_arm_obj.type != 'ARMATURE':
             self.report({'WARNING'}, "Active object must be an armature for baking")
             return {'CANCELLED'}
+        if active_arm_obj.mode != 'POSE':
+            bpy.ops.object.mode_set(mode='POSE')
 
         scene = context.scene
         min_frame = scene.frame_start
