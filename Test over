@@ -58,6 +58,40 @@ def calculate_adaptive_scale(sel_bones, arm_obj, min_frame, max_frame):
     avg_motion = total_motion / sample_count
     return max(0.1, min(avg_motion * 2.0, 10.0))
 
+def get_or_create_bone_group(arm_obj, group_name):
+    p = arm_obj.pose
+    if not p:
+        arm_obj.pose_create()
+        p = arm_obj.pose
+    bg = p.bone_groups.get(group_name)
+    if not bg:
+        bg = p.bone_groups.new(name=group_name)
+    return bg
+
+def create_action_and_add_nla(arm_obj, new_action_name):
+    if not arm_obj.animation_data:
+        arm_obj.animation_data_create()
+    anim_data = arm_obj.animation_data
+
+    # Push down existing action to NLA track if present
+    if anim_data.action:
+        # Find or create a new NLA track
+        nla_track = None
+        for track in anim_data.nla_tracks:
+            nla_track = track
+            break
+        if not nla_track:
+            nla_track = anim_data.nla_tracks.new()
+
+        nla_strip = nla_track.strips.new(name=anim_data.action.name, start=anim_data.action.frame_range[0])
+        nla_strip.action = anim_data.action
+        anim_data.action = None
+
+    # Create new action and assign
+    new_action = bpy.data.actions.new(new_action_name)
+    anim_data.action = new_action
+    return new_action
+
 class OVERLAPPER_OT_RunOverlapper(bpy.types.Operator):
     bl_idname = "overlapper.run"
     bl_label = "Run Overlapper on Bones"
@@ -116,16 +150,9 @@ class OVERLAPPER_OT_RunOverlapper(bpy.types.Operator):
             adaptive = calculate_adaptive_scale(sel_bones, active_arm_obj, min_frame, max_frame)
             softness *= adaptive
 
-        new_action = bpy.data.actions.new(name=f"{active_arm_obj.name}_OverlapAction")
-        if not active_arm_obj.animation_data:
-            active_arm_obj.animation_data_create()
-        active_arm_obj.animation_data.action = new_action
+        new_action = create_action_and_add_nla(active_arm_obj, f"{active_arm_obj.name}_OverlapAction")
 
-        bone_group_name = "Overlapper_BoneGroup"
-        if bone_group_name not in active_arm_obj.pose.bone_groups:
-            overlap_group = active_arm_obj.pose.bone_groups.new(name=bone_group_name)
-        else:
-            overlap_group = active_arm_obj.pose.bone_groups[bone_group_name]
+        overlap_group = get_or_create_bone_group(active_arm_obj, "Overlapper_BoneGroup")
 
         for pb in active_arm_obj.pose.bones:
             if pb.bone in sel_bones:
@@ -231,16 +258,9 @@ class OVERLAPPER_OT_RunOverlapperHierarchy(bpy.types.Operator):
             adaptive = calculate_adaptive_scale(all_bones, active_arm_obj, min_frame, max_frame)
             softness *= adaptive
 
-        new_action = bpy.data.actions.new(name=f"{active_arm_obj.name}_OverlapHierarchyAction")
-        if not active_arm_obj.animation_data:
-            active_arm_obj.animation_data_create()
-        active_arm_obj.animation_data.action = new_action
+        new_action = create_action_and_add_nla(active_arm_obj, f"{active_arm_obj.name}_OverlapHierarchyAction")
 
-        bone_group_name = "Overlapper_BoneGroup"
-        if bone_group_name not in active_arm_obj.pose.bone_groups:
-            overlap_group = active_arm_obj.pose.bone_groups.new(name=bone_group_name)
-        else:
-            overlap_group = active_arm_obj.pose.bone_groups[bone_group_name]
+        overlap_group = get_or_create_bone_group(active_arm_obj, "Overlapper_BoneGroup")
 
         for pb in active_arm_obj.pose.bones:
             if pb.bone in all_bones:
