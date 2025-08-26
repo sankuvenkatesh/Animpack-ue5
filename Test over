@@ -1,31 +1,23 @@
 bl_info = {
-    "name": "Bone Overlapper Picker",
+    "name": "Reliable Bone Overlapper",
     "blender": (3, 0, 0),
     "category": "Animation",
-    "author": "Your Name",
-    "version": (1, 0, 1),
-    "description": "Overlapping animation tool working on pose bones with per-bone settings"
+    "author": "AI Assistant",
+    "version": (1, 0, 2),
+    "description": "Bone overlapping animation tool with proper delayed frame sampling"
 }
 
 import bpy
 import mathutils
 
-# --------------------------------------------------------
-# Per-bone overlap settings
-# --------------------------------------------------------
-
 class OverlapItem(bpy.types.PropertyGroup):
-    armature_ref: bpy.props.PointerProperty(type=bpy.types.Object, name="Armature")
-    bone_name: bpy.props.StringProperty(name="Bone Name")
-    delay: bpy.props.IntProperty(name="Delay", default=2, min=0, max=30)
+    armature_ref: bpy.props.PointerProperty(type=bpy.types.Object)
+    bone_name: bpy.props.StringProperty()
+    delay: bpy.props.IntProperty(name="Delay", default=3, min=0, max=30)
     damping: bpy.props.FloatProperty(name="Damping", default=0.8, min=0.0, max=1.0)
     affect_translation: bpy.props.BoolProperty(name="Affect Translation", default=True)
     affect_rotation: bpy.props.BoolProperty(name="Affect Rotation", default=True)
     cycle: bpy.props.BoolProperty(name="Seamless Cycle", default=True)
-
-# --------------------------------------------------------
-# Utilities
-# --------------------------------------------------------
 
 def get_frame_range(context):
     scene = context.scene
@@ -40,27 +32,15 @@ def blend_cycle(values, cycle):
         values[-1] = (first * 0.5 + last * 0.5)
     return values
 
-def get_pose_bone_fcurve(action, bone_name, data_path_suffix):
-    """Return fcurve for a specific pose bone channel (location/rotation)."""
-    if not action:
-        return None
-
-    path_loc = f'pose.bones["{bone_name}"].location'
-    path_rot_quat = f'pose.bones["{bone_name}"].rotation_quaternion'
-    path_rot_euler = f'pose.bones["{bone_name}"].rotation_euler'
-
-    for fcurve in action.fcurves:
-        if data_path_suffix == 'location' and fcurve.data_path == path_loc:
-            return fcurve
-        if data_path_suffix == 'rotation_quaternion' and fcurve.data_path == path_rot_quat:
-            return fcurve
-        if data_path_suffix == 'rotation_euler' and fcurve.data_path == path_rot_euler:
-            return fcurve
-    return None
-
-# --------------------------------------------------------
-# Core Overlap Algorithm for Pose Bones
-# --------------------------------------------------------
+def evaluate_pose_at_frame(arm_obj, frame):
+    scene = bpy.context.scene
+    current_frame = scene.frame_current
+    scene.frame_set(frame)
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    eval_obj = arm_obj.evaluated_get(depsgraph)
+    eval_pose = eval_obj.pose
+    scene.frame_set(current_frame)
+    return eval_pose
 
 def apply_overlap_on_pose_bones(items, f_start, f_end):
     scene = bpy.context.scene
@@ -73,43 +53,47 @@ def apply_overlap_on_pose_bones(items, f_start, f_end):
         affect_rot = item.affect_rotation
         cycle = item.cycle
 
-        if not arm or arm.type != 'ARMATURE' or not arm.animation_data or not arm.animation_data.action:
+        if not arm or arm.type != 'ARMATURE':
             continue
+
+        if not arm.animation_data or not arm.animation_data.action:
+            continue
+
         pose_bone = arm.pose.bones.get(bone_name)
         if not pose_bone:
             continue
 
-        old_action = arm.animation_data.action
+        original_action = arm.animation_data.action
         new_action = bpy.data.actions.new(name=f"{arm.name}_{bone_name}_Overlapped")
         arm.animation_data.action = new_action
 
-        # Collect translation and rotation keyframe values
-        translations = []
-        rotations = []
-        # Use bone's rotation mode to handle rotation properly
         rot_mode = pose_bone.rotation_mode
 
+        translations = []
+        rotations = []
+
         for frame in range(f_start, f_end + 1):
-            source_frame = max(f_start, frame - delay)
-            scene.frame_set(source_frame)
+            sample_frame = max(f_start, frame - delay)
+            scene.frame_set(sample_frame)
+            depsgraph = bpy.context.evaluated_depsgraph_get()
+            eval_arm = arm.evaluated_get(depsgraph)
+            eval_pose_bone = eval_arm.pose.bones.get(bone_name)
 
-            # Read pose bone world matrix, extract local transforms
-            mat = arm.matrix_world @ pose_bone.matrix
+            if not eval_pose_bone:
+                continue
 
-            loc = pose_bone.location.copy()
-            rot = None
-
+            loc = eval_pose_bone.location.copy()
             if rot_mode == 'QUATERNION':
-                rot = pose_bone.rotation_quaternion.copy()
+                rot = eval_pose_bone.rotation_quaternion.copy()
             else:
-                rot = pose_bone.rotation_euler.copy()
+                rot = eval_pose_bone.rotation_euler.copy()
 
-            # Apply damping factor for overlap effect
+            # Apply damping blending towards zero transform to simulate overlap lag
             if affect_loc:
                 loc_damped = loc * damping
                 translations.append(loc_damped)
             else:
-                translations.append(loc)
+                translations.append(pose_bone.location.copy())
 
             if affect_rot:
                 if rot_mode == 'QUATERNION':
@@ -121,17 +105,18 @@ def apply_overlap_on_pose_bones(items, f_start, f_end):
                     blended = e_identity.lerp(rot, damping)
                     rotations.append(blended)
             else:
-                rotations.append(rot)
+                if rot_mode == 'QUATERNION':
+                    rotations.append(pose_bone.rotation_quaternion.copy())
+                else:
+                    rotations.append(pose_bone.rotation_euler.copy())
 
         translations = blend_cycle(translations, cycle)
         rotations = blend_cycle(rotations, cycle)
 
-        # Insert keyframes back into new action for this bone
         for idx, frame in enumerate(range(f_start, f_end + 1)):
             if affect_loc:
                 pose_bone.location = translations[idx]
                 pose_bone.keyframe_insert(data_path="location", frame=frame)
-
             if affect_rot:
                 if rot_mode == 'QUATERNION':
                     pose_bone.rotation_mode = 'QUATERNION'
@@ -141,19 +126,6 @@ def apply_overlap_on_pose_bones(items, f_start, f_end):
                     pose_bone.rotation_mode = rot_mode
                     pose_bone.rotation_euler = rotations[idx]
                     pose_bone.keyframe_insert(data_path="rotation_euler", frame=frame)
-
-# --------------------------------------------------------
-# UI List and Operator Definitions
-# --------------------------------------------------------
-
-class OverlapItem(bpy.types.PropertyGroup):
-    armature_ref: bpy.props.PointerProperty(type=bpy.types.Object, name="Armature")
-    bone_name: bpy.props.StringProperty(name="Bone Name")
-    delay: bpy.props.IntProperty(name="Delay", default=2, min=0, max=30)
-    damping: bpy.props.FloatProperty(name="Damping", default=0.8, min=0.0, max=1.0)
-    affect_translation: bpy.props.BoolProperty(name="Affect Translation", default=True)
-    affect_rotation: bpy.props.BoolProperty(name="Affect Rotation", default=True)
-    cycle: bpy.props.BoolProperty(name="Seamless Cycle", default=True)
 
 class ANIM_UL_BonePicker(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
@@ -178,19 +150,17 @@ class ANIM_OT_AddSelectedBones(bpy.types.Operator):
             return {'CANCELLED'}
 
         picker = sc.bone_picker
-        # Add selected pose bones
         for pbone in arm_obj.data.bones:
             if pbone.select:
-                found = False
+                exists = False
                 for item in picker:
                     if (item.armature_ref == arm_obj and item.bone_name == pbone.name):
-                        found = True
+                        exists = True
                         break
-                if not found:
+                if not exists:
                     it = picker.add()
                     it.armature_ref = arm_obj
                     it.bone_name = pbone.name
-
         return {'FINISHED'}
 
 class ANIM_OT_RemoveFromPicker(bpy.types.Operator):
@@ -235,9 +205,7 @@ class VIEW3D_PT_BoneOverlapper(bpy.types.Panel):
         scene = context.scene
 
         row = layout.row()
-        row.template_list(
-            "ANIM_UL_BonePicker", "", scene, "bone_picker",
-            scene, "bone_picker_index", rows=5)
+        row.template_list("ANIM_UL_BonePicker", "", scene, "bone_picker", scene, "bone_picker_index", rows=5)
 
         col = row.column(align=True)
         col.operator("anim.add_selected_bones", icon='ADD', text="")
@@ -245,10 +213,6 @@ class VIEW3D_PT_BoneOverlapper(bpy.types.Panel):
         col.operator("anim.clear_picker", icon='TRASH', text="")
 
         layout.operator("anim.apply_overlap_bones", icon='ANIM')
-
-# --------------------------------------------------------
-# Register
-# --------------------------------------------------------
 
 classes = [
     OverlapItem,
