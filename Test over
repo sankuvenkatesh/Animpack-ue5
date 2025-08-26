@@ -1,25 +1,5 @@
 import bpy
 import random
-import fnmatch
-
-def CleanUpProc():
-    if "OverlapperArmature" in bpy.data.objects:
-        obj = bpy.data.objects["OverlapperArmature"]
-        bpy.data.objects.remove(obj, do_unlink=True)
-    patterns = [
-        "*_overlapOffsetLocator*",
-    ]
-    objs_to_delete = []
-    for obj in bpy.data.objects:
-        for pat in patterns:
-            if fnmatch.fnmatch(obj.name, pat):
-                objs_to_delete.append(obj)
-                break
-    bpy.ops.object.select_all(action='DESELECT')
-    for o in objs_to_delete:
-        o.select_set(True)
-    if objs_to_delete:
-        bpy.ops.object.delete()
 
 def get_bone_hierarchy(bones):
     hierarchy = set()
@@ -33,283 +13,119 @@ def get_bone_hierarchy(bones):
         recurse(bone)
     return list(hierarchy)
 
-class OVERLAPPER_OT_RunOverlapper(bpy.types.Operator):
-    bl_idname = "overlapper.run"
-    bl_label = "Run Overlapper on Bones"
-    bl_description = "Bake overlapping animation with softness and wind effect on selected bones"
+class OVERLAPPER_OT_ApplyOverlap(bpy.types.Operator):
+    bl_idname = "overlapper.apply_overlap"
+    bl_label = "Apply Overlap Animation"
+    bl_description = "Offset animation curves in time progressively on selected bones with optional hierarchy"
 
-    softness: bpy.props.FloatProperty(name="Softness", default=3.0, min=0.0, max=50.0)
-    global_scale: bpy.props.FloatProperty(name="Scale", default=1.0, min=0.0)
-    wind: bpy.props.BoolProperty(name="Wind", default=False)
-    wind_scale: bpy.props.FloatProperty(name="Wind Scale", default=1.0, min=0.0)
-    wind_speed: bpy.props.FloatProperty(name="Wind Speed", default=1.0, min=0.0)
-    first_ctrl: bpy.props.BoolProperty(name="Don't use first control", default=False)
-    cycle: bpy.props.BoolProperty(name="Cycle Animation", default=False)
+    base_offset: bpy.props.IntProperty(name="Base Time Offset", default=3, min=0)
+    offset_increment: bpy.props.IntProperty(name="Offset Increment per Bone", default=2, min=0)
+    use_hierarchy: bpy.props.BoolProperty(name="Use Hierarchy", default=True)
+    channels_to_offset: bpy.props.EnumProperty(
+        name="Channels to Offset",
+        description="Animation channels to offset",
+        items=[
+            ('LOC', "Location", "Offset location channels"),
+            ('ROT', "Rotation", "Offset rotation channels"),
+            ('ALL', "All Channels", "Offset all animation channels"),
+        ],
+        default='ALL',
+    )
 
     def execute(self, context):
-        objs = context.selected_objects
-        if not objs:
-            self.report({'WARNING'}, "Select at least one armature object")
+        arm_obj = context.active_object
+
+        if not arm_obj or arm_obj.type != 'ARMATURE':
+            self.report({'ERROR'}, "Select an armature and enter Pose Mode")
             return {'CANCELLED'}
 
-        sel_bones = []
-        for obj in objs:
-            if obj.type != 'ARMATURE':
-                continue
-            if obj.mode != 'POSE':
-                self.report({'WARNING'}, f"Armature '{obj.name}' not in Pose Mode. Please enter Pose Mode.")
-                return {'CANCELLED'}
-            sel_bones.extend([pb for pb in obj.data.bones if pb.select])
-
-        if len(sel_bones) < 2:
-            self.report({'WARNING'}, "Select at least 2 bones in Pose Mode")
+        if arm_obj.mode != 'POSE':
+            self.report({'ERROR'}, "Armature must be in Pose Mode")
             return {'CANCELLED'}
 
-        CleanUpProc()
-        active_arm_obj = context.active_object
-        if not active_arm_obj or active_arm_obj.type != 'ARMATURE':
-            self.report({'WARNING'}, "Active object must be an armature for baking")
-            return {'CANCELLED'}
-
-        # Skip first bone if option set
-        if self.first_ctrl:
-            sel_bones = sel_bones[1:]
+        sel_bones = [b for b in arm_obj.data.bones if b.select]
 
         if not sel_bones:
-            self.report({'WARNING'}, "No bones to bake after skipping first control")
+            self.report({'ERROR'}, "Select at least one bone")
             return {'CANCELLED'}
 
-        self.bake_overlap(sel_bones, active_arm_obj)
+        if self.use_hierarchy:
+            bones = get_bone_hierarchy(sel_bones)
+        else:
+            bones = sel_bones
 
-        if self.cycle:
-            self.set_cycle_animation(sel_bones, active_arm_obj)
+        bones.sort(key=lambda b: b.name)  # sort to keep order consistent
 
-        self.report({'INFO'}, "Overlapper on bones completed.")
-        return {'FINISHED'}
-
-    def bake_overlap(self, sel_bones, arm_obj):
-        scene = bpy.context.scene
-        min_frame = int(scene.frame_start)
-        max_frame = int(scene.frame_end)
-        softness = self.softness
-        global_scale = self.global_scale
-        wind = self.wind
-        wind_scale = self.wind_scale
-        wind_speed = self.wind_speed
-
-        for pb in sel_bones:
-            pose_bone = arm_obj.pose.bones.get(pb.name)
-            if not pose_bone:
-                continue
-
-            orig_x = pose_bone.location.x
-
-            if not arm_obj.animation_data:
-                arm_obj.animation_data_create()
-            if not arm_obj.animation_data.action:
-                arm_obj.animation_data.action = bpy.data.actions.new(name=f"{arm_obj.name}_OverlapAction")
-
-            action = arm_obj.animation_data.action
-
-            for fc in [fc for fc in action.fcurves if fc.data_path == f'pose.bones["{pb.name}"].location' and fc.array_index == 0]:
-                fc.keyframe_points.clear()
-
-            for frame in range(min_frame, max_frame + 1):
-                scene.frame_set(frame)
-                base_val = pose_bone.location.x
-
-                wind_offset = 0
-                if wind:
-                    wind_offset = random.uniform(-1,1) * wind_scale * wind_speed
-
-                new_val = base_val + softness * global_scale + wind_offset
-                bake_frame = frame + softness
-                if bake_frame > max_frame:
-                    bake_frame = max_frame
-
-                pose_bone.location.x = new_val
-                pose_bone.keyframe_insert(data_path="location", frame=bake_frame, index=0)
-
-            scene.frame_set(scene.frame_current)
-            pose_bone.location.x = orig_x
-
-    def set_cycle_animation(self, sel_bones, arm_obj):
         action = arm_obj.animation_data.action if arm_obj.animation_data else None
         if not action:
-            return
-        for pb in sel_bones:
+            self.report({'ERROR'}, "Armature has no active animation to offset")
+            return {'CANCELLED'}
+
+        for i, bone in enumerate(bones):
+            time_offset = self.base_offset + i * self.offset_increment
+            bone_name = bone.name
+
             for fc in action.fcurves:
-                if fc.data_path.startswith(f'pose.bones["{pb.name}"].location'):
-                    fc.extrapolation = 'Cyclic'
+                if fc.data_path.startswith(f'pose.bones["{bone_name}"].'):
+                    if self.channels_to_offset == 'LOC' and 'location' not in fc.data_path:
+                        continue
+                    if self.channels_to_offset == 'ROT' and 'rotation_euler' not in fc.data_path and 'rotation_quaternion' not in fc.data_path:
+                        continue
 
-class OVERLAPPER_OT_RunOverlapperHierarchy(bpy.types.Operator):
-    bl_idname = "overlapper.run_hierarchy"
-    bl_label = "Run Overlapper on Bone Hierarchy"
-    bl_description = "Bake overlapping animation on selected bones and their child hierarchy"
+                    # Offset each keyframe's frame coordinate
+                    for kp in fc.keyframe_points:
+                        kp.co.x += time_offset
+                    fc.update()
 
-    softness: bpy.props.FloatProperty(name="Softness", default=3.0, min=0.0, max=50.0)
-    global_scale: bpy.props.FloatProperty(name="Scale", default=1.0, min=0.0)
-    wind: bpy.props.BoolProperty(name="Wind", default=False)
-    wind_scale: bpy.props.FloatProperty(name="Wind Scale", default=1.0, min=0.0)
-    wind_speed: bpy.props.FloatProperty(name="Wind Speed", default=1.0, min=0.0)
-    first_ctrl: bpy.props.BoolProperty(name="Don't use first control", default=False)
-    cycle: bpy.props.BoolProperty(name="Cycle Animation", default=False)
-
-    def execute(self, context):
-        objs = context.selected_objects
-        if not objs:
-            self.report({'WARNING'}, "Select at least one armature object")
-            return {'CANCELLED'}
-
-        sel_bones = []
-        for obj in objs:
-            if obj.type != 'ARMATURE':
-                continue
-            if obj.mode != 'POSE':
-                self.report({'WARNING'}, f"Armature '{obj.name}' not in Pose Mode. Please enter Pose Mode.")
-                return {'CANCELLED'}
-            sel_bones.extend([pb for pb in obj.data.bones if pb.select])
-
-        if len(sel_bones) < 1:
-            self.report({'WARNING'}, "Select at least one bone in Pose Mode")
-            return {'CANCELLED'}
-
-        all_bones = get_bone_hierarchy(sel_bones)
-
-        if self.first_ctrl and all_bones:
-            all_bones = all_bones[1:]
-
-        if not all_bones:
-            self.report({'WARNING'}, "No bones to bake after skipping first control")
-            return {'CANCELLED'}
-
-        CleanUpProc()
-
-        active_arm_obj = context.active_object
-        if not active_arm_obj or active_arm_obj.type != 'ARMATURE':
-            self.report({'WARNING'}, "Active object must be an armature for baking")
-            return {'CANCELLED'}
-
-        self.bake_overlap(all_bones, active_arm_obj)
-
-        if self.cycle:
-            self.set_cycle_animation(all_bones, active_arm_obj)
-
-        self.report({'INFO'}, f"Overlapper hierarchy baked on {len(all_bones)} bones.")
+        self.report({'INFO'}, f'Applied overlap animation on {len(bones)} bones.')
         return {'FINISHED'}
-
-    def bake_overlap(self, sel_bones, arm_obj):
-        scene = bpy.context.scene
-        min_frame = int(scene.frame_start)
-        max_frame = int(scene.frame_end)
-        softness = self.softness
-        global_scale = self.global_scale
-        wind = self.wind
-        wind_scale = self.wind_scale
-        wind_speed = self.wind_speed
-
-        for pb in sel_bones:
-            pose_bone = arm_obj.pose.bones.get(pb.name)
-            if not pose_bone:
-                continue
-
-            orig_x = pose_bone.location.x
-
-            if not arm_obj.animation_data:
-                arm_obj.animation_data_create()
-            if not arm_obj.animation_data.action:
-                arm_obj.animation_data.action = bpy.data.actions.new(name=f"{arm_obj.name}_OverlapAction")
-
-            action = arm_obj.animation_data.action
-
-            for fc in [fc for fc in action.fcurves if fc.data_path == f'pose.bones["{pb.name}"].location' and fc.array_index == 0]:
-                fc.keyframe_points.clear()
-
-            for frame in range(min_frame, max_frame + 1):
-                scene.frame_set(frame)
-                base_val = pose_bone.location.x
-
-                wind_offset = 0
-                if wind:
-                    wind_offset = random.uniform(-1,1) * wind_scale * wind_speed
-
-                new_val = base_val + softness * global_scale + wind_offset
-                bake_frame = frame + softness
-                if bake_frame > max_frame:
-                    bake_frame = max_frame
-
-                pose_bone.location.x = new_val
-                pose_bone.keyframe_insert(data_path="location", frame=bake_frame, index=0)
-
-            scene.frame_set(scene.frame_current)
-            pose_bone.location.x = orig_x
-
-    def set_cycle_animation(self, sel_bones, arm_obj):
-        action = arm_obj.animation_data.action if arm_obj.animation_data else None
-        if not action:
-            return
-        for pb in sel_bones:
-            for fc in action.fcurves:
-                if fc.data_path.startswith(f'pose.bones["{pb.name}"].location'):
-                    fc.extrapolation = 'Cyclic'
-
 
 class OVERLAPPER_PT_Panel(bpy.types.Panel):
+    bl_label = "Overlap Animation Tool"
     bl_idname = "OVERLAPPER_PT_panel"
-    bl_label = "Overlapper Tool (Bones)"
-    bl_space_type = "VIEW_3D"
-    bl_region_type = "UI"
-    bl_category = "Overlapper"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'Overlapper'
 
     def draw(self, context):
         layout = self.layout
-        scn = context.scene
+        wm = context.window_manager
 
-        layout.prop(scn, "overlapper_softness")
-        layout.prop(scn, "overlapper_global_scale")
-        layout.prop(scn, "overlapper_wind")
-        if scn.overlapper_wind:
-            layout.prop(scn, "overlapper_wind_scale")
-            layout.prop(scn, "overlapper_wind_speed")
-        layout.prop(scn, "overlapper_first_ctrl")
-        layout.prop(scn, "overlapper_cycle")
+        layout.prop(wm, "overlap_base_offset")
+        layout.prop(wm, "overlap_offset_increment")
+        layout.prop(wm, "overlap_use_hierarchy")
+        layout.prop(wm, "overlap_channels_to_offset")
 
-        layout.operator("overlapper.run", text="Overlap Selected Bones")
-        layout.operator("overlapper.run_hierarchy", text="Overlap Bone Hierarchy")
-
-
-classes = (
-    OVERLAPPER_OT_RunOverlapper,
-    OVERLAPPER_OT_RunOverlapperHierarchy,
-    OVERLAPPER_PT_Panel,
-)
-
+        layout.operator("overlapper.apply_overlap")
 
 def register():
-    for cls in classes:
-        bpy.utils.register_class(cls)
+    bpy.utils.register_class(OVERLAPPER_OT_ApplyOverlap)
+    bpy.utils.register_class(OVERLAPPER_PT_Panel)
 
-    bpy.types.Scene.overlapper_softness = bpy.props.FloatProperty(name="Softness", default=3.0, min=0.0, max=50.0)
-    bpy.types.Scene.overlapper_global_scale = bpy.props.FloatProperty(name="Scale", default=1.0, min=0.0)
-    bpy.types.Scene.overlapper_wind = bpy.props.BoolProperty(name="Wind", default=False)
-    bpy.types.Scene.overlapper_wind_scale = bpy.props.FloatProperty(name="Wind Scale", default=1.0, min=0.0)
-    bpy.types.Scene.overlapper_wind_speed = bpy.props.FloatProperty(name="Wind Speed", default=1.0, min=0.0)
-    bpy.types.Scene.overlapper_first_ctrl = bpy.props.BoolProperty(name="Don't use first control", default=False)
-    bpy.types.Scene.overlapper_cycle = bpy.props.BoolProperty(name="Cycle Animation", default=False)
-
+    wm = bpy.types.WindowManager
+    wm.overlap_base_offset = bpy.props.IntProperty(name="Base Time Offset", default=3, min=0)
+    wm.overlap_offset_increment = bpy.props.IntProperty(name="Offset Increment per Bone", default=2, min=0)
+    wm.overlap_use_hierarchy = bpy.props.BoolProperty(name="Use Hierarchy", default=True)
+    wm.overlap_channels_to_offset = bpy.props.EnumProperty(
+        name="Channels to Offset",
+        description="Animation channels to offset",
+        items=[
+            ('LOC', "Location", "Offset location channels"),
+            ('ROT', "Rotation", "Offset rotation channels"),
+            ('ALL', "All Channels", "Offset all animation channels"),
+        ],
+        default='ALL',
+    )
 
 def unregister():
-    for cls in classes:
-        bpy.utils.unregister_class(cls)
+    bpy.utils.unregister_class(OVERLAPPER_OT_ApplyOverlap)
+    bpy.utils.unregister_class(OVERLAPPER_PT_Panel)
 
-    del bpy.types.Scene.overlapper_softness
-    del bpy.types.Scene.overlapper_global_scale
-    del bpy.types.Scene.overlapper_wind
-    del bpy.types.Scene.overlapper_wind_scale
-    del bpy.types.Scene.overlapper_wind_speed
-    del bpy.types.Scene.overlapper_first_ctrl
-    del bpy.types.Scene.overlapper_cycle
-
+    wm = bpy.types.WindowManager
+    del wm.overlap_base_offset
+    del wm.overlap_offset_increment
+    del wm.overlap_use_hierarchy
+    del wm.overlap_channels_to_offset
 
 if __name__ == "__main__":
     register()
