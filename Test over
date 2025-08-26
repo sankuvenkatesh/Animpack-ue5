@@ -25,29 +25,28 @@ def CleanUpProc():
     if objs_to_delete:
         bpy.ops.object.delete()
 
-def get_bone_hierarchy(bones):
+def get_bone_hierarchy(pose_bones):
     hierarchy = []
-    def recurse(bone):
-        if bone in hierarchy:
+    def recurse(pbone):
+        if pbone in hierarchy:
             return
-        hierarchy.append(bone)
-        for child in bone.children:
-            recurse(child)
-    for bone in bones:
-        recurse(bone)
+        hierarchy.append(pbone)
+        for child_bone in pbone.bone.children:
+            child_pbone = pbone.id_data.pose.bones.get(child_bone.name)
+            if child_pbone:
+                recurse(child_pbone)
+    for pb in pose_bones:
+        recurse(pb)
     return hierarchy
 
-def calculate_adaptive_scale(sel_bones, arm_obj, min_frame, max_frame):
+def calculate_adaptive_scale(pose_bones, arm_obj, min_frame, max_frame):
     total_motion = 0
     sample_count = 0
-    for pb in sel_bones:
-        pose_bone = arm_obj.pose.bones.get(pb.name)
-        if not pose_bone:
-            continue
+    for pbone in pose_bones:
         prev_x = None
         for frame in range(min_frame, max_frame + 1):
             bpy.context.scene.frame_set(frame)
-            current_x = pose_bone.location.x
+            current_x = pbone.location.x
             if prev_x is not None:
                 total_motion += abs(current_x - prev_x)
                 sample_count += 1
@@ -126,16 +125,16 @@ class OVERLAPPER_OT_RunOverlapper(bpy.types.Operator):
             self.report({'WARNING'}, "Select at least one armature object")
             return {'CANCELLED'}
 
-        sel_bones = []
+        sel_pose_bones = []
         for obj in objs:
             if obj.type != 'ARMATURE':
                 continue
             if obj.mode != 'POSE':
                 self.report({'WARNING'}, f"Armature '{obj.name}' not in Pose Mode. Please enter Pose Mode.")
                 return {'CANCELLED'}
-            sel_bones.extend([pb.bone for pb in obj.pose.bones if pb.bone.select])
+            sel_pose_bones.extend([pb for pb in obj.pose.bones if pb.bone.select])
 
-        if len(sel_bones) < 2:
+        if len(sel_pose_bones) < 2:
             self.report({'WARNING'}, "Select at least 2 bones in Pose Mode")
             return {'CANCELLED'}
 
@@ -149,9 +148,9 @@ class OVERLAPPER_OT_RunOverlapper(bpy.types.Operator):
             bpy.ops.object.mode_set(mode='POSE')
 
         if self.first_ctrl:
-            sel_bones = sel_bones[1:]
+            sel_pose_bones = sel_pose_bones[1:]
 
-        if not sel_bones:
+        if not sel_pose_bones:
             self.report({'WARNING'}, "No bones to bake after skipping first control")
             return {'CANCELLED'}
 
@@ -161,34 +160,30 @@ class OVERLAPPER_OT_RunOverlapper(bpy.types.Operator):
 
         softness = self.softness
         if self.adaptive_scale:
-            adaptive = calculate_adaptive_scale(sel_bones, active_arm_obj, min_frame, max_frame)
+            adaptive = calculate_adaptive_scale(sel_pose_bones, active_arm_obj, min_frame, max_frame)
             softness *= adaptive
 
         new_action = create_action_and_add_nla(active_arm_obj, f"{active_arm_obj.name}_OverlapAction")
 
         overlap_group = get_or_create_bone_group(active_arm_obj, "Overlapper_BoneGroup")
 
-        sel_bone_names = {b.name for b in sel_bones}
         for pb in active_arm_obj.pose.bones:
-            if pb.name in sel_bone_names:
+            if pb in sel_pose_bones:
                 pb.bone_group = overlap_group
             else:
                 if pb.bone_group == overlap_group:
                     pb.bone_group = None
 
-        for index, pb in enumerate(sel_bones):
-            pose_bone = active_arm_obj.pose.bones.get(pb.name)
-            if not pose_bone:
-                continue
-            orig_x = pose_bone.location.x
+        for index, pbone in enumerate(sel_pose_bones):
+            orig_x = pbone.location.x
 
-            fcurves_to_clear = [fc for fc in new_action.fcurves if fc.data_path == f'pose.bones["{pb.name}"].location' and fc.array_index == 0]
+            fcurves_to_clear = [fc for fc in new_action.fcurves if fc.data_path == f'pose.bones["{pbone.name}"].location' and fc.array_index == 0]
             for fc in fcurves_to_clear:
                 fc.keyframe_points.clear()
 
             for frame in range(min_frame, max_frame + 1):
                 bpy.context.scene.frame_set(frame)
-                base_val = pose_bone.location.x
+                base_val = pbone.location.x
 
                 wind_offset = 0
                 if self.wind:
@@ -199,16 +194,16 @@ class OVERLAPPER_OT_RunOverlapper(bpy.types.Operator):
                 if bake_frame > max_frame:
                     bake_frame = max_frame
 
-                pose_bone.location.x = new_val
-                pose_bone.keyframe_insert(data_path="location", frame=bake_frame, index=0)
+                pbone.location.x = new_val
+                pbone.keyframe_insert(data_path="location", frame=bake_frame, index=0)
 
             bpy.context.scene.frame_set(scene.frame_current)
-            pose_bone.location.x = orig_x
+            pbone.location.x = orig_x
 
         if self.cycle:
-            for pb in sel_bones:
+            for pbone in sel_pose_bones:
                 for fc in new_action.fcurves:
-                    if fc.data_path.startswith(f'pose.bones["{pb.name}"].location'):
+                    if fc.data_path.startswith(f'pose.bones["{pbone.name}"].location'):
                         fc.extrapolation = 'Cyclic'
 
         self.report({'INFO'}, "Overlapper on bones completed.")
@@ -234,25 +229,25 @@ class OVERLAPPER_OT_RunOverlapperHierarchy(bpy.types.Operator):
             self.report({'WARNING'}, "Select at least one armature object")
             return {'CANCELLED'}
 
-        sel_bones = []
+        sel_pose_bones = []
         for obj in objs:
             if obj.type != 'ARMATURE':
                 continue
             if obj.mode != 'POSE':
                 self.report({'WARNING'}, f"Armature '{obj.name}' not in Pose Mode. Please enter Pose Mode.")
                 return {'CANCELLED'}
-            sel_bones.extend([pb.bone for pb in obj.pose.bones if pb.bone.select])
+            sel_pose_bones.extend([pb for pb in obj.pose.bones if pb.bone.select])
 
-        if len(sel_bones) < 1:
+        if len(sel_pose_bones) < 1:
             self.report({'WARNING'}, "Select at least one bone in Pose Mode")
             return {'CANCELLED'}
 
-        all_bones = get_bone_hierarchy(sel_bones)
+        all_pose_bones = get_bone_hierarchy(sel_pose_bones)
 
-        if self.first_ctrl and all_bones:
-            all_bones = all_bones[1:]
+        if self.first_ctrl and all_pose_bones:
+            all_pose_bones = all_pose_bones[1:]
 
-        if not all_bones:
+        if not all_pose_bones:
             self.report({'WARNING'}, "No bones to bake after skipping first control")
             return {'CANCELLED'}
 
@@ -271,34 +266,30 @@ class OVERLAPPER_OT_RunOverlapperHierarchy(bpy.types.Operator):
 
         softness = self.softness
         if self.adaptive_scale:
-            adaptive = calculate_adaptive_scale(all_bones, active_arm_obj, min_frame, max_frame)
+            adaptive = calculate_adaptive_scale(all_pose_bones, active_arm_obj, min_frame, max_frame)
             softness *= adaptive
 
         new_action = create_action_and_add_nla(active_arm_obj, f"{active_arm_obj.name}_OverlapHierarchyAction")
 
         overlap_group = get_or_create_bone_group(active_arm_obj, "Overlapper_BoneGroup")
 
-        all_bone_names = {b.name for b in all_bones}
         for pb in active_arm_obj.pose.bones:
-            if pb.name in all_bone_names:
+            if pb in all_pose_bones:
                 pb.bone_group = overlap_group
             else:
                 if pb.bone_group == overlap_group:
                     pb.bone_group = None
 
-        for index, pb in enumerate(all_bones):
-            pose_bone = active_arm_obj.pose.bones.get(pb.name)
-            if not pose_bone:
-                continue
-            orig_x = pose_bone.location.x
+        for index, pbone in enumerate(all_pose_bones):
+            orig_x = pbone.location.x
 
-            fcurves_to_clear = [fc for fc in new_action.fcurves if fc.data_path == f'pose.bones["{pb.name}"].location' and fc.array_index == 0]
+            fcurves_to_clear = [fc for fc in new_action.fcurves if fc.data_path == f'pose.bones["{pbone.name}"].location' and fc.array_index == 0]
             for fc in fcurves_to_clear:
                 fc.keyframe_points.clear()
 
             for frame in range(min_frame, max_frame + 1):
                 bpy.context.scene.frame_set(frame)
-                base_val = pose_bone.location.x
+                base_val = pbone.location.x
 
                 wind_offset = 0
                 if self.wind:
@@ -309,19 +300,19 @@ class OVERLAPPER_OT_RunOverlapperHierarchy(bpy.types.Operator):
                 if bake_frame > max_frame:
                     bake_frame = max_frame
 
-                pose_bone.location.x = new_val
-                pose_bone.keyframe_insert(data_path="location", frame=bake_frame, index=0)
+                pbone.location.x = new_val
+                pbone.keyframe_insert(data_path="location", frame=bake_frame, index=0)
 
             bpy.context.scene.frame_set(scene.frame_current)
-            pose_bone.location.x = orig_x
+            pbone.location.x = orig_x
 
         if self.cycle:
-            for pb in all_bones:
+            for pbone in all_pose_bones:
                 for fc in new_action.fcurves:
-                    if fc.data_path.startswith(f'pose.bones["{pb.name}"].location'):
+                    if fc.data_path.startswith(f'pose.bones["{pbone.name}"].location'):
                         fc.extrapolation = 'Cyclic'
 
-        self.report({'INFO'}, f"Overlapper hierarchy baked on {len(all_bones)} bones.")
+        self.report({'INFO'}, f"Overlapper hierarchy baked on {len(all_pose_bones)} bones.")
         return {'FINISHED'}
 
 class OVERLAPPER_PT_Panel(bpy.types.Panel):
