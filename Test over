@@ -1,240 +1,222 @@
-bl_info = {
-    "name": "Reliable Bone Overlapper",
-    "blender": (3, 0, 0),
-    "category": "Animation",
-    "author": "AI Assistant",
-    "version": (1, 0, 2),
-    "description": "Bone overlapping animation tool with proper delayed frame sampling"
-}
-
 import bpy
-import mathutils
+import random
+import fnmatch
+import webbrowser
 
-class OverlapItem(bpy.types.PropertyGroup):
-    armature_ref: bpy.props.PointerProperty(type=bpy.types.Object)
-    bone_name: bpy.props.StringProperty()
-    delay: bpy.props.IntProperty(name="Delay", default=3, min=0, max=30)
-    damping: bpy.props.FloatProperty(name="Damping", default=0.8, min=0.0, max=1.0)
-    affect_translation: bpy.props.BoolProperty(name="Affect Translation", default=True)
-    affect_rotation: bpy.props.BoolProperty(name="Affect Rotation", default=True)
-    cycle: bpy.props.BoolProperty(name="Seamless Cycle", default=True)
+# Opens intro video in default browser
+def hIntro(self, context):
+    webbrowser.open("https://vimeo.com/286860063")
 
-def get_frame_range(context):
-    scene = context.scene
-    if scene.use_preview_range:
-        return scene.frame_preview_start, scene.frame_preview_end
-    return scene.frame_start, scene.frame_end
+# Opens tutorial video in default browser
+def hTutorial(self, context):
+    webbrowser.open("https://vimeo.com/287771379")
 
-def blend_cycle(values, cycle):
-    if cycle and len(values) > 2:
-        first = values[0]
-        last = values[-1]
-        values[-1] = (first * 0.5 + last * 0.5)
-    return values
+# Clean up existing overlap objects by name matching
+def CleanUpProc():
+    patterns = [
+        "*_OverlapJoint*", "*_overlapOffsetLocator*", "overlapResultLocatorOut*",
+        "TEMP_Offset_locator*", "*overlapOffsetIKLocator*",
+        "OverlapperSet", "OverlapperWorkSet"
+    ]
+    objs_to_delete = []
+    for obj in bpy.data.objects:
+        for pat in patterns:
+            if fnmatch.fnmatch(obj.name, pat):
+                objs_to_delete.append(obj)
+                break
+    bpy.ops.object.select_all(action='DESELECT')
+    for o in objs_to_delete:
+        o.select_set(True)
+    if objs_to_delete:
+        bpy.ops.object.delete()
 
-def evaluate_pose_at_frame(arm_obj, frame):
-    scene = bpy.context.scene
-    current_frame = scene.frame_current
-    scene.frame_set(frame)
-    depsgraph = bpy.context.evaluated_depsgraph_get()
-    eval_obj = arm_obj.evaluated_get(depsgraph)
-    eval_pose = eval_obj.pose
-    scene.frame_set(current_frame)
-    return eval_pose
+class OVERLAPPER_OT_RunOverlapper(bpy.types.Operator):
+    bl_idname = "overlapper.run"
+    bl_label = "Run Overlapper"
+    bl_description = "Bake overlapping animation with softness and wind effect"
 
-def apply_overlap_on_pose_bones(items, f_start, f_end):
-    scene = bpy.context.scene
-    for item in items:
-        arm = item.armature_ref
-        bone_name = item.bone_name
-        delay = item.delay
-        damping = item.damping
-        affect_loc = item.affect_translation
-        affect_rot = item.affect_rotation
-        cycle = item.cycle
+    softness: bpy.props.FloatProperty(name="Softness", default=3.0, min=0.0, max=50.0)
+    global_scale: bpy.props.FloatProperty(name="Scale", default=1.0, min=0.0)
+    wind: bpy.props.BoolProperty(name="Wind", default=False)
+    wind_scale: bpy.props.FloatProperty(name="Wind Scale", default=1.0, min=0.0)
+    wind_speed: bpy.props.FloatProperty(name="Wind Speed", default=1.0, min=0.0)
+    first_ctrl: bpy.props.BoolProperty(name="Don't use first control", default=False)
+    cycle: bpy.props.BoolProperty(name="Cycle Animation", default=False)
 
-        if not arm or arm.type != 'ARMATURE':
-            continue
+    def execute(self, context):
+        sel = context.selected_objects
+        if len(sel) < 2:
+            self.report({'WARNING'}, "Select at least 2 objects")
+            return {'CANCELLED'}
 
-        if not arm.animation_data or not arm.animation_data.action:
-            continue
+        CleanUpProc()
 
-        pose_bone = arm.pose.bones.get(bone_name)
-        if not pose_bone:
-            continue
+        col_name = "OverlapperSet"
+        # Remove previous overlapper collection if exists
+        if col_name in bpy.data.collections:
+            overlapper_col = bpy.data.collections[col_name]
+            for obj in list(overlapper_col.objects):
+                bpy.data.objects.remove(obj, do_unlink=True)
+            bpy.data.collections.remove(overlapper_col)
 
-        original_action = arm.animation_data.action
-        new_action = bpy.data.actions.new(name=f"{arm.name}_{bone_name}_Overlapped")
-        arm.animation_data.action = new_action
+        # Create new collection for overlapper objects
+        overlapper_col = bpy.data.collections.new(col_name)
+        context.scene.collection.children.link(overlapper_col)
 
-        rot_mode = pose_bone.rotation_mode
-
-        translations = []
-        rotations = []
-
-        for frame in range(f_start, f_end + 1):
-            sample_frame = max(f_start, frame - delay)
-            scene.frame_set(sample_frame)
-            depsgraph = bpy.context.evaluated_depsgraph_get()
-            eval_arm = arm.evaluated_get(depsgraph)
-            eval_pose_bone = eval_arm.pose.bones.get(bone_name)
-
-            if not eval_pose_bone:
+        # Create overlap locator and joint empties, parent joint to locator
+        for i, obj in enumerate(sel):
+            if self.first_ctrl and i == 0:
                 continue
+            pos = obj.location.copy()
 
-            loc = eval_pose_bone.location.copy()
-            if rot_mode == 'QUATERNION':
-                rot = eval_pose_bone.rotation_quaternion.copy()
-            else:
-                rot = eval_pose_bone.rotation_euler.copy()
+            loc_name = f"{obj.name}_overlapOffsetLocator"
+            loc = bpy.data.objects.new(loc_name, None)
+            loc.empty_display_type = 'PLAIN_AXES'
+            loc.location = pos
+            overlapper_col.objects.link(loc)
 
-            # Apply damping blending towards zero transform to simulate overlap lag
-            if affect_loc:
-                loc_damped = loc * damping
-                translations.append(loc_damped)
-            else:
-                translations.append(pose_bone.location.copy())
+            joint_name = f"{obj.name}_OverlapJoint"
+            joint = bpy.data.objects.new(joint_name, None)
+            joint.empty_display_type = 'SPHERE'
+            joint.empty_display_size = 0.5
+            joint.location = pos
+            overlapper_col.objects.link(joint)
 
-            if affect_rot:
-                if rot_mode == 'QUATERNION':
-                    q_identity = mathutils.Quaternion((1,0,0,0))
-                    blended = rot.slerp(q_identity, 1.0 - damping)
-                    rotations.append(blended)
-                else:
-                    e_identity = mathutils.Euler((0,0,0), rot_mode)
-                    blended = e_identity.lerp(rot, damping)
-                    rotations.append(blended)
-            else:
-                if rot_mode == 'QUATERNION':
-                    rotations.append(pose_bone.rotation_quaternion.copy())
-                else:
-                    rotations.append(pose_bone.rotation_euler.copy())
+            joint.parent = loc
 
-        translations = blend_cycle(translations, cycle)
-        rotations = blend_cycle(rotations, cycle)
+        self.bake_overlap(sel)
 
-        for idx, frame in enumerate(range(f_start, f_end + 1)):
-            if affect_loc:
-                pose_bone.location = translations[idx]
-                pose_bone.keyframe_insert(data_path="location", frame=frame)
-            if affect_rot:
-                if rot_mode == 'QUATERNION':
-                    pose_bone.rotation_mode = 'QUATERNION'
-                    pose_bone.rotation_quaternion = rotations[idx]
-                    pose_bone.keyframe_insert(data_path="rotation_quaternion", frame=frame)
-                else:
-                    pose_bone.rotation_mode = rot_mode
-                    pose_bone.rotation_euler = rotations[idx]
-                    pose_bone.keyframe_insert(data_path="rotation_euler", frame=frame)
+        if self.cycle:
+            self.set_cycle_animation(sel)
 
-class ANIM_UL_BonePicker(bpy.types.UIList):
-    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
-        row = layout.row(align=True)
-        bone_name = item.bone_name
-        arm_name = item.armature_ref.name if item.armature_ref else "?"
-        row.label(text=f"{arm_name}: {bone_name}")
-        row.prop(item, "delay", text="Delay")
-        row.prop(item, "damping", text="Damp")
-        row.prop(item, "affect_translation", text="Loc")
-        row.prop(item, "affect_rotation", text="Rot")
-        row.prop(item, "cycle", text="Cycle")
-
-class ANIM_OT_AddSelectedBones(bpy.types.Operator):
-    bl_idname = "anim.add_selected_bones"
-    bl_label = "Add Selected Bones to Picker"
-    def execute(self, context):
-        sc = context.scene
-        arm_obj = context.active_object
-        if not arm_obj or arm_obj.type != 'ARMATURE':
-            self.report({'WARNING'}, "Select an armature object")
-            return {'CANCELLED'}
-
-        picker = sc.bone_picker
-        for pbone in arm_obj.data.bones:
-            if pbone.select:
-                exists = False
-                for item in picker:
-                    if (item.armature_ref == arm_obj and item.bone_name == pbone.name):
-                        exists = True
-                        break
-                if not exists:
-                    it = picker.add()
-                    it.armature_ref = arm_obj
-                    it.bone_name = pbone.name
+        self.report({'INFO'}, "Overlapper process completed.")
         return {'FINISHED'}
 
-class ANIM_OT_RemoveFromPicker(bpy.types.Operator):
-    bl_idname = "anim.remove_from_picker"
-    bl_label = "Remove From Picker"
-    index: bpy.props.IntProperty()
-    def execute(self, context):
-        context.scene.bone_picker.remove(self.index)
-        return {'FINISHED'}
+    def bake_overlap(self, sel):
+        scene = bpy.context.scene
+        min_frame = int(scene.frame_start)
+        max_frame = int(scene.frame_end)
+        softness = self.softness
+        global_scale = self.global_scale
+        wind = self.wind
+        wind_scale = self.wind_scale
+        wind_speed = self.wind_speed
 
-class ANIM_OT_ClearPicker(bpy.types.Operator):
-    bl_idname = "anim.clear_picker"
-    bl_label = "Clear Picker"
-    def execute(self, context):
-        context.scene.bone_picker.clear()
-        return {'FINISHED'}
+        for obj in sel:
+            orig_x = obj.location.x
 
-class ANIM_OT_ApplyOverlapBones(bpy.types.Operator):
-    bl_idname = "anim.apply_overlap_bones"
-    bl_label = "Apply Overlap to Bones"
-    bl_options = {'REGISTER', 'UNDO'}
+            # Ensure animation data and action exist
+            if not obj.animation_data:
+                obj.animation_data_create()
+            if not obj.animation_data.action:
+                obj.animation_data.action = bpy.data.actions.new(name=f"{obj.name}_OverlapAction")
 
-    def execute(self, context):
-        f_start, f_end = get_frame_range(context)
-        picker = context.scene.bone_picker
-        if not picker:
-            self.report({'WARNING'}, "No bones in picker")
-            return {'CANCELLED'}
-        apply_overlap_on_pose_bones(picker, f_start, f_end)
-        self.report({'INFO'}, "Overlap applied to bones")
-        return {'FINISHED'}
+            action = obj.animation_data.action
 
-class VIEW3D_PT_BoneOverlapper(bpy.types.Panel):
-    bl_label = "Bone Overlapper Picker"
-    bl_idname = "VIEW3D_PT_bone_overlapper"
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_category = 'Animation'
+            # Clear existing fcurve keyframes for location x
+            for fc in [fc for fc in action.fcurves if fc.data_path == "location" and fc.array_index == 0]:
+                fc.keyframe_points.clear()
+
+            # Bake keyframes with softness offset and wind variance
+            for frame in range(min_frame, max_frame + 1):
+                scene.frame_set(frame)
+                base_val = obj.location.x
+
+                wind_offset = 0
+                if wind:
+                    wind_offset = random.uniform(-1, 1) * wind_scale * wind_speed
+
+                new_val = base_val + softness * global_scale + wind_offset
+                bake_frame = frame + softness
+                if bake_frame > max_frame:
+                    bake_frame = max_frame
+
+                obj.location.x = new_val
+                obj.keyframe_insert(data_path="location", frame=bake_frame, index=0)
+
+            # Restore original location at current frame
+            scene.frame_set(scene.frame_current)
+            obj.location.x = orig_x
+
+    def set_cycle_animation(self, sel):
+        for obj in sel:
+            if obj.animation_data and obj.animation_data.action:
+                for fc in obj.animation_data.action.fcurves:
+                    fc.extrapolation = 'Cyclic'
+
+class OVERLAPPER_PT_Panel(bpy.types.Panel):
+    bl_idname = "OVERLAPPER_PT_panel"
+    bl_label = "Overlapper Tool"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Overlapper"
 
     def draw(self, context):
         layout = self.layout
-        scene = context.scene
+        scn = context.scene
 
-        row = layout.row()
-        row.template_list("ANIM_UL_BonePicker", "", scene, "bone_picker", scene, "bone_picker_index", rows=5)
+        layout.prop(scn, "overlapper_softness")
+        layout.prop(scn, "overlapper_global_scale")
+        layout.prop(scn, "overlapper_wind")
+        if scn.overlapper_wind:
+            layout.prop(scn, "overlapper_wind_scale")
+            layout.prop(scn, "overlapper_wind_speed")
+        layout.prop(scn, "overlapper_first_ctrl")
+        layout.prop(scn, "overlapper_cycle")
 
-        col = row.column(align=True)
-        col.operator("anim.add_selected_bones", icon='ADD', text="")
-        col.operator("anim.remove_from_picker", icon='REMOVE', text="").index = scene.bone_picker_index
-        col.operator("anim.clear_picker", icon='TRASH', text="")
+        layout.operator("overlapper.run", text="Overlap")
 
-        layout.operator("anim.apply_overlap_bones", icon='ANIM')
+        layout.separator()
+        row = layout.row(align=True)
+        row.operator("overlapper.intro", text="Intro Video")
+        row.operator("overlapper.tutorial", text="Tutorial Video")
 
-classes = [
-    OverlapItem,
-    ANIM_UL_BonePicker,
-    ANIM_OT_AddSelectedBones,
-    ANIM_OT_RemoveFromPicker,
-    ANIM_OT_ClearPicker,
-    ANIM_OT_ApplyOverlapBones,
-    VIEW3D_PT_BoneOverlapper,
-]
+class OVERLAPPER_OT_Intro(bpy.types.Operator):
+    bl_idname = "overlapper.intro"
+    bl_label = "Open Intro Video"
+
+    def execute(self, context):
+        hIntro(self, context)
+        return {'FINISHED'}
+
+class OVERLAPPER_OT_Tutorial(bpy.types.Operator):
+    bl_idname = "overlapper.tutorial"
+    bl_label = "Open Tutorial Video"
+
+    def execute(self, context):
+        hTutorial(self, context)
+        return {'FINISHED'}
+
+classes = (
+    OVERLAPPER_OT_RunOverlapper,
+    OVERLAPPER_PT_Panel,
+    OVERLAPPER_OT_Intro,
+    OVERLAPPER_OT_Tutorial,
+)
 
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
-    bpy.types.Scene.bone_picker = bpy.props.CollectionProperty(type=OverlapItem)
-    bpy.types.Scene.bone_picker_index = bpy.props.IntProperty(default=0)
+
+    bpy.types.Scene.overlapper_softness = bpy.props.FloatProperty(name="Softness", default=3.0, min=0.0, max=50.0)
+    bpy.types.Scene.overlapper_global_scale = bpy.props.FloatProperty(name="Scale", default=1.0, min=0.0)
+    bpy.types.Scene.overlapper_wind = bpy.props.BoolProperty(name="Wind", default=False)
+    bpy.types.Scene.overlapper_wind_scale = bpy.props.FloatProperty(name="Wind Scale", default=1.0, min=0.0)
+    bpy.types.Scene.overlapper_wind_speed = bpy.props.FloatProperty(name="Wind Speed", default=1.0, min=0.0)
+    bpy.types.Scene.overlapper_first_ctrl = bpy.props.BoolProperty(name="Don't use first control", default=False)
+    bpy.types.Scene.overlapper_cycle = bpy.props.BoolProperty(name="Cycle Animation", default=False)
 
 def unregister():
     for cls in classes:
         bpy.utils.unregister_class(cls)
-    del bpy.types.Scene.bone_picker
-    del bpy.types.Scene.bone_picker_index
+
+    del bpy.types.Scene.overlapper_softness
+    del bpy.types.Scene.overlapper_global_scale
+    del bpy.types.Scene.overlapper_wind
+    del bpy.types.Scene.overlapper_wind_scale
+    del bpy.types.Scene.overlapper_wind_speed
+    del bpy.types.Scene.overlapper_first_ctrl
+    del bpy.types.Scene.overlapper_cycle
 
 if __name__ == "__main__":
     register()
