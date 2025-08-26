@@ -4,7 +4,6 @@ import fnmatch
 import mathutils.noise as noise
 
 def CleanUpProc():
-    # Ensure Object Mode before selection and deletion ops
     if bpy.context.mode != 'OBJECT':
         bpy.ops.object.mode_set(mode='OBJECT')
 
@@ -73,30 +72,35 @@ def create_action_and_add_nla(arm_obj, new_action_name):
         arm_obj.animation_data_create()
     anim_data = arm_obj.animation_data
 
-    # Push down existing action to NLA track if present
     if anim_data.action:
-        nla_track = None
-        for track in anim_data.nla_tracks:
-            nla_track = track
-            break
-        if not nla_track:
+        if not anim_data.nla_tracks:
             nla_track = anim_data.nla_tracks.new()
+        else:
+            nla_track = anim_data.nla_tracks[0]
 
-        start_frame = anim_data.action.frame_range[0] if anim_data.action.frame_range else bpy.context.scene.frame_start
-        if start_frame is None or start_frame == float('inf'):
+        try:
+            start_frame = anim_data.action.frame_range[0]
+            if start_frame is None or start_frame == float('inf'):
+                start_frame = bpy.context.scene.frame_start
+        except Exception:
             start_frame = bpy.context.scene.frame_start
 
-        strip_name = anim_data.action.name
+        start_frame = int(start_frame)  # Convert to int to fix API error
+
         existing_names = {strip.name for strip in nla_track.strips}
+        strip_name = anim_data.action.name
         count = 1
         unique_name = strip_name
         while unique_name in existing_names:
             unique_name = f"{strip_name}_{count}"
             count += 1
 
-        nla_strip = nla_track.strips.new(name=unique_name, start=start_frame)
-        nla_strip.action = anim_data.action
-        anim_data.action = None
+        try:
+            nla_strip = nla_track.strips.new(name=unique_name, start=start_frame)
+            nla_strip.action = anim_data.action
+            anim_data.action = None
+        except Exception as e:
+            print(f"Could not create NLA strip: {e}")
 
     new_action = bpy.data.actions.new(new_action_name)
     anim_data.action = new_action
