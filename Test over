@@ -105,6 +105,16 @@ def create_action_and_add_nla(arm_obj, new_action_name):
     anim_data.action = new_action
     return new_action
 
+def safe_assign_bone_groups(arm_obj, target_pose_bones, overlap_group):
+    for pb in arm_obj.pose.bones:
+        if not isinstance(pb, bpy.types.PoseBone):
+            continue
+        if pb in target_pose_bones:
+            pb.bone_group = overlap_group
+        else:
+            if pb.bone_group == overlap_group:
+                pb.bone_group = None
+
 class OVERLAPPER_OT_RunOverlapper(bpy.types.Operator):
     bl_idname = "overlapper.run"
     bl_label = "Run Overlapper on Bones"
@@ -167,12 +177,7 @@ class OVERLAPPER_OT_RunOverlapper(bpy.types.Operator):
 
         overlap_group = get_or_create_bone_group(active_arm_obj, "Overlapper_BoneGroup")
 
-        for pb in active_arm_obj.pose.bones:
-            if pb in sel_pose_bones:
-                pb.bone_group = overlap_group
-            else:
-                if pb.bone_group == overlap_group:
-                    pb.bone_group = None
+        safe_assign_bone_groups(active_arm_obj, sel_pose_bones, overlap_group)
 
         for index, pbone in enumerate(sel_pose_bones):
             orig_x = pbone.location.x
@@ -273,12 +278,7 @@ class OVERLAPPER_OT_RunOverlapperHierarchy(bpy.types.Operator):
 
         overlap_group = get_or_create_bone_group(active_arm_obj, "Overlapper_BoneGroup")
 
-        for pb in active_arm_obj.pose.bones:
-            if pb in all_pose_bones:
-                pb.bone_group = overlap_group
-            else:
-                if pb.bone_group == overlap_group:
-                    pb.bone_group = None
+        safe_assign_bone_groups(active_arm_obj, all_pose_bones, overlap_group)
 
         for index, pbone in enumerate(all_pose_bones):
             orig_x = pbone.location.x
