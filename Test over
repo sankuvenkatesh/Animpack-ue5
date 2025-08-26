@@ -75,7 +75,6 @@ def create_action_and_add_nla(arm_obj, new_action_name):
 
     # Push down existing action to NLA track if present
     if anim_data.action:
-        # Find or create a new NLA track
         nla_track = None
         for track in anim_data.nla_tracks:
             nla_track = track
@@ -87,7 +86,6 @@ def create_action_and_add_nla(arm_obj, new_action_name):
         nla_strip.action = anim_data.action
         anim_data.action = None
 
-    # Create new action and assign
     new_action = bpy.data.actions.new(new_action_name)
     anim_data.action = new_action
     return new_action
@@ -158,7 +156,7 @@ class OVERLAPPER_OT_RunOverlapper(bpy.types.Operator):
             if pb.bone in sel_bones:
                 pb.bone_group = overlap_group
             else:
-                if pb.bone_group == overlap_group:
+                if hasattr(pb, 'bone_group') and pb.bone_group == overlap_group:
                     pb.bone_group = None
 
         for index, pb in enumerate(sel_bones):
@@ -167,7 +165,8 @@ class OVERLAPPER_OT_RunOverlapper(bpy.types.Operator):
                 continue
             orig_x = pose_bone.location.x
 
-            for fc in [fc for fc in new_action.fcurves if fc.data_path == f'pose.bones["{pb.name}"].location' and fc.array_index == 0]:
+            fcurves_to_clear = [fc for fc in new_action.fcurves if fc.data_path == f'pose.bones["{pb.name}"].location' and fc.array_index == 0]
+            for fc in fcurves_to_clear:
                 fc.keyframe_points.clear()
 
             for frame in range(min_frame, max_frame + 1):
@@ -266,7 +265,7 @@ class OVERLAPPER_OT_RunOverlapperHierarchy(bpy.types.Operator):
             if pb.bone in all_bones:
                 pb.bone_group = overlap_group
             else:
-                if pb.bone_group == overlap_group:
+                if hasattr(pb, 'bone_group') and pb.bone_group == overlap_group:
                     pb.bone_group = None
 
         for index, pb in enumerate(all_bones):
@@ -275,7 +274,8 @@ class OVERLAPPER_OT_RunOverlapperHierarchy(bpy.types.Operator):
                 continue
             orig_x = pose_bone.location.x
 
-            for fc in [fc for fc in new_action.fcurves if fc.data_path == f'pose.bones["{pb.name}"].location' and fc.array_index == 0]:
+            fcurves_to_clear = [fc for fc in new_action.fcurves if fc.data_path == f'pose.bones["{pb.name}"].location' and fc.array_index == 0]
+            for fc in fcurves_to_clear:
                 fc.keyframe_points.clear()
 
             for frame in range(min_frame, max_frame + 1):
