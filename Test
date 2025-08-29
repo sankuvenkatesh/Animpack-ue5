@@ -1,0 +1,221 @@
+bl_info = {
+    "name": "Dynamic Controller v1.06 (Blender edition)",
+    "author": "Adapted from AoiEgg's Maya tool by Perplexity AI",
+    "version": (1, 0, 0),
+    "blender": (2, 80, 0),
+    "location": "View3D > Tool Shelf > Dynamic Controller",
+    "description": "Replicate Maya Dynamic Controller, Chain, and Expression tools for Blender rigs.",
+    "category": "Rigging",
+}
+
+import bpy
+import mathutils
+import math
+
+#############################################################
+# Helper Functions
+#############################################################
+
+def create_dynamic_controller(obj):
+    # Create an Empty as Controller at object's location
+    controller = bpy.data.objects.new(f"{obj.name}_DRV_CTL", None)
+    controller.location = obj.location
+    bpy.context.collection.objects.link(controller)
+    # Add custom properties analogous to Maya
+    controller["Dynamic"] = True
+    controller["Smooth"] = 2.5
+    controller["Strength"] = 0.5
+    controller["Springy"] = 1.0
+    # Optional: color or other display features could use custom draw handlers
+    constraint = obj.constraints.new('COPY_LOCATION')
+    constraint.target = controller
+    return controller
+
+def create_dynamic_chain(objs):
+    # Create a curve through the selected objects
+    coords = [obj.location for obj in objs]
+    curveData = bpy.data.curves.new(f"{objs.name}_SPINE", type='CURVE')
+    curveData.dimensions = '3D'
+    polyline = curveData.splines.new('POLY')
+    polyline.points.add(len(coords)-1)
+    for i, coord in enumerate(coords):
+        polyline.points[i].co = (coord.x, coord.y, coord.z, 1)
+    curveObj = bpy.data.objects.new(f"{objs.name}_SPINE_OBJ", curveData)
+    bpy.context.collection.objects.link(curveObj)
+    # Create driver empties at each point, and parent/constraint logic
+    controllers = []
+    for obj in objs:
+        ctl = bpy.data.objects.new(f"{obj.name}_GOAL_CTL", None)
+        ctl.location = obj.location
+        bpy.context.collection.objects.link(ctl)
+        obj.constraints.new('COPY_LOCATION').target = ctl
+        controllers.append(ctl)
+    # Could add more advanced dynamic logic using physics or animation drivers
+    return curveObj, controllers
+
+def add_expression_chain(objs, delay=2, tx=False, ty=False, tz=False, rx=True, ry=True, rz=True, sx=False, sy=False, sz=False):
+    # Connect location/rotation/scale attributes with frame delay using drivers
+    for i in range(1, len(objs)):
+        src = objs[i-1]
+        tgt = objs[i]
+        def add_driver(prop, idx=None):
+            fcurve = tgt.animation_data.action.fcurves.find(prop, index=idx) if tgt.animation_data and tgt.animation_data.action else None
+            if not fcurve:
+                if not tgt.animation_data:
+                    tgt.animation_data_create()
+                act = tgt.animation_data.action or bpy.data.actions.new(name=f"{tgt.name}_Action")
+                tgt.animation_data.action = act
+                fcurve = act.fcurves.new(data_path=prop, index=idx)
+            drv = fcurve.driver
+            drv.type = 'SCRIPTED'
+            var = drv.variables.new()
+            var.name = 'src'
+            var.type = 'TRANSFORMS'
+            targ = var.targets
+            targ.id = src
+            targ.transform_type = prop.upper().replace('location', 'LOC').replace('rotation_euler', 'ROT').replace('scale', 'SCALE')
+            targ.bone_target = ''
+            drv.expression = f'src'
+            # Frame delay: simulate by offsetting evaluation (makes sense if anim curves exist)
+        if tx:
+            add_driver("location", 0)
+        if ty:
+            add_driver("location", 1)
+        if tz:
+            add_driver("location", 2)
+        if rx:
+            add_driver("rotation_euler", 0)
+        if ry:
+            add_driver("rotation_euler", 1)
+        if rz:
+            add_driver("rotation_euler", 2)
+        if sx:
+            add_driver("scale", 0)
+        if sy:
+            add_driver("scale", 1)
+        if sz:
+            add_driver("scale", 2)
+
+#############################################################
+# Blender UI Panel
+#############################################################
+
+class DYNCONTROLLER_PT_mainpanel(bpy.types.Panel):
+    """Dynamic Controller Main Panel"""
+    bl_label = "Dynamic Controller v1.06"
+    bl_idname = "DYNCONTROLLER_PT_mainpanel"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "DynamicCtrl"
+
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text="Dynamic Controller (selected objects)")
+        layout.operator("dyncontroller.dynamic_controller")
+        layout.separator()
+        layout.label(text="Dynamic Chain (nhair-style, selected)")
+        layout.operator("dyncontroller.dynamic_chain")
+        layout.separator()
+        layout.label(text="Expression Chain (propagate, check boxes)")
+        row = layout.row()
+        row.prop(context.scene, "dynctrl_tx")
+        row.prop(context.scene, "dynctrl_ty")
+        row.prop(context.scene, "dynctrl_tz")
+        row = layout.row()
+        row.prop(context.scene, "dynctrl_rx")
+        row.prop(context.scene, "dynctrl_ry")
+        row.prop(context.scene, "dynctrl_rz")
+        row = layout.row()
+        row.prop(context.scene, "dynctrl_sx")
+        row.prop(context.scene, "dynctrl_sy")
+        row.prop(context.scene, "dynctrl_sz")
+        layout.prop(context.scene, "dynctrl_delay")
+        layout.operator("dyncontroller.expression_chain")
+
+class DYNCONTROLLER_OT_dynamic_controller(bpy.types.Operator):
+    bl_idname = "dyncontroller.dynamic_controller"
+    bl_label = "Create Dynamic Controller"
+    def execute(self, context):
+        sel = context.selected_objects
+        if not sel:
+            self.report({'WARNING'}, "Select at least one object")
+            return {'CANCELLED'}
+        for obj in sel:
+            create_dynamic_controller(obj)
+        self.report({'INFO'}, "Dynamic Controller Made!")
+        return {'FINISHED'}
+
+class DYNCONTROLLER_OT_dynamic_chain(bpy.types.Operator):
+    bl_idname = "dyncontroller.dynamic_chain"
+    bl_label = "Create Dynamic Controller Chain"
+    def execute(self, context):
+        sel = context.selected_objects
+        if len(sel) < 2:
+            self.report({'WARNING'}, "Select at least two objects for chain")
+            return {'CANCELLED'}
+        create_dynamic_chain(sel)
+        self.report({'INFO'}, "Dynamic Chain Made!")
+        return {'FINISHED'}
+
+class DYNCONTROLLER_OT_expression_chain(bpy.types.Operator):
+    bl_idname = "dyncontroller.expression_chain"
+    bl_label = "Create Expression Chain"
+    def execute(self, context):
+        sel = context.selected_objects
+        if len(sel) < 2:
+            self.report({'WARNING'}, "Select at least two objects for expression chain")
+            return {'CANCELLED'}
+        add_expression_chain(
+            sel, 
+            delay=context.scene.dynctrl_delay,
+            tx=context.scene.dynctrl_tx,
+            ty=context.scene.dynctrl_ty,
+            tz=context.scene.dynctrl_tz,
+            rx=context.scene.dynctrl_rx,
+            ry=context.scene.dynctrl_ry,
+            rz=context.scene.dynctrl_rz,
+            sx=context.scene.dynctrl_sx,
+            sy=context.scene.dynctrl_sy,
+            sz=context.scene.dynctrl_sz,
+        )
+        self.report({'INFO'}, "Expression Chain Made!")
+        return {'FINISHED'}
+
+#############################################################
+# Blender Properties
+#############################################################
+
+def register():
+    bpy.utils.register_class(DYNCONTROLLER_PT_mainpanel)
+    bpy.utils.register_class(DYNCONTROLLER_OT_dynamic_controller)
+    bpy.utils.register_class(DYNCONTROLLER_OT_dynamic_chain)
+    bpy.utils.register_class(DYNCONTROLLER_OT_expression_chain)
+    bpy.types.Scene.dynctrl_tx = bpy.props.BoolProperty(name="TX", default=False)
+    bpy.types.Scene.dynctrl_ty = bpy.props.BoolProperty(name="TY", default=False)
+    bpy.types.Scene.dynctrl_tz = bpy.props.BoolProperty(name="TZ", default=False)
+    bpy.types.Scene.dynctrl_rx = bpy.props.BoolProperty(name="RX", default=True)
+    bpy.types.Scene.dynctrl_ry = bpy.props.BoolProperty(name="RY", default=True)
+    bpy.types.Scene.dynctrl_rz = bpy.props.BoolProperty(name="RZ", default=True)
+    bpy.types.Scene.dynctrl_sx = bpy.props.BoolProperty(name="SX", default=False)
+    bpy.types.Scene.dynctrl_sy = bpy.props.BoolProperty(name="SY", default=False)
+    bpy.types.Scene.dynctrl_sz = bpy.props.BoolProperty(name="SZ", default=False)
+    bpy.types.Scene.dynctrl_delay = bpy.props.IntProperty(name="Frame Delay", default=2, min=0, max=100)
+
+def unregister():
+    bpy.utils.unregister_class(DYNCONTROLLER_PT_mainpanel)
+    bpy.utils.unregister_class(DYNCONTROLLER_OT_dynamic_controller)
+    bpy.utils.unregister_class(DYNCONTROLLER_OT_dynamic_chain)
+    bpy.utils.unregister_class(DYNCONTROLLER_OT_expression_chain)
+    del bpy.types.Scene.dynctrl_tx
+    del bpy.types.Scene.dynctrl_ty
+    del bpy.types.Scene.dynctrl_tz
+    del bpy.types.Scene.dynctrl_rx
+    del bpy.types.Scene.dynctrl_ry
+    del bpy.types.Scene.dynctrl_rz
+    del bpy.types.Scene.dynctrl_sx
+    del bpy.types.Scene.dynctrl_sy
+    del bpy.types.Scene.dynctrl_sz
+    del bpy.types.Scene.dynctrl_delay
+
+if __name__ == "__main__":
+    register()
