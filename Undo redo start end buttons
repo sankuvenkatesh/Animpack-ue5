@@ -1,0 +1,65 @@
+bl_info = {
+    "name": "Undo/Redo & Frame Range in Timeline",
+    "author": "Venkatesh Sanku",
+    "version": (1, 2),
+    "blender": (4, 3, 0),
+    "location": "Timeline Header",
+    "description": "Adds Undo/Redo, Set Start Frame, and Set End Frame buttons to the Timeline header",
+    "category": "Animation"
+}
+
+import bpy
+
+# --- Timeline Header Buttons ---
+class TIMELINE_HT_custom_header(bpy.types.Header):
+    bl_space_type = 'TIME_EDITOR'
+
+    def draw(self, context):
+        layout = self.layout
+        row = layout.row(align=True)
+        row.operator("ed.undo", text="", icon='LOOP_BACK')
+        row.operator("ed.redo", text="", icon='LOOP_FORWARDS')
+        row.operator("scene.set_startframe", text="", icon='REW')
+        row.operator("scene.set_endframe", text="", icon='FF')
+
+class SCENE_OT_set_startframe(bpy.types.Operator):
+    bl_idname = "scene.set_startframe"
+    bl_label = "Set Start Frame"
+    bl_description = "Set Start Frame to Current Frame"
+
+    def execute(self, context):
+        scn = context.scene
+        scn.frame_start = scn.frame_current
+        self.report({'INFO'}, f"Start frame set to {scn.frame_current}")
+        return {'FINISHED'}
+
+class SCENE_OT_set_endframe(bpy.types.Operator):
+    bl_idname = "scene.set_endframe"
+    bl_label = "Set End Frame"
+    bl_description = "Set End Frame to Current Frame"
+
+    def execute(self, context):
+        scn = context.scene
+        scn.frame_end = scn.frame_current
+        self.report({'INFO'}, f"End frame set to {scn.frame_current}")
+        return {'FINISHED'}
+
+# --- Registration ---
+classes = [
+    TIMELINE_HT_custom_header,
+    SCENE_OT_set_startframe,
+    SCENE_OT_set_endframe,
+]
+
+def register():
+    for cls in classes:
+        bpy.utils.register_class(cls)
+    print("✅ Timeline header buttons registered.")
+
+def unregister():
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)
+    print("❌ Timeline header buttons unregistered.")
+
+if __name__ == "__main__":
+    register()
