@@ -1,74 +1,75 @@
 bl_info = {
     "name": "Maya Style Red Keyframe Line",
-    "author": "AI Assistant",
-    "version": (1, 0, 0),
-    "blender": (2, 80, 0),
+    "author": "Venkatesh Sanku",
+    "version": (1, 1, 0),
+    "blender": (4, 4, 0),
     "location": "Timeline > Sidebar > Keyframe Line",
     "description": "Shows a Maya-style straight red line indicator on the timeline for the current frame",
-    "warning": "",
-    "wiki_url": "",
     "category": "Animation",
 }
 
 import bpy
-import bgl
+import gpu
+from gpu_extras.batch import batch_for_shader
 
 handler = None
+timer = None
 
-def draw_red_line_callback(self, context):
+def draw_red_line_callback(context):
     region = context.region
     frame = context.scene.frame_current
     frame_start = context.scene.frame_start
     frame_end = context.scene.frame_end
-    total_frames = frame_end - frame_start + 1
 
     width = region.width
     height = region.height
 
-    pos = (frame - frame_start) / total_frames if total_frames else 0
-    x = int(pos * width)
+    total_frames = frame_end - frame_start + 1
+    if total_frames <= 0:
+        return
 
-    bgl.glEnable(bgl.GL_BLEND)
-    bgl.glLineWidth(2)
-    bgl.glColor4f(1.0, 0.0, 0.0, 1.0)
+    pos = (frame - frame_start) / total_frames
+    x = pos * width
 
-    bgl.glBegin(bgl.GL_LINES)
-    bgl.glVertex2i(x, 0)
-    bgl.glVertex2i(x, height)
-    bgl.glEnd()
+    coords = [(x, 0), (x, height)]
 
-    bgl.glLineWidth(1)
-    bgl.glDisable(bgl.GL_BLEND)
+    shader = gpu.shader.from_builtin('2D_UNIFORM_COLOR')
+    batch = batch_for_shader(shader, 'LINES', {"pos": coords})
 
+    shader.bind()
+    shader.uniform_float("color", (1.0, 0.0, 0.0, 1.0))
+    batch.draw(shader)
 
-def add_draw_handler():
+def draw_red_line(self, context):
+    draw_red_line_callback(context)
+
+def add_handler():
     global handler
     if handler is None:
         for area in bpy.context.screen.areas:
             if area.type == 'TIMELINE':
                 for region in area.regions:
                     if region.type == 'WINDOW':
-                        handler = bpy.types.SpaceTimeline.draw_handler_add(
-                            draw_red_line_callback, (None, bpy.context),
-                            'WINDOW', 'POST_PIXEL'
-                        )
+                        handler = region.callback_add(draw_red_line, (bpy.context,), 'POST_PIXEL')
                         print("Red line draw handler added")
-                        break
+                        return True
+    return False
 
-
-def remove_draw_handler():
+def remove_handler():
     global handler
     if handler is not None:
         bpy.types.SpaceTimeline.draw_handler_remove(handler, 'WINDOW')
         handler = None
         print("Red line draw handler removed")
 
-
-def scene_update_handler(scene):
-    for area in bpy.context.screen.areas:
-        if area.type == 'TIMELINE':
-            area.tag_redraw()
-
+def timer_callback():
+    for window in bpy.context.window_manager.windows:
+        for area in window.screen.areas:
+            if area.type == 'TIMELINE':
+                for region in area.regions:
+                    if region.type == 'WINDOW':
+                        region.tag_redraw()
+    return 0.1
 
 class KEYFRAME_LINE_OT_toggle(bpy.types.Operator):
     bl_idname = "animation.toggle_keyframe_line"
@@ -76,15 +77,22 @@ class KEYFRAME_LINE_OT_toggle(bpy.types.Operator):
     bl_description = "Toggle Maya-style red keyframe line indicator on the timeline"
 
     def execute(self, context):
-        settings = context.scene.keyframe_line_settings
-        if settings.enabled:
-            remove_draw_handler()
-            settings.enabled = False
-        else:
-            add_draw_handler()
-            settings.enabled = True
-        return {'FINISHED'}
+        prefs = context.scene.keyframe_line_settings
+        wm = context.window_manager
+        global timer
 
+        if prefs.enabled:
+            remove_handler()
+            if timer is not None:
+                wm.event_timer_remove(timer)
+                timer = None
+            prefs.enabled = False
+        else:
+            added = add_handler()
+            if added:
+                timer = wm.event_timer_add(0.1, window=context.window)
+                prefs.enabled = True
+        return {'FINISHED'}
 
 class KEYFRAME_LINE_Preferences(bpy.types.PropertyGroup):
     enabled: bpy.props.BoolProperty(
@@ -92,7 +100,6 @@ class KEYFRAME_LINE_Preferences(bpy.types.PropertyGroup):
         description="Enable or disable Maya-style red keyframe line",
         default=False,
     )
-
 
 class KEYFRAME_LINE_PT_panel(bpy.types.Panel):
     bl_label = "Maya Style Red Keyframe Line"
@@ -109,27 +116,18 @@ class KEYFRAME_LINE_PT_panel(bpy.types.Panel):
         else:
             layout.operator("animation.toggle_keyframe_line", text="Enable Red Line", icon='CHECKBOX_DEHLT')
 
-
 def register():
     bpy.utils.register_class(KEYFRAME_LINE_OT_toggle)
     bpy.utils.register_class(KEYFRAME_LINE_PT_panel)
     bpy.utils.register_class(KEYFRAME_LINE_Preferences)
     bpy.types.Scene.keyframe_line_settings = bpy.props.PointerProperty(type=KEYFRAME_LINE_Preferences)
 
-    bpy.app.handlers.depsgraph_update_post.append(scene_update_handler)
-
-
 def unregister():
-    remove_draw_handler()
-
+    remove_handler()
     bpy.utils.unregister_class(KEYFRAME_LINE_OT_toggle)
     bpy.utils.unregister_class(KEYFRAME_LINE_PT_panel)
     bpy.utils.unregister_class(KEYFRAME_LINE_Preferences)
     del bpy.types.Scene.keyframe_line_settings
-
-    if scene_update_handler in bpy.app.handlers.depsgraph_update_post:
-        bpy.app.handlers.depsgraph_update_post.remove(scene_update_handler)
-
 
 if __name__ == "__main__":
     register()
