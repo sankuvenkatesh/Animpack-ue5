@@ -3,7 +3,7 @@ bl_info = {
     "author": "Venkatesh Sanku",
     "version": (1, 1, 0),
     "blender": (4, 4, 0),
-    "location": "Timeline > Sidebar > Keyframe Line",
+    "location": "Timeline (Dope Sheet) > Sidebar > Keyframe Line",
     "description": "Shows a Maya-style straight red line indicator on the timeline for the current frame",
     "category": "Animation",
 }
@@ -47,7 +47,7 @@ def add_handler():
     global handler
     if handler is None:
         for area in bpy.context.screen.areas:
-            if area.type == 'TIMELINE':
+            if area.type == 'DOPESHEET':  # Use Dope Sheet space for Timeline editor panel compatibility
                 for region in area.regions:
                     if region.type == 'WINDOW':
                         handler = region.callback_add(draw_red_line, (bpy.context,), 'POST_PIXEL')
@@ -58,14 +58,14 @@ def add_handler():
 def remove_handler():
     global handler
     if handler is not None:
-        bpy.types.SpaceTimeline.draw_handler_remove(handler, 'WINDOW')
+        bpy.types.SpaceDopeSheetEditor.draw_handler_remove(handler, 'WINDOW')
         handler = None
         print("Red line draw handler removed")
 
 def timer_callback():
     for window in bpy.context.window_manager.windows:
         for area in window.screen.areas:
-            if area.type == 'TIMELINE':
+            if area.type == 'DOPESHEET':
                 for region in area.regions:
                     if region.type == 'WINDOW':
                         region.tag_redraw()
@@ -103,7 +103,7 @@ class KEYFRAME_LINE_Preferences(bpy.types.PropertyGroup):
 
 class KEYFRAME_LINE_PT_panel(bpy.types.Panel):
     bl_label = "Maya Style Red Keyframe Line"
-    bl_space_type = 'TIMELINE'
+    bl_space_type = 'DOPESHEET'   # Use Dope Sheet, Timeline and Dope Sheet share this for panels
     bl_region_type = 'UI'
     bl_category = 'Keyframe Line'
 
