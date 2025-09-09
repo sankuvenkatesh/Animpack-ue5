@@ -1,4 +1,3 @@
-
 bl_info = {
     "name": "Undo/Redo & Frame Range in Timeline",
     "author": "Venkatesh Sanku",
