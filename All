@@ -1,7 +1,7 @@
 bl_info = {
-    "name": "Combined Animation, Undo/Redo & Gizmo Tools",
+    "name": "Combined Animation & Gizmo Tools",
     "author": "Venkatesh sanku",
-    "version": (1, 4, 0),
+    "version": (1, 3, 0),
     "blender": (4, 3, 0),
     "description": (
         "Adds Action list and Undo/Redo buttons to timeline/dopesheet/graph editor headers, "
@@ -106,7 +106,7 @@ class PASTE_CONNECT(bpy.types.Operator):
 
         return {'FINISHED'}
 
-# --- Undo/Redo Operators on Timeline Header ---
+# --- Undo/Redo Operators for Headers ---
 
 class HEADER_OP_UNDO(bpy.types.Operator):
     bl_idname = "wm.header_undo"
@@ -126,13 +126,11 @@ class HEADER_OP_REDO(bpy.types.Operator):
         bpy.ops.ed.redo()
         return {'FINISHED'}
 
-def draw_undo_redo_timeline(self, context):
+def add_undo_redo_buttons(self, context):
     layout = self.layout
-    layout.separator_spacer()  # Push buttons to right side
-    row = layout.row(align=True)
-    row.scale_y = 2.0
-    row.operator(HEADER_OP_UNDO.bl_idname, text="", icon='LOOP_BACK')
-    row.operator(HEADER_OP_REDO.bl_idname, text="", icon='LOOP_FORWARDS')
+    layout.separator()
+    layout.operator(HEADER_OP_UNDO.bl_idname, text="", icon='LOOP_BACK')
+    layout.operator(HEADER_OP_REDO.bl_idname, text="", icon='LOOP_FORWARDS')
 
 # --- Gizmo Size Adjuster ---
 
@@ -173,13 +171,13 @@ class GIZMO_PT_size_panel(bpy.types.Panel):
         layout = self.layout
         prefs = bpy.context.preferences.view
         layout.label(text=f"Current gizmo size: {prefs.gizmo_size}")
-        row = layout.row(align=True)
+        row = layout.row()
         row.operator("gizmo.increase_size", text="Increase (+)")
         row.operator("gizmo.decrease_size", text="Decrease (-)")
 
-addon_keymaps = []
+# --- Registration ---
 
-# --- Register/Unregister ---
+addon_keymaps = []
 
 classes = (
     NEW_ACTION,
@@ -197,12 +195,14 @@ def register():
 
     bpy.types.DOPESHEET_HT_header.append(add_actionlist)
     bpy.types.GRAPH_HT_header.append(add_actionlist)
-    bpy.types.TIMELINE_HT_header.append(draw_undo_redo_timeline)
+
+    bpy.types.DOPESHEET_HT_header.append(add_undo_redo_buttons)
+    bpy.types.GRAPH_HT_header.append(add_undo_redo_buttons)
 
     bpy.types.GRAPH_MT_context_menu.prepend(add_pasteconnect)
     bpy.types.DOPESHEET_MT_context_menu.prepend(add_pasteconnect)
 
-    # Gizmo Size Adjuster keymaps
+    # Keymaps for Gizmo Size Adjuster
     wm = bpy.context.window_manager
     kc = wm.keyconfigs.addon
     if kc:
@@ -212,17 +212,20 @@ def register():
         kmi = km.keymap_items.new(GIZMO_OT_decrease_size.bl_idname, 'NUMPAD_MINUS', 'PRESS')
         addon_keymaps.append((km, kmi))
 
-    print("✅ Combined Animation, Undo/Redo & Gizmo Tools registered")
+    print("✅ Combined Animation & Gizmo Tools registered")
 
 def unregister():
-    # Remove Gizmo Size Adjuster keymaps
+    # Remove keymaps for Gizmo Size Adjuster
     for km, kmi in addon_keymaps:
         km.keymap_items.remove(kmi)
     addon_keymaps.clear()
 
     bpy.types.DOPESHEET_HT_header.remove(add_actionlist)
     bpy.types.GRAPH_HT_header.remove(add_actionlist)
-    bpy.types.TIMELINE_HT_header.remove(draw_undo_redo_timeline)
+
+    bpy.types.DOPESHEET_HT_header.remove(add_undo_redo_buttons)
+    bpy.types.GRAPH_HT_header.remove(add_undo_redo_buttons)
+    bpy.types.TIMELINE_HT_header.remove(add_undo_redo_buttons)
 
     bpy.types.GRAPH_MT_context_menu.remove(add_pasteconnect)
     bpy.types.DOPESHEET_MT_context_menu.remove(add_pasteconnect)
@@ -230,7 +233,7 @@ def unregister():
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
 
-    print("❌ Combined Animation, Undo/Redo & Gizmo Tools unregistered")
+    print("❌ Combined Animation & Gizmo Tools unregistered")
 
 if __name__ == "__main__":
     register()
