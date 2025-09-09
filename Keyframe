@@ -1,133 +1,102 @@
-bl_info = {
-    "name": "Maya Style Red Keyframe Line",
-    "author": "Venkatesh Sanku",
-    "version": (1, 1, 0),
-    "blender": (4, 4, 0),
-    "location": "Timeline (Dope Sheet) > Sidebar > Keyframe Line",
-    "description": "Shows a Maya-style straight red line indicator on the timeline for the current frame",
-    "category": "Animation",
-}
-
 import bpy
 import gpu
 from gpu_extras.batch import batch_for_shader
 
-handler = None
-timer = None
+class KeyframeRedLinesOperator(bpy.types.Operator):
+    bl_idname = "timeline.keyframe_red_lines_gpu"
+    bl_label = "Toggle Red Keyframe Lines (GPU)"
 
-def draw_red_line_callback(context):
-    region = context.region
-    frame = context.scene.frame_current
-    frame_start = context.scene.frame_start
-    frame_end = context.scene.frame_end
+    _handle = None
 
-    width = region.width
-    height = region.height
+    @staticmethod
+    def draw_callback(self, context):
+        area = next((a for a in context.window.screen.areas if a.type in {'DOPESHEET_EDITOR', 'TIMELINE'}), None)
+        if not area:
+            return
+        region = next((r for r in area.regions if r.type == 'WINDOW'), None)
+        if not region:
+            return
+        width, height = region.width, region.height
 
-    total_frames = frame_end - frame_start + 1
-    if total_frames <= 0:
-        return
+        space = area.spaces.active
+        start_frame, end_frame = space.frame_start, space.frame_end
 
-    pos = (frame - frame_start) / total_frames
-    x = pos * width
+        obj = context.active_object
 
-    coords = [(x, 0), (x, height)]
+        frames = set()
+        if obj and obj.animation_data and obj.animation_data.action:
+            for fcurve in obj.animation_data.action.fcurves:
+                for kp in fcurve.keyframe_points:
+                    frames.add(kp.co.x)
 
-    shader = gpu.shader.from_builtin('2D_UNIFORM_COLOR')
-    batch = batch_for_shader(shader, 'LINES', {"pos": coords})
+        if end_frame == start_frame:
+            return
 
-    shader.bind()
-    shader.uniform_float("color", (1.0, 0.0, 0.0, 1.0))
-    batch.draw(shader)
+        coords = []
+        for frame in frames:
+            if start_frame <= frame <= end_frame:
+                x = int((frame - start_frame) / (end_frame - start_frame) * width)
+                coords.append((x, 0))
+                coords.append((x, height))
 
-def draw_red_line(self, context):
-    draw_red_line_callback(context)
+        if not coords:
+            return
 
-def add_handler():
-    global handler
-    if handler is None:
-        for area in bpy.context.screen.areas:
-            if area.type == 'DOPESHEET':  # Use Dope Sheet space for Timeline editor panel compatibility
-                for region in area.regions:
-                    if region.type == 'WINDOW':
-                        handler = region.callback_add(draw_red_line, (bpy.context,), 'POST_PIXEL')
-                        print("Red line draw handler added")
-                        return True
-    return False
+        shader = gpu.shader.from_builtin('2D_UNIFORM_COLOR')
+        batch = batch_for_shader(shader, 'LINES', {"pos": coords})
 
-def remove_handler():
-    global handler
-    if handler is not None:
-        bpy.types.SpaceDopeSheetEditor.draw_handler_remove(handler, 'WINDOW')
-        handler = None
-        print("Red line draw handler removed")
+        gpu.state.blend_set('ALPHA')
+        shader.bind()
+        shader.uniform_float("color", (1.0, 0.0, 0.0, 1.0))  # Red color
+        gpu.state.line_width_set(2.0)
 
-def timer_callback():
-    for window in bpy.context.window_manager.windows:
-        for area in window.screen.areas:
-            if area.type == 'DOPESHEET':
-                for region in area.regions:
-                    if region.type == 'WINDOW':
-                        region.tag_redraw()
-    return 0.1
+        batch.draw(shader)
 
-class KEYFRAME_LINE_OT_toggle(bpy.types.Operator):
-    bl_idname = "animation.toggle_keyframe_line"
-    bl_label = "Toggle Red Keyframe Line"
-    bl_description = "Toggle Maya-style red keyframe line indicator on the timeline"
+        gpu.state.line_width_set(1.0)
+        gpu.state.blend_set('NONE')
 
     def execute(self, context):
-        prefs = context.scene.keyframe_line_settings
-        wm = context.window_manager
-        global timer
-
-        if prefs.enabled:
-            remove_handler()
-            if timer is not None:
-                wm.event_timer_remove(timer)
-                timer = None
-            prefs.enabled = False
+        if KeyframeRedLinesOperator._handle is None:
+            KeyframeRedLinesOperator._handle = bpy.types.SpaceDopeSheetEditor.draw_handler_add(
+                self.draw_callback, (self, context), 'WINDOW', 'POST_PIXEL')
+            self.report({'INFO'}, "Red keyframe lines enabled")
         else:
-            added = add_handler()
-            if added:
-                timer = wm.event_timer_add(0.1, window=context.window)
-                prefs.enabled = True
+            bpy.types.SpaceDopeSheetEditor.draw_handler_remove(KeyframeRedLinesOperator._handle, 'WINDOW')
+            KeyframeRedLinesOperator._handle = None
+            self.report({'INFO'}, "Red keyframe lines disabled")
+
+        # Redraw dopesheet/timeline areas
+        for window in context.window_manager.windows:
+            for area in window.screen.areas:
+                if area.type in {'DOPESHEET_EDITOR', 'TIMELINE'}:
+                    area.tag_redraw()
+
         return {'FINISHED'}
 
-class KEYFRAME_LINE_Preferences(bpy.types.PropertyGroup):
-    enabled: bpy.props.BoolProperty(
-        name="Enabled",
-        description="Enable or disable Maya-style red keyframe line",
-        default=False,
-    )
 
-class KEYFRAME_LINE_PT_panel(bpy.types.Panel):
-    bl_label = "Maya Style Red Keyframe Line"
-    bl_space_type = 'DOPESHEET'   # Use Dope Sheet, Timeline and Dope Sheet share this for panels
+class KeyframeRedLinesPanel(bpy.types.Panel):
+    bl_label = "Maya Style Red Keyframe Lines"
+    bl_space_type = 'TIMELINE'
     bl_region_type = 'UI'
-    bl_category = 'Keyframe Line'
+    bl_category = "Keyframes"
 
     def draw(self, context):
         layout = self.layout
-        settings = context.scene.keyframe_line_settings
+        layout.operator(KeyframeRedLinesOperator.bl_idname, text="Toggle Red Keyframe Lines (GPU)")
 
-        if settings.enabled:
-            layout.operator("animation.toggle_keyframe_line", text="Disable Red Line", icon='CHECKBOX_HLT')
-        else:
-            layout.operator("animation.toggle_keyframe_line", text="Enable Red Line", icon='CHECKBOX_DEHLT')
 
 def register():
-    bpy.utils.register_class(KEYFRAME_LINE_OT_toggle)
-    bpy.utils.register_class(KEYFRAME_LINE_PT_panel)
-    bpy.utils.register_class(KEYFRAME_LINE_Preferences)
-    bpy.types.Scene.keyframe_line_settings = bpy.props.PointerProperty(type=KEYFRAME_LINE_Preferences)
+    bpy.utils.register_class(KeyframeRedLinesOperator)
+    bpy.utils.register_class(KeyframeRedLinesPanel)
+
 
 def unregister():
-    remove_handler()
-    bpy.utils.unregister_class(KEYFRAME_LINE_OT_toggle)
-    bpy.utils.unregister_class(KEYFRAME_LINE_PT_panel)
-    bpy.utils.unregister_class(KEYFRAME_LINE_Preferences)
-    del bpy.types.Scene.keyframe_line_settings
+    if KeyframeRedLinesOperator._handle is not None:
+        bpy.types.SpaceDopeSheetEditor.draw_handler_remove(KeyframeRedLinesOperator._handle, 'WINDOW')
+        KeyframeRedLinesOperator._handle = None
+    bpy.utils.unregister_class(KeyframeRedLinesOperator)
+    bpy.utils.unregister_class(KeyframeRedLinesPanel)
+
 
 if __name__ == "__main__":
     register()
