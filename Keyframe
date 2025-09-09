@@ -1,0 +1,132 @@
+import bpy
+import bgl
+
+# Global variable to hold the draw handler reference
+handler = None
+
+def draw_red_line_callback(self, context):
+    """Draw a vertical red line on the timeline at the current frame."""
+    region = context.region
+    frame = context.scene.frame_current
+    frame_start = context.scene.frame_start
+    frame_end = context.scene.frame_end
+    total_frames = frame_end - frame_start + 1
+
+    width = region.width
+    height = region.height
+
+    # Calculate X position for the current frame in the timeline region
+    pos = (frame - frame_start) / total_frames if total_frames else 0
+    x = int(pos * width)
+
+    # OpenGL drawing setup
+    bgl.glEnable(bgl.GL_BLEND)
+    bgl.glLineWidth(2)
+    bgl.glColor4f(1.0, 0.0, 0.0, 1.0)  # red color
+
+    bgl.glBegin(bgl.GL_LINES)
+    bgl.glVertex2i(x, 0)
+    bgl.glVertex2i(x, height)
+    bgl.glEnd()
+
+    # Restore defaults
+    bgl.glLineWidth(1)
+    bgl.glDisable(bgl.GL_BLEND)
+
+
+def add_draw_handler():
+    global handler
+    if handler is None:
+        # Add the OpenGL draw callback for the timeline area
+        for area in bpy.context.screen.areas:
+            if area.type == 'TIMELINE':
+                for region in area.regions:
+                    if region.type == 'WINDOW':
+                        handler = bpy.types.SpaceTimeline.draw_handler_add(
+                            draw_red_line_callback, (None, bpy.context),
+                            'WINDOW', 'POST_PIXEL'
+                        )
+                        print("Red line draw handler added")
+                        break
+
+
+def remove_draw_handler():
+    global handler
+    if handler is not None:
+        bpy.types.SpaceTimeline.draw_handler_remove(handler, 'WINDOW')
+        handler = None
+        print("Red line draw handler removed")
+
+
+def scene_update_handler(scene):
+    # This handler triggers every frame update or scene update
+    # Redraw the timeline editor to update the red line position dynamically
+    for area in bpy.context.screen.areas:
+        if area.type == 'TIMELINE':
+            area.tag_redraw()
+
+
+class KEYFRAME_LINE_OT_toggle(bpy.types.Operator):
+    """Toggle Maya Style Red Keyframe Line"""
+    bl_idname = "animation.toggle_keyframe_line"
+    bl_label = "Toggle Red Keyframe Line"
+
+    def execute(self, context):
+        prefs = context.scene.keyframe_line_settings
+        if prefs.enabled:
+            remove_draw_handler()
+            prefs.enabled = False
+        else:
+            add_draw_handler()
+            prefs.enabled = True
+        return {'FINISHED'}
+
+
+class KEYFRAME_LINE_Preferences(bpy.types.PropertyGroup):
+    enabled: bpy.props.BoolProperty(
+        name="Enabled",
+        description="Enable or disable Maya-style red keyframe line",
+        default=False,
+    )
+
+
+class KEYFRAME_LINE_PT_panel(bpy.types.Panel):
+    bl_label = "Maya Style Red Keyframe Line"
+    bl_space_type = 'TIMELINE'
+    bl_region_type = 'UI'
+    bl_category = 'Keyframe Line'
+
+    def draw(self, context):
+        layout = self.layout
+        settings = context.scene.keyframe_line_settings
+
+        row = layout.row()
+        if settings.enabled:
+            row.operator("animation.toggle_keyframe_line", text="Disable Red Line", icon='CHECKBOX_HLT')
+        else:
+            row.operator("animation.toggle_keyframe_line", text="Enable Red Line", icon='CHECKBOX_DEHLT')
+
+
+def register():
+    bpy.utils.register_class(KEYFRAME_LINE_OT_toggle)
+    bpy.utils.register_class(KEYFRAME_LINE_PT_panel)
+    bpy.utils.register_class(KEYFRAME_LINE_Preferences)
+    bpy.types.Scene.keyframe_line_settings = bpy.props.PointerProperty(type=KEYFRAME_LINE_Preferences)
+
+    # Add scene update handler for timeline redraw
+    bpy.app.handlers.depsgraph_update_post.append(scene_update_handler)
+
+
+def unregister():
+    remove_draw_handler()
+    bpy.utils.unregister_class(KEYFRAME_LINE_OT_toggle)
+    bpy.utils.unregister_class(KEYFRAME_LINE_PT_panel)
+    bpy.utils.unregister_class(KEYFRAME_LINE_Preferences)
+    del bpy.types.Scene.keyframe_line_settings
+
+    if scene_update_handler in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.remove(scene_update_handler)
+
+
+if __name__ == "__main__":
+    register()
