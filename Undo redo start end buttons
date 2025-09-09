@@ -12,7 +12,7 @@ import bpy
 
 # --- Timeline Header Buttons ---
 class TIMELINE_HT_custom_header(bpy.types.Header):
-    bl_space_type = 'TIME_EDITOR'
+    bl_space_type = 'TIMELINE'
 
     def draw(self, context):
         layout = self.layout
