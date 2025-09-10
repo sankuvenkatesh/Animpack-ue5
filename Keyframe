@@ -1,102 +1,101 @@
+bl_info = {
+    "name": "Timeline Keyframe Line Overlay",
+    "description": "Show timeline keyframes as vertical lines instead of diamonds",
+    "author": "Animation Technical Artist",
+    "version": (1, 0),
+    "blender": (3, 0, 0),
+    "location": "Timeline > View",
+    "category": "Animation",
+}
+
 import bpy
+import bgl
 import gpu
+from blender.types import Operator, Panel
 from gpu_extras.batch import batch_for_shader
 
-class KeyframeRedLinesOperator(bpy.types.Operator):
-    bl_idname = "timeline.keyframe_red_lines_gpu"
-    bl_label = "Toggle Red Keyframe Lines (GPU)"
+def get_keyframe_frames():
+    obj = bpy.context.active_object
+    if not obj or not obj.animation_data or not obj.animation_data.action:
+        return []
+    frames = set()
+    action = obj.animation_data.action
+    for fcurve in action.fcurves:
+        for kp in fcurve.keyframe_points:
+            frames.add(int(kp.co.x))
+    return list(frames)
+
+def draw_callback_px(self, context):
+    area = context.area
+    region = context.region
+    frames = get_keyframe_frames()
+    if not frames: return
+
+    # Timeline frame range and region dims
+    start = context.scene.frame_start
+    end = context.scene.frame_end
+    r_x = region.width
+    r_y = region.height
+
+    # Map frames to region x
+    for frame in frames:
+        frac = (frame - start) / max(end - start, 1)
+        x = int(frac * r_x)
+        # Draw a red vertical line
+        shader = gpu.shader.from_builtin('2D_UNIFORM_COLOR')
+        vertices = [(x, 0), (x, r_y)]
+        batch = batch_for_shader(shader, 'LINES', {"pos": vertices})
+        shader.bind()
+        shader.uniform_float("color", (1.0, 0.0, 0.0, 1.0))
+        batch.draw(shader)
+
+class KEYFRAMELINE_OT_activate(Operator):
+    """Activate keyframe line overlay in Timeline"""
+    bl_idname = "timeline.keyframe_line_overlay_activate"
+    bl_label = "Keyframe Line Overlay Activate"
 
     _handle = None
 
-    @staticmethod
-    def draw_callback(self, context):
-        area = next((a for a in context.window.screen.areas if a.type in {'DOPESHEET_EDITOR', 'TIMELINE'}), None)
-        if not area:
-            return
-        region = next((r for r in area.regions if r.type == 'WINDOW'), None)
-        if not region:
-            return
-        width, height = region.width, region.height
-
-        space = area.spaces.active
-        start_frame, end_frame = space.frame_start, space.frame_end
-
-        obj = context.active_object
-
-        frames = set()
-        if obj and obj.animation_data and obj.animation_data.action:
-            for fcurve in obj.animation_data.action.fcurves:
-                for kp in fcurve.keyframe_points:
-                    frames.add(kp.co.x)
-
-        if end_frame == start_frame:
-            return
-
-        coords = []
-        for frame in frames:
-            if start_frame <= frame <= end_frame:
-                x = int((frame - start_frame) / (end_frame - start_frame) * width)
-                coords.append((x, 0))
-                coords.append((x, height))
-
-        if not coords:
-            return
-
-        shader = gpu.shader.from_builtin('2D_UNIFORM_COLOR')
-        batch = batch_for_shader(shader, 'LINES', {"pos": coords})
-
-        gpu.state.blend_set('ALPHA')
-        shader.bind()
-        shader.uniform_float("color", (1.0, 0.0, 0.0, 1.0))  # Red color
-        gpu.state.line_width_set(2.0)
-
-        batch.draw(shader)
-
-        gpu.state.line_width_set(1.0)
-        gpu.state.blend_set('NONE')
-
     def execute(self, context):
-        if KeyframeRedLinesOperator._handle is None:
-            KeyframeRedLinesOperator._handle = bpy.types.SpaceDopeSheetEditor.draw_handler_add(
-                self.draw_callback, (self, context), 'WINDOW', 'POST_PIXEL')
-            self.report({'INFO'}, "Red keyframe lines enabled")
-        else:
-            bpy.types.SpaceDopeSheetEditor.draw_handler_remove(KeyframeRedLinesOperator._handle, 'WINDOW')
-            KeyframeRedLinesOperator._handle = None
-            self.report({'INFO'}, "Red keyframe lines disabled")
-
-        # Redraw dopesheet/timeline areas
-        for window in context.window_manager.windows:
-            for area in window.screen.areas:
-                if area.type in {'DOPESHEET_EDITOR', 'TIMELINE'}:
-                    area.tag_redraw()
-
+        if KEYFRAMELINE_OT_activate._handle is None:
+            KEYFRAMELINE_OT_activate._handle = bpy.types.SpaceTimeline.draw_handler_add(
+                draw_callback_px, (self, context), 'WINDOW', 'POST_PIXEL')
+        self.report({'INFO'}, "Keyframe line overlay activated")
         return {'FINISHED'}
 
+class KEYFRAMELINE_OT_deactivate(Operator):
+    """Deactivate keyframe line overlay in Timeline"""
+    bl_idname = "timeline.keyframe_line_overlay_deactivate"
+    bl_label = "Keyframe Line Overlay Deactivate"
 
-class KeyframeRedLinesPanel(bpy.types.Panel):
-    bl_label = "Maya Style Red Keyframe Lines"
+    def execute(self, context):
+        if KEYFRAMELINE_OT_activate._handle:
+            bpy.types.SpaceTimeline.draw_handler_remove(
+                KEYFRAMELINE_OT_activate._handle, 'WINDOW')
+            KEYFRAMELINE_OT_activate._handle = None
+        self.report({'INFO'}, "Keyframe line overlay deactivated")
+        return {'FINISHED'}
+
+class KEYFRAMELINE_PT_panel(Panel):
+    bl_label = "Keyframe Line Overlay"
     bl_space_type = 'TIMELINE'
     bl_region_type = 'UI'
-    bl_category = "Keyframes"
+    bl_category = 'Keyframe Lines'
 
     def draw(self, context):
         layout = self.layout
-        layout.operator(KeyframeRedLinesOperator.bl_idname, text="Toggle Red Keyframe Lines (GPU)")
-
+        layout.operator(KEYFRAMELINE_OT_activate.bl_idname)
+        layout.operator(KEYFRAMELINE_OT_deactivate.bl_idname)
 
 def register():
-    bpy.utils.register_class(KeyframeRedLinesOperator)
-    bpy.utils.register_class(KeyframeRedLinesPanel)
-
+    bpy.utils.register_class(KEYFRAMELINE_OT_activate)
+    bpy.utils.register_class(KEYFRAMELINE_OT_deactivate)
+    bpy.utils.register_class(KEYFRAMELINE_PT_panel)
 
 def unregister():
-    if KeyframeRedLinesOperator._handle is not None:
-        bpy.types.SpaceDopeSheetEditor.draw_handler_remove(KeyframeRedLinesOperator._handle, 'WINDOW')
-        KeyframeRedLinesOperator._handle = None
-    bpy.utils.unregister_class(KeyframeRedLinesOperator)
-    bpy.utils.unregister_class(KeyframeRedLinesPanel)
-
+    bpy.utils.unregister_class(KEYFRAMELINE_OT_activate)
+    bpy.utils.unregister_class(KEYFRAMELINE_OT_deactivate)
+    bpy.utils.unregister_class(KEYFRAMELINE_PT_panel)
 
 if __name__ == "__main__":
     register()
