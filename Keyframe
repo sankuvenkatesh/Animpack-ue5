@@ -1,101 +1,220 @@
+
+# -*- coding: utf-8 -*-
+
+# ##### BEGIN GPL LICENSE BLOCK #####
+
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+
+
+# ##### END GPL LICENSE BLOCK #####
+
 bl_info = {
-    "name": "Timeline Keyframe Line Overlay",
-    "description": "Show timeline keyframes as vertical lines instead of diamonds",
-    "author": "Animation Technical Artist",
-    "version": (1, 0),
-    "blender": (3, 0, 0),
-    "location": "Timeline > View",
+    "name": "Delete Keyframe by Interval",
+    "author": "Venkatesh Sanku",
+    "version": (1, 1, 0),
+    "blender": (2, 80, 0),
+    "location": "View3D > Sidebar > Item Tab",
+    "description": "Delete Keyframes by interval with flexible options.",
+    "warning": "",
+    "wiki_url": "",
+    "tracker_url": "",
     "category": "Animation",
 }
 
 import bpy
-import bgl
-import gpu
-from blender.types import Operator, Panel
-from gpu_extras.batch import batch_for_shader
 
-def get_keyframe_frames():
-    obj = bpy.context.active_object
-    if not obj or not obj.animation_data or not obj.animation_data.action:
-        return []
-    frames = set()
-    action = obj.animation_data.action
-    for fcurve in action.fcurves:
-        for kp in fcurve.keyframe_points:
-            frames.add(int(kp.co.x))
-    return list(frames)
 
-def draw_callback_px(self, context):
-    area = context.area
-    region = context.region
-    frames = get_keyframe_frames()
-    if not frames: return
+class SJDelKeyProperties(bpy.types.PropertyGroup):
+    start_frame: bpy.props.IntProperty(
+        name="Start Frame", default=0, min=0,
+        description="First frame to consider for deletion")
 
-    # Timeline frame range and region dims
-    start = context.scene.frame_start
-    end = context.scene.frame_end
-    r_x = region.width
-    r_y = region.height
+    end_frame: bpy.props.IntProperty(
+        name="End Frame", default=100, min=0,
+        description="Last frame to consider for deletion")
 
-    # Map frames to region x
-    for frame in frames:
-        frac = (frame - start) / max(end - start, 1)
-        x = int(frac * r_x)
-        # Draw a red vertical line
-        shader = gpu.shader.from_builtin('2D_UNIFORM_COLOR')
-        vertices = [(x, 0), (x, r_y)]
-        batch = batch_for_shader(shader, 'LINES', {"pos": vertices})
-        shader.bind()
-        shader.uniform_float("color", (1.0, 0.0, 0.0, 1.0))
-        batch.draw(shader)
+    interval: bpy.props.IntProperty(
+        name="Interval", default=1, min=1, max=100,
+        description="Delete every nth frame (or inverse selection)")
 
-class KEYFRAMELINE_OT_activate(Operator):
-    """Activate keyframe line overlay in Timeline"""
-    bl_idname = "timeline.keyframe_line_overlay_activate"
-    bl_label = "Keyframe Line Overlay Activate"
+    delete_types: bpy.props.EnumProperty(
+        name="Delete Type",
+        description="Choose which keyframe types to delete",
+        items=[
+            ('LOC', "Location", "Delete location keyframes"),
+            ('ROT', "Rotation", "Delete rotation keyframes"),
+            ('SCL', "Scale", "Delete scale keyframes"),
+            ('CUSTOM', "Custom Properties", "Delete custom property keyframes"),
+            ('ALL', "All", "Delete all types (location, rotation, scale, custom)")
+        ],
+        default='ALL',
+        options={'ENUM_FLAG'}
+    )
 
-    _handle = None
+    invert_selection: bpy.props.BoolProperty(
+        name="Invert Frame Selection",
+        description="Invert frame selection to delete frames AT interval instead of NOT at interval",
+        default=False)
 
-    def execute(self, context):
-        if KEYFRAMELINE_OT_activate._handle is None:
-            KEYFRAMELINE_OT_activate._handle = bpy.types.SpaceTimeline.draw_handler_add(
-                draw_callback_px, (self, context), 'WINDOW', 'POST_PIXEL')
-        self.report({'INFO'}, "Keyframe line overlay activated")
-        return {'FINISHED'}
+    preview_count: bpy.props.IntProperty(
+        name="Frames to Delete",
+        default=0,
+        options={'HIDDEN'},
+        description="Automatically calculated number of frames that will be deleted")
 
-class KEYFRAMELINE_OT_deactivate(Operator):
-    """Deactivate keyframe line overlay in Timeline"""
-    bl_idname = "timeline.keyframe_line_overlay_deactivate"
-    bl_label = "Keyframe Line Overlay Deactivate"
+
+class SJDeleteKeyframeFunction(bpy.types.Operator):
+    bl_idname = "object.sj_delete_keyframe_by_interval"
+    bl_label = "Execute"
+    bl_description = "Delete Keyframes by interval, with selected options"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.active_object is not None
 
     def execute(self, context):
-        if KEYFRAMELINE_OT_activate._handle:
-            bpy.types.SpaceTimeline.draw_handler_remove(
-                KEYFRAMELINE_OT_activate._handle, 'WINDOW')
-            KEYFRAMELINE_OT_activate._handle = None
-        self.report({'INFO'}, "Keyframe line overlay deactivated")
+        props = context.scene.sj_del_keyframe_props
+
+        start = props.start_frame
+        end = props.end_frame
+        interval = props.interval
+        delete_types = props.delete_types
+        invert = props.invert_selection
+
+        if start > end:
+            self.report({'ERROR'}, "Start frame must be less than or equal to End frame.")
+            return {'CANCELLED'}
+
+        frames_to_delete = []
+        for f in range(start, end + 1):
+            # Determine if the frame should be deleted based on interval and invert flag
+            is_interval_frame = ((f - start) % (interval + 1)) == 0
+            if invert != is_interval_frame:
+                frames_to_delete.append(f)
+
+        deleted_keyframe_count = 0
+
+        for f in frames_to_delete:
+            for obj in context.selected_objects:
+                # Handle different deletion types
+                if 'ALL' in delete_types:
+                    paths = ["location", "rotation_euler", "rotation_quaternion", "scale"]
+                    # Delete built-in paths
+                    for dp in paths:
+                        if dp in ['rotation_euler', 'rotation_quaternion'] and 'ROT' not in delete_types and 'ALL' not in delete_types:
+                            continue
+                        if dp == "location" and 'LOC' not in delete_types and 'ALL' not in delete_types:
+                            continue
+                        if dp == "scale" and 'SCL' not in delete_types and 'ALL' not in delete_types:
+                            continue
+                        obj.keyframe_delete(data_path=dp, frame=f)
+                        deleted_keyframe_count += 1
+                    # Delete custom properties keyframes
+                    if 'CUSTOM' in delete_types or 'ALL' in delete_types:
+                        if obj.animation_data and obj.animation_data.action:
+                            for fcurve in obj.animation_data.action.fcurves:
+                                if fcurve.data_path.startswith('["') and fcurve.data_path.endswith('"]'):
+                                    fpoints = [kp.co[0] for kp in fcurve.keyframe_points]
+                                    if f in fpoints:
+                                        fcurve.keyframe_points.remove(next(kp for kp in fcurve.keyframe_points if kp.co[0] == f))
+                                        deleted_keyframe_count +=1
+                else:
+                    # Individual type handling
+                    if 'LOC' in delete_types:
+                        obj.keyframe_delete(data_path="location", frame=f)
+                        deleted_keyframe_count += 1
+                    if 'ROT' in delete_types:
+                        obj.keyframe_delete(data_path="rotation_euler", frame=f)
+                        obj.keyframe_delete(data_path="rotation_quaternion", frame=f)
+                        deleted_keyframe_count += 1
+                    if 'SCL' in delete_types:
+                        obj.keyframe_delete(data_path="scale", frame=f)
+                        deleted_keyframe_count += 1
+                    if 'CUSTOM' in delete_types:
+                        if obj.animation_data and obj.animation_data.action:
+                            for fcurve in obj.animation_data.action.fcurves:
+                                if fcurve.data_path.startswith('["') and fcurve.data_path.endswith('"]'):
+                                    fpoints = [kp.co[0] for kp in fcurve.keyframe_points]
+                                    if f in fpoints:
+                                        fcurve.keyframe_points.remove(next(kp for kp in fcurve.keyframe_points if kp.co[0] == f))
+                                        deleted_keyframe_count +=1
+
+            if context.object.mode == 'POSE':
+                for pbone in context.selected_pose_bones:
+                    if 'ALL' in delete_types or 'LOC' in delete_types:
+                        pbone.keyframe_delete(data_path="location", frame=f)
+                        deleted_keyframe_count += 1
+                    if 'ALL' in delete_types or 'ROT' in delete_types:
+                        pbone.keyframe_delete(data_path="rotation_euler", frame=f)
+                        pbone.keyframe_delete(data_path="rotation_quaternion", frame=f)
+                        deleted_keyframe_count += 1
+                    if 'ALL' in delete_types or 'SCL' in delete_types:
+                        pbone.keyframe_delete(data_path="scale", frame=f)
+                        deleted_keyframe_count += 1
+
+        self.report({'INFO'}, f"Deleted approximately {len(frames_to_delete)} frames, total keyframes touched: {deleted_keyframe_count}")
+
+        bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
+        context.scene.sj_del_keyframe_props.preview_count = len(frames_to_delete)
+
         return {'FINISHED'}
 
-class KEYFRAMELINE_PT_panel(Panel):
-    bl_label = "Keyframe Line Overlay"
-    bl_space_type = 'TIMELINE'
+
+class SJDeleteKeyframeByInterval(bpy.types.Panel):
+    bl_label = "SJ Delete Keyframe By Interval"
+    bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Keyframe Lines'
+    bl_category = 'Item'
+    bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
         layout = self.layout
-        layout.operator(KEYFRAMELINE_OT_activate.bl_idname)
-        layout.operator(KEYFRAMELINE_OT_deactivate.bl_idname)
+        props = context.scene.sj_del_keyframe_props
+
+        layout.label(text="Frame Range:")
+        row = layout.row()
+        row.prop(props, "start_frame", text="Start")
+        row.prop(props, "end_frame", text="End")
+
+        layout.prop(props, "interval", text="Interval")
+
+        layout.label(text="Delete Types (multiple allowed):")
+        layout.prop(props, "delete_types", text="")
+
+        layout.prop(props, "invert_selection")
+
+        layout.label(text=f"Frames to delete based on settings: {props.preview_count}")
+
+        layout.operator("object.sj_delete_keyframe_by_interval", text="Execute Deletion")
+
+
+classes = (
+    SJDelKeyProperties,
+    SJDeleteKeyframeFunction,
+    SJDeleteKeyframeByInterval,
+)
+
 
 def register():
-    bpy.utils.register_class(KEYFRAMELINE_OT_activate)
-    bpy.utils.register_class(KEYFRAMELINE_OT_deactivate)
-    bpy.utils.register_class(KEYFRAMELINE_PT_panel)
+    for cls in classes:
+        bpy.utils.register_class(cls)
+    bpy.types.Scene.sj_del_keyframe_props = bpy.props.PointerProperty(type=SJDelKeyProperties)
+
 
 def unregister():
-    bpy.utils.unregister_class(KEYFRAMELINE_OT_activate)
-    bpy.utils.unregister_class(KEYFRAMELINE_OT_deactivate)
-    bpy.utils.unregister_class(KEYFRAMELINE_PT_panel)
+    for cls in classes:
+        bpy.utils.unregister_class(cls)
+    del bpy.types.Scene.sj_del_keyframe_props
+
 
 if __name__ == "__main__":
     register()
