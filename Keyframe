@@ -19,7 +19,7 @@
 bl_info = {
     "name": "Delete Keyframe by Interval",
     "author": "Venkatesh Sanku",
-    "version": (1, 0, 1),
+    "version": (1, 0, 2),
     "blender": (2, 80, 0),
     "location": "View3D > Sidebar > Item",
     "description": "Delete keyframes by interval with selectable types, invert selection, and preview.",
@@ -119,7 +119,6 @@ def is_custom_prop_fcurve(fcurve):
 
 def delete_on_object_at_frame(obj, f, delete_types):
     count = 0
-    # Delete based on selected types
     if 'ALL' in delete_types or 'LOC' in delete_types:
         if obj.keyframe_delete(data_path="location", frame=f):
             count += 1
@@ -131,7 +130,6 @@ def delete_on_object_at_frame(obj, f, delete_types):
     if 'ALL' in delete_types or 'SCL' in delete_types:
         if obj.keyframe_delete(data_path="scale", frame=f):
             count += 1
-    # Custom property keyframes via FCurve removal
     if 'ALL' in delete_types or 'CUSTOM' in delete_types:
         ad = obj.animation_data
         if ad and ad.action:
@@ -157,7 +155,6 @@ def delete_on_pbone_at_frame(pbone, f, delete_types):
     if 'ALL' in delete_types or 'SCL' in delete_types:
         if pbone.keyframe_delete(data_path="scale", frame=f):
             count += 1
-    # No custom props in bones handled here
     return count
 
 
@@ -227,7 +224,7 @@ class DeleteKeyframePanel(Panel):
 
         col.separator()
         col.label(text="Delete Types")
-        col.prop(props, "delete_types", text="")
+        col.prop(props, "delete_types", text="", expand=True)  # <== expand=True to show checkboxes properly
 
         col.separator()
         row = col.row(align=True)
