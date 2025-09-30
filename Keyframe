@@ -19,7 +19,7 @@
 bl_info = {
     "name": "Delete Keyframe by Interval",
     "author": "Venkatesh Sanku",
-    "version": (1, 0, 2),
+    "version": (1, 0, 3),
     "blender": (2, 80, 0),
     "location": "View3D > Sidebar > Item",
     "description": "Delete keyframes by interval with selectable types, invert selection, and preview.",
@@ -208,7 +208,7 @@ class DeleteKeyframePanel(Panel):
     bl_label = "Delete Keyframe By Interval"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Animation'
+    bl_category = 'Item'
     bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
@@ -224,7 +224,7 @@ class DeleteKeyframePanel(Panel):
 
         col.separator()
         col.label(text="Delete Types")
-        col.prop(props, "delete_types", text="", expand=True)  # <== expand=True to show checkboxes properly
+        col.prop(props, "delete_types", text="", expand=True)
 
         col.separator()
         row = col.row(align=True)
@@ -250,7 +250,7 @@ def register():
     for cls in classes:
         bpy.utils.register_class(cls)
     if not hasattr(bpy.types.Scene, "delete_keyframe_props"):
-        bpy.types.Scene.delete_keyframe_props = PointerProperty(type=DeleteKeyframeProperties)
+        bpy.types.Scene.delete_keyframe_props = bpy.props.PointerProperty(type=DeleteKeyframeProperties)
 
 
 def unregister():
