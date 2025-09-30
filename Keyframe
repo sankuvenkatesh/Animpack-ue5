@@ -21,7 +21,7 @@ bl_info = {
     "author": "Venkatesh Sanku",
     "version": (1, 0, 3),
     "blender": (2, 80, 0),
-    "location": "View3D > Sidebar > Item",
+    "location": "View3D > Sidebar > Animation",
     "description": "Delete keyframes by interval with selectable types, invert selection, and preview.",
     "warning": "",
     "category": "Animation",
@@ -208,7 +208,7 @@ class DeleteKeyframePanel(Panel):
     bl_label = "Delete Keyframe By Interval"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Item'
+    bl_category = 'Animation'
     bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
