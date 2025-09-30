@@ -19,10 +19,10 @@
 bl_info = {
     "name": "Delete Keyframe by Interval",
     "author": "Venkatesh Sanku",
-    "version": (1, 0, 0),
+    "version": (1, 0, 1),
     "blender": (2, 80, 0),
     "location": "View3D > Sidebar > Item",
-    "description": "Delete keyframes by interval with filtering and options.",
+    "description": "Delete keyframes by interval with selectable types, invert selection, and preview.",
     "warning": "",
     "category": "Animation",
 }
@@ -75,18 +75,22 @@ class DeleteKeyframeProperties(PropertyGroup):
         default=1, min=1, max=500,
         update=_update_preview,
     )
-    # Simplified delete types, no loc/rot/scl/all options visible
     delete_types: EnumProperty(
-        name="Type",
-        description="Choose keyframe type to delete",
+        name="Delete Types",
+        description="Select keyframe data types to delete",
         items=[
+            ('LOC', "Location", "Delete location keyframes"),
+            ('ROT', "Rotation", "Delete rotation keyframes"),
+            ('SCL', "Scale", "Delete scale keyframes"),
             ('CUSTOM', "Custom Properties", "Delete custom property keyframes"),
+            ('ALL', "All", "Delete all types"),
         ],
-        default='CUSTOM',
+        options={'ENUM_FLAG'},
+        default={'ALL'},
     )
     invert_selection: BoolProperty(
         name="Invert Selection",
-        description="Delete frames at interval positions instead of other frames",
+        description="Delete frames at interval instead of deleting frames NOT at interval",
         default=False,
         update=_update_preview,
     )
@@ -115,7 +119,20 @@ def is_custom_prop_fcurve(fcurve):
 
 def delete_on_object_at_frame(obj, f, delete_types):
     count = 0
-    if delete_types == 'CUSTOM':
+    # Delete based on selected types
+    if 'ALL' in delete_types or 'LOC' in delete_types:
+        if obj.keyframe_delete(data_path="location", frame=f):
+            count += 1
+    if 'ALL' in delete_types or 'ROT' in delete_types:
+        if obj.keyframe_delete(data_path="rotation_euler", frame=f):
+            count += 1
+        if obj.keyframe_delete(data_path="rotation_quaternion", frame=f):
+            count += 1
+    if 'ALL' in delete_types or 'SCL' in delete_types:
+        if obj.keyframe_delete(data_path="scale", frame=f):
+            count += 1
+    # Custom property keyframes via FCurve removal
+    if 'ALL' in delete_types or 'CUSTOM' in delete_types:
         ad = obj.animation_data
         if ad and ad.action:
             for fc in list(ad.action.fcurves):
@@ -128,9 +145,20 @@ def delete_on_object_at_frame(obj, f, delete_types):
 
 
 def delete_on_pbone_at_frame(pbone, f, delete_types):
-    # Only custom properties allowed, typically pose bones don't have custom props animation
-    # So nothing to delete unless extending later
-    return 0
+    count = 0
+    if 'ALL' in delete_types or 'LOC' in delete_types:
+        if pbone.keyframe_delete(data_path="location", frame=f):
+            count += 1
+    if 'ALL' in delete_types or 'ROT' in delete_types:
+        if pbone.keyframe_delete(data_path="rotation_euler", frame=f):
+            count += 1
+        if pbone.keyframe_delete(data_path="rotation_quaternion", frame=f):
+            count += 1
+    if 'ALL' in delete_types or 'SCL' in delete_types:
+        if pbone.keyframe_delete(data_path="scale", frame=f):
+            count += 1
+    # No custom props in bones handled here
+    return count
 
 
 class DeleteKeyframeOperator(Operator):
@@ -183,7 +211,7 @@ class DeleteKeyframePanel(Panel):
     bl_label = "Delete Keyframe By Interval"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Item'
+    bl_category = 'Animation'
     bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
@@ -198,7 +226,7 @@ class DeleteKeyframePanel(Panel):
         col.prop(props, "interval")
 
         col.separator()
-        col.label(text="Delete Type")
+        col.label(text="Delete Types")
         col.prop(props, "delete_types", text="")
 
         col.separator()
