@@ -19,7 +19,7 @@
 bl_info = {
     "name": "Delete Keyframe by Interval",
     "author": "Venkatesh Sanku",
-    "version": (1, 0, 4),
+    "version": (1, 0, 5),
     "blender": (2, 80, 0),
     "location": "View3D > Sidebar > Animation",
     "description": "Delete keyframes by interval with selectable types, invert selection, and preview.",
@@ -225,13 +225,11 @@ class DeleteKeyframePanel(Panel):
         col.separator()
         col.label(text="Delete Types")
 
-        # Robust label-visible checkboxes: draw enum items manually
-        enum_prop = props.bl_rna.properties['delete_types']
-        enum_items = enum_prop.enum_items
+        # Draw enum flags exactly once, with labels, no duplicates
+        enum_items = props.bl_rna.properties['delete_types'].enum_items
         grid = col.grid_flow(columns=2, row_major=True, even_columns=True, even_rows=True, align=True)
         for item in enum_items:
-            # item.identifier is 'LOC', 'ROT', etc.; item.name is the label
-            grid.prop(props, "delete_types", text=item.name, toggle=True, expand=False, index=item.value)
+            grid.prop(props, "delete_types", index=item.value, text=item.name, toggle=True)
 
         col.separator()
         row = col.row(align=True)
