@@ -1,17 +1,9 @@
-full code
-
-Here is the full fixed Blender addon code with fixes applied for:
-
-- Explicit manual drawing of Delete Types enum with visible checkbox names
-- Moving "Selected Only" checkbox OUT of the box to prevent errors
-
-```python
 # -*- coding: utf-8 -*-
 
 bl_info = {
     "name": "Delete Keyframe by Interval",
     "author": "Venkatesh Sanku",
-    "version": (1, 1, 1),
+    "version": (1, 1, 2),
     "blender": (2, 80, 0),
     "location": "View3D > Sidebar > Animation",
     "description": "Delete keyframes by interval with selectable types, invert selection, and preview.",
@@ -136,11 +128,6 @@ class DeleteKeyframeProperties(PropertyGroup):
         description="Also delete for selected bones in Pose Mode",
         default=True,
     )
-    only_selected_objects: BoolProperty(
-        name="Selected Only",
-        description="Operate only on selected objects",
-        default=True,
-    )
     preview_count: IntProperty(
         name="Frames to delete",
         default=0,
@@ -171,7 +158,8 @@ class DeleteKeyframeOperator(Operator):
             if invert != is_interval:
                 frames_to_delete.append(f)
 
-        targets = list(context.selected_objects) if props.only_selected_objects else list(context.scene.objects)
+        targets = list(context.scene.objects)  # always all objects
+
         if not targets:
             self.report({'WARNING'}, "No objects to process")
             return {'CANCELLED'}
@@ -209,19 +197,13 @@ class DeleteKeyframePanel(Panel):
 
         box.separator()
         box.label(text="Delete Types")
-
-        enum_items = props.bl_rna.properties['delete_types'].enum_items
-        col = box.column(align=True)
-        for item in enum_items:
-            col.prop(props, "delete_types", index=item.value, toggle=True, text=item.name)
+        # Draw exactly once, no manual loop to avoid duplication
+        box.prop(props, "delete_types", text="", expand=True)
 
         box.separator()
         row = box.row(align=True)
         row.prop(props, "invert_selection")
         row.prop(props, "affect_pose_bones")
-
-        layout.separator()
-        layout.prop(props, "only_selected_objects")
 
         layout.separator()
         layout.label(text=f"Preview frames to delete: {props.preview_count}")
@@ -246,11 +228,3 @@ def unregister():
 
 if __name__ == "__main__":
     register()
-```
-
-This code draws the Delete Types using an explicit manual approach with checkbox labels visible.
-
-The "Selected Only" prop is drawn outside the box to avoid layout errors.
-
-Save this as addon and test in Blender. Let me know if more fixes are needed.
-
