@@ -1,14 +1,9 @@
-This code has no add keyframes panel, no "select all types" checkbox, and a clean UI for deletion functionality.
-
-Save it as a Blender addon .py and install.
-
-Let me know if any UI or functionality tweaks are desired.```python
 # -*- coding: utf-8 -*-
 
 bl_info = {
     "name": "Delete Keyframe by Interval",
     "author": "Venkatesh Sanku",
-    "version": (1, 0, 10),
+    "version": (1, 1, 0),
     "blender": (2, 80, 0),
     "location": "View3D > Sidebar > Animation",
     "description": "Delete keyframes by interval with selectable types, invert selection, and preview.",
@@ -23,6 +18,9 @@ from bpy.types import (
     Panel, Operator, PropertyGroup
 )
 
+# -----------------------------
+# Helpers
+# -----------------------------
 def _enum_has(flag_set, name):
     try:
         return name in flag_set
@@ -47,16 +45,63 @@ def _update_preview(self, context):
             count += 1
     props.preview_count = count
 
+def is_custom_prop_fcurve(fcurve):
+    dp = fcurve.data_path
+    return dp.startswith('["') and dp.endswith('"]')
 
+def delete_on_object_at_frame(obj, f, delete_types):
+    count = 0
+    all_on = _enum_has(delete_types, 'ALL')
+    if all_on or _enum_has(delete_types, 'LOC'):
+        if obj.keyframe_delete(data_path="location", frame=f):
+            count += 1
+    if all_on or _enum_has(delete_types, 'ROT'):
+        if obj.keyframe_delete(data_path="rotation_euler", frame=f):
+            count += 1
+        if obj.keyframe_delete(data_path="rotation_quaternion", frame=f):
+            count += 1
+    if all_on or _enum_has(delete_types, 'SCL'):
+        if obj.keyframe_delete(data_path="scale", frame=f):
+            count += 1
+    if all_on or _enum_has(delete_types, 'CUSTOM'):
+        ad = obj.animation_data
+        if ad and ad.action:
+            for fc in list(ad.action.fcurves):
+                if is_custom_prop_fcurve(fc):
+                    for kp in list(fc.keyframe_points):
+                        if int(round(kp.co[0])) == f:
+                            fc.keyframe_points.remove(kp)
+                            count += 1
+    return count
+
+def delete_on_pbone_at_frame(pbone, f, delete_types):
+    count = 0
+    all_on = _enum_has(delete_types, 'ALL')
+    if all_on or _enum_has(delete_types, 'LOC'):
+        if pbone.keyframe_delete(data_path="location", frame=f):
+            count += 1
+    if all_on or _enum_has(delete_types, 'ROT'):
+        if pbone.keyframe_delete(data_path="rotation_euler", frame=f):
+            count += 1
+        if pbone.keyframe_delete(data_path="rotation_quaternion", frame=f):
+            count += 1
+    if all_on or _enum_has(delete_types, 'SCL'):
+        if pbone.keyframe_delete(data_path="scale", frame=f):
+            count += 1
+    return count
+
+# -----------------------------
+# Properties
+# -----------------------------
 class DeleteKeyframeProperties(PropertyGroup):
     start_frame: IntProperty(
-        name="Start Frame",
+        name="Start",
         description="First frame in range",
         default=0, min=0,
         update=_update_preview,
     )
     end_frame: IntProperty(
-        name="End Frame",
+        name="End",
         description="Last frame in range (inclusive)",
         default=100, min=0,
         update=_update_preview,
@@ -81,18 +126,18 @@ class DeleteKeyframeProperties(PropertyGroup):
         default={'ALL'},
     )
     invert_selection: BoolProperty(
-        name="Invert Selection",
-        description="Delete frames at interval instead of others",
+        name="Invert",
+        description="Delete frames at interval instead of other frames",
         default=False,
         update=_update_preview,
     )
     affect_pose_bones: BoolProperty(
-        name="Affect Pose Bones",
-        description="Delete on selected pose bones when in Pose Mode",
+        name="Pose Bones",
+        description="Also delete for selected bones in Pose Mode",
         default=True,
     )
     only_selected_objects: BoolProperty(
-        name="Selected Objects Only",
+        name="Selected Only",
         description="Operate only on selected objects",
         default=True,
     )
@@ -102,59 +147,9 @@ class DeleteKeyframeProperties(PropertyGroup):
         options={'HIDDEN'},
     )
 
-
-def is_custom_prop_fcurve(fcurve):
-    dp = fcurve.data_path
-    return dp.startswith('["') and dp.endswith('"]')
-
-
-def delete_on_object_at_frame(obj, f, props):
-    types = props.delete_types
-    count = 0
-
-    all_on = _enum_has(types, 'ALL')
-    if all_on or _enum_has(types, 'LOC'):
-        if obj.keyframe_delete(data_path="location", frame=f):
-            count += 1
-    if all_on or _enum_has(types, 'ROT'):
-        if obj.keyframe_delete(data_path="rotation_euler", frame=f):
-            count += 1
-        if obj.keyframe_delete(data_path="rotation_quaternion", frame=f):
-            count += 1
-    if all_on or _enum_has(types, 'SCL'):
-        if obj.keyframe_delete(data_path="scale", frame=f):
-            count += 1
-    if all_on or _enum_has(types, 'CUSTOM'):
-        ad = obj.animation_data
-        if ad and ad.action:
-            for fc in list(ad.action.fcurves):
-                if is_custom_prop_fcurve(fc):
-                    for kp in list(fc.keyframe_points):
-                        if int(round(kp.co[0])) == f:
-                            fc.keyframe_points.remove(kp)
-                            count += 1
-    return count
-
-
-def delete_on_pbone_at_frame(pbone, f, props):
-    types = props.delete_types
-    count = 0
-
-    all_on = _enum_has(types, 'ALL')
-    if all_on or _enum_has(types, 'LOC'):
-        if pbone.keyframe_delete(data_path="location", frame=f):
-            count += 1
-    if all_on or _enum_has(types, 'ROT'):
-        if pbone.keyframe_delete(data_path="rotation_euler", frame=f):
-            count += 1
-        if pbone.keyframe_delete(data_path="rotation_quaternion", frame=f):
-            count += 1
-    if all_on or _enum_has(types, 'SCL'):
-        if pbone.keyframe_delete(data_path="scale", frame=f):
-            count += 1
-    return count
-
-
+# -----------------------------
+# Operator
+# -----------------------------
 class DeleteKeyframeOperator(Operator):
     bl_idname = "object.delete_keyframe_by_interval"
     bl_label = "Execute Deletion"
@@ -167,7 +162,7 @@ class DeleteKeyframeOperator(Operator):
         start = props.start_frame
         end = props.end_frame
         if end < start:
-            self.report({'ERROR'}, "End frame must be greater than or equal to Start frame")
+            self.report({'ERROR'}, "End must be >= Start")
             return {'CANCELLED'}
 
         interval = max(1, props.interval)
@@ -180,7 +175,6 @@ class DeleteKeyframeOperator(Operator):
                 frames_to_delete.append(f)
 
         targets = list(context.selected_objects) if props.only_selected_objects else list(context.scene.objects)
-
         if not targets:
             self.report({'WARNING'}, "No objects to process")
             return {'CANCELLED'}
@@ -188,17 +182,19 @@ class DeleteKeyframeOperator(Operator):
         total_deleted = 0
         for f in frames_to_delete:
             for obj in targets:
-                total_deleted += delete_on_object_at_frame(obj, f, props)
+                total_deleted += delete_on_object_at_frame(obj, f, props.delete_types)
                 if props.affect_pose_bones and obj.type == 'ARMATURE' and obj.mode == 'POSE':
                     for pbone in context.selected_pose_bones:
-                        total_deleted += delete_on_pbone_at_frame(pbone, f, props)
+                        total_deleted += delete_on_pbone_at_frame(pbone, f, props.delete_types)
 
         props.preview_count = len(frames_to_delete)
         bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
-        self.report({'INFO'}, f"Deleted {len(frames_to_delete)} frames, {total_deleted} key edits")
+        self.report({'INFO'}, f"Deleted {len(frames_to_delete)} frames, {total_deleted} keyframe edits")
         return {'FINISHED'}
 
-
+# -----------------------------
+# UI Panel
+# -----------------------------
 class DeleteKeyframePanel(Panel):
     bl_label = "Delete Keyframe By Interval"
     bl_space_type = 'VIEW_3D'
@@ -210,36 +206,37 @@ class DeleteKeyframePanel(Panel):
         layout = self.layout
         props = context.scene.delete_keyframe_props
 
-        col = layout.column(align=True)
-        col.label(text="Frame Range")
-        row = col.row(align=True)
+        box = layout.box()
+        box.label(text="Frame Range")
+        row = box.row(align=True)
         row.prop(props, "start_frame")
         row.prop(props, "end_frame")
+        box.prop(props, "interval")
 
-        col.prop(props, "interval")
+        box.separator()
+        box.label(text="Delete Types")
+        box.prop(props, "delete_types", text="", expand=True)
 
-        col.separator()
-        col.label(text="Delete Types")
-        col.prop(props, "delete_types", text="", expand=True)
-
-        col.separator()
-        row = col.row(align=True)
+        box.separator()
+        row = box.row(align=True)
         row.prop(props, "invert_selection")
         row.prop(props, "affect_pose_bones")
 
-        col.prop(props, "only_selected_objects")
+        layout.prop(props, "only_selected_objects")
 
-        col.separator()
-        col.label(text=f"Preview frames to delete: {props.preview_count}")
+        layout.separator()
+        layout.label(text=f"Preview frames to delete: {props.preview_count}")
 
-        col.operator("object.delete_keyframe_by_interval", icon='TRASH')
+        layout.operator("object.delete_keyframe_by_interval", icon='TRASH')
 
-
-classes = [
+# -----------------------------
+# Registration
+# -----------------------------
+classes = (
     DeleteKeyframeProperties,
     DeleteKeyframeOperator,
     DeleteKeyframePanel,
-]
+)
 
 def register():
     for cls in classes:
@@ -247,10 +244,9 @@ def register():
     bpy.types.Scene.delete_keyframe_props = PointerProperty(type=DeleteKeyframeProperties)
 
 def unregister():
-    if hasattr(bpy.types.Scene, "delete_keyframe_props"):
-        del bpy.types.Scene.delete_keyframe_props
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
+    del bpy.types.Scene.delete_keyframe_props
 
 if __name__ == "__main__":
     register()
