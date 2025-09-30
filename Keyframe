@@ -3,7 +3,7 @@
 bl_info = {
     "name": "Delete Keyframe by Interval",
     "author": "Venkatesh Sanku",
-    "version": (1, 1, 2),
+    "version": (1, 1, 3),
     "blender": (2, 80, 0),
     "location": "View3D > Sidebar > Animation",
     "description": "Delete keyframes by interval with selectable types, invert selection, and preview.",
@@ -85,6 +85,11 @@ def delete_on_pbone_at_frame(pbone, f, delete_types):
             count += 1
     return count
 
+def draw_delete_types_enum(layout, props):
+    enum_prop = props.bl_rna.properties['delete_types']
+    for item in enum_prop.enum_items:
+        layout.prop(props, "delete_types", index=item.value, toggle=True, text=item.name)
+
 class DeleteKeyframeProperties(PropertyGroup):
     start_frame: IntProperty(
         name="Start",
@@ -158,7 +163,7 @@ class DeleteKeyframeOperator(Operator):
             if invert != is_interval:
                 frames_to_delete.append(f)
 
-        targets = list(context.scene.objects)  # always all objects
+        targets = list(context.scene.objects)  # all scene objects
 
         if not targets:
             self.report({'WARNING'}, "No objects to process")
@@ -197,8 +202,8 @@ class DeleteKeyframePanel(Panel):
 
         box.separator()
         box.label(text="Delete Types")
-        # Draw exactly once, no manual loop to avoid duplication
-        box.prop(props, "delete_types", text="", expand=True)
+        col = box.column(align=True)
+        draw_delete_types_enum(col, props)
 
         box.separator()
         row = box.row(align=True)
