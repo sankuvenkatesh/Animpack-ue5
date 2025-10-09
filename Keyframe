@@ -1,313 +1,238 @@
 bl_info = {
-    "name": "Advanced Keyframe Manager",
+    "name": "Delete/Bake Keyframe by Interval Extended",
     "author": "Venkatesh Sanku",
-    "version": (2, 0, 0),
+    "version": (1, 4, 1),
     "blender": (2, 80, 0),
     "location": "View3D > Sidebar > Animation",
-    "description": "Manage keyframes with delete/bake, curve filtering, and export/import functionality.",
+    "description": "Delete/bake keyframes for object transforms and custom properties by interval, 'all' toggle, and robust UI.",
     "category": "Animation",
 }
 
 import bpy
-from bpy.props import (StringProperty, IntProperty, BoolProperty,
-                       PointerProperty)
-from bpy.types import PropertyGroup, Operator, Panel
-import json
 
-
-class KeyframeManagerProperties(PropertyGroup):
-    start_frame: IntProperty(
+class DeleteKeyframeProperties(bpy.types.PropertyGroup):
+    start_frame: bpy.props.IntProperty(
         name="Start Frame", default=0, min=0,
-        description="Start frame for operations")
-    end_frame: IntProperty(
+        description="First frame to consider"
+    )
+    end_frame: bpy.props.IntProperty(
         name="End Frame", default=100, min=0,
-        description="End frame for operations")
-    interval: IntProperty(
-        name="Interval", default=0, min=0,
-        description="Interval between frames; 0 = every frame")
-    invert_selection: BoolProperty(
-        name="Invert Selection", default=False,
-        description="Invert frame selection")
-    all_types: BoolProperty(
-        name="All Keyframe Types", default=True,
-        description="Enable all keyframe types")
-    delete_location: BoolProperty(
+        description="Last frame (inclusive)"
+    )
+    interval: bpy.props.IntProperty(
+        name="Interval", default=1, min=0, max=100,
+        description="Every nth frame for delete/bake (0 = all frames)"
+    )
+    invert: bpy.props.BoolProperty(
+        name="Invert", default=False,
+        description="Invert: delete/bake at interval instead of skipping"
+    )
+    all_types: bpy.props.BoolProperty(
+        name="ALL (Location,Rot,Scale,Custom)", default=True,
+        description="Affect ALL types below"
+    )
+    pos: bpy.props.BoolProperty(
         name="Location", default=True,
-        description="Affect location keyframes")
-    delete_rotation: BoolProperty(
+        description="Affect Location"
+    )
+    rot: bpy.props.BoolProperty(
         name="Rotation", default=True,
-        description="Affect rotation keyframes")
-    delete_scale: BoolProperty(
+        description="Affect Rotation"
+    )
+    scl: bpy.props.BoolProperty(
         name="Scale", default=True,
-        description="Affect scale keyframes")
-    delete_custom: BoolProperty(
+        description="Affect Scale"
+    )
+    custom: bpy.props.BoolProperty(
         name="Custom Properties", default=True,
-        description="Affect custom property keyframes")
-    filter_text: StringProperty(
-        name="Curve Filter", default="",
-        description="Filter curves by data path substring")
-    preview_count: IntProperty(
-        name="Affected Frames", default=0, options={'HIDDEN'})
+        description="Affect Custom Property keyframes"
+    )
+    preview_count: bpy.props.IntProperty(
+        name="Frames to be affected", default=0, options={'HIDDEN'}
+    )
 
+    def update_all_types(self, context):
+        if self.all_types:
+            self.pos = True
+            self.rot = True
+            self.scl = True
+            self.custom = True
+        # Optionally: if you want unchecking all_types to uncheck all individually, you can add else block here.
 
 def calculate_frames(props):
-    start, end, interval = props.start_frame, props.end_frame, props.interval
-    invert = props.invert_selection
-    if end < start:
+    start, end, interval, invert = props.start_frame, props.end_frame, props.interval, props.invert
+    if end < start or interval < 0:
         return []
-    frames = list(range(start, end + 1))
-    if interval == 0:
-        selected = frames
-    else:
-        selected = [f for i, f in enumerate(frames) if i % (interval + 1) == 0]
-    if invert:
-        return selected
-    return [f for f in frames if f not in selected]
+    all_frames = list(range(start, end + 1))
 
+    if interval == 0:
+        # interval=0 means all frames included (no skipping)
+        select_frames = all_frames
+    else:
+        select_frames = [f for idx, f in enumerate(all_frames) if (idx % interval == 0)]
+
+    if invert:
+        return select_frames
+    return [f for f in all_frames if f not in select_frames]
 
 def affect_types(props):
     if props.all_types:
-        return dict(location=True, rotation=True, scale=True, custom=True)
-    return dict(
-        location=props.delete_location,
-        rotation=props.delete_rotation,
-        scale=props.delete_scale,
-        custom=props.delete_custom,
-    )
+        return dict(pos=True, rot=True, scl=True, custom=True)
+    return dict(pos=props.pos, rot=props.rot, scl=props.scl, custom=props.custom)
 
+def custom_prop_fcurve(fcurve):
+    dp = fcurve.data_path
+    return dp.startswith('["') and dp.endswith('"]')
 
-def is_custom_fcurve(fc):
-    return fc.data_path.startswith('["') and fc.data_path.endswith('"]')
-
-
-def get_filtered_fcurves(obj, props):
-    types = affect_types(props)
-    filter_text = props.filter_text.lower()
-    fcurves = []
-    ad = obj.animation_data
-    if not ad or not ad.action:
-        return fcurves
-    for fc in ad.action.fcurves:
-        dp_lower = fc.data_path.lower()
-        if filter_text and filter_text not in dp_lower:
-            continue
-        if is_custom_fcurve(fc):
-            if types["custom"]:
-                fcurves.append(fc)
-        else:
-            if types["location"] and dp_lower == 'location':
-                fcurves.append(fc)
-            elif types["rotation"] and (
-                dp_lower == 'rotation_euler' or dp_lower == 'rotation_quaternion'):
-                fcurves.append(fc)
-            elif types["scale"] and dp_lower == 'scale':
-                fcurves.append(fc)
-    return fcurves
-
-
-def uniform_resample(fcurve, frames):
-    values = [fcurve.evaluate(f) for f in frames]
-    keyframe_points = fcurve.keyframe_points
-    keyframe_points.clear()
-    for f, val in zip(frames, values):
-        keyframe_points.insert(f, val, options={'FAST'})
-
-
-class DeleteKeyframeOperator(Operator):
-    bl_idname = "anim.delete_keyframes_ex"
+class DeleteKeyframeOperator(bpy.types.Operator):
+    bl_idname = "object.delete_keyframe_by_interval"
     bl_label = "Delete Keyframes"
     bl_options = {'REGISTER', 'UNDO'}
-    bl_description = "Delete keyframes by interval and filters"
+    bl_description = "Delete keyframes at specified frames for selected objects and bones (transform/custom props)."
 
     def execute(self, context):
-        props = context.scene.keyframe_manager_props
+        props = context.scene.del_keyframe_props
+        types = affect_types(props)
         frames = calculate_frames(props)
         props.preview_count = len(frames)
-        types = affect_types(props)
-
-        for obj in context.selected_objects:
-            fcurves = get_filtered_fcurves(obj, props)
-            for fc in fcurves:
-                to_remove = [kp for kp in fc.keyframe_points if int(round(kp.co[0])) in frames]
-                for kp in to_remove:
-                    fc.keyframe_points.remove(kp)
+        for obj in bpy.context.selected_objects:
+            for f in frames:
+                if types["pos"]:
+                    obj.keyframe_delete(data_path="location", frame=f)
+                if types["rot"]:
+                    obj.keyframe_delete(data_path="rotation_euler", frame=f)
+                    obj.keyframe_delete(data_path="rotation_quaternion", frame=f)
+                if types["scl"]:
+                    obj.keyframe_delete(data_path="scale", frame=f)
+                if types["custom"]:
+                    ad = obj.animation_data
+                    if ad and ad.action:
+                        for fc in ad.action.fcurves:
+                            if custom_prop_fcurve(fc):
+                                for kp in list(fc.keyframe_points):
+                                    if int(round(kp.co[0])) == f:
+                                        fc.keyframe_points.remove(kp)
             if obj.type == 'ARMATURE' and obj.mode == 'POSE':
-                for pbn in context.selected_pose_bones:
+                for pbn in bpy.context.selected_pose_bones:
                     for f in frames:
-                        if types["location"]:
-                            pbn.keyframe_delete("location", f)
-                        if types["rotation"]:
-                            pbn.keyframe_delete("rotation_euler", f)
-                            pbn.keyframe_delete("rotation_quaternion", f)
-                        if types["scale"]:
-                            pbn.keyframe_delete("scale", f)
-
+                        if types["pos"]:
+                            pbn.keyframe_delete(data_path="location", frame=f)
+                        if types["rot"]:
+                            pbn.keyframe_delete(data_path="rotation_euler", frame=f)
+                            pbn.keyframe_delete(data_path="rotation_quaternion", frame=f)
+                        if types["scl"]:
+                            pbn.keyframe_delete(data_path="scale", frame=f)
         bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
-        self.report({'INFO'}, f"Deleted {len(frames)} frames, types: "
-                              f"{', '.join([k for k,v in types.items() if v])}")
+        self.report({'INFO'}, f"Deleted {len(frames)} frames, types: " + ", ".join([k for k, v in types.items() if v]))
         return {'FINISHED'}
 
-
-class BakeKeyframeOperator(Operator):
-    bl_idname = "anim.bake_keyframes_ex"
+class BakeKeyframeOperator(bpy.types.Operator):
+    bl_idname = "object.bake_keyframe_by_interval"
     bl_label = "Bake Keyframes"
     bl_options = {'REGISTER', 'UNDO'}
-    bl_description = "Bake keyframes with uniform resample and filters"
+    bl_description = "Insert keyframes at specified frames for selected objects and bones (transform/custom props)."
 
     def execute(self, context):
-        props = context.scene.keyframe_manager_props
+        props = context.scene.del_keyframe_props
+        types = affect_types(props)
         frames = calculate_frames(props)
         props.preview_count = len(frames)
-        types = affect_types(props)
-
-        for obj in context.selected_objects:
-            fcurves = get_filtered_fcurves(obj, props)
-            for fc in fcurves:
-                uniform_resample(fc, frames)
+        for obj in bpy.context.selected_objects:
+            for f in frames:
+                if types["pos"]:
+                    obj.keyframe_insert(data_path="location", frame=f)
+                if types["rot"]:
+                    obj.keyframe_insert(data_path="rotation_euler", frame=f)
+                    obj.keyframe_insert(data_path="rotation_quaternion", frame=f)
+                if types["scl"]:
+                    obj.keyframe_insert(data_path="scale", frame=f)
+                if types["custom"]:
+                    for k in obj.keys():
+                        # Skip Blender internal property keys
+                        if k.startswith("_") or not isinstance(obj[k], (int, float)):
+                            continue
+                        obj.keyframe_insert(data_path=f'["{k}"]', frame=f)
             if obj.type == 'ARMATURE' and obj.mode == 'POSE':
-                for pbn in context.selected_pose_bones:
+                for pbn in bpy.context.selected_pose_bones:
                     for f in frames:
-                        if types["location"]:
-                            pbn.keyframe_insert("location", f)
-                        if types["rotation"]:
-                            pbn.keyframe_insert("rotation_euler", f)
-                            pbn.keyframe_insert("rotation_quaternion", f)
-                        if types["scale"]:
-                            pbn.keyframe_insert("scale", f)
-
+                        if types["pos"]:
+                            pbn.keyframe_insert(data_path="location", frame=f)
+                        if types["rot"]:
+                            pbn.keyframe_insert(data_path="rotation_euler", frame=f)
+                            pbn.keyframe_insert(data_path="rotation_quaternion", frame=f)
+                        if types["scl"]:
+                            pbn.keyframe_insert(data_path="scale", frame=f)
+                        # Custom props for bones are rare, but possible
+                        for k in pbn.keys():
+                            if k.startswith("_") or not isinstance(pbn[k], (int, float)):
+                                continue
+                            if types["custom"]:
+                                pbn.keyframe_insert(data_path=f'["{k}"]', frame=f)
         bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
-        self.report({'INFO'}, f"Baked {len(frames)} frames, types: "
-                              f"{', '.join([k for k,v in types.items() if v])}")
+        self.report({'INFO'}, f"Baked {len(frames)} keyframes, types: " + ", ".join([k for k, v in types.items() if v]))
         return {'FINISHED'}
 
-
-class ExportCurvesOperator(Operator):
-    bl_idname = "anim.export_curves_json"
-    bl_label = "Export Curves JSON"
-    bl_options = {'REGISTER'}
-
-    filepath: StringProperty(subtype="FILE_PATH")
-
-    def execute(self, context):
-        data = {}
-        for obj in context.selected_objects:
-            ad = obj.animation_data
-            if not ad or not ad.action:
-                continue
-            data[obj.name] = {}
-            for fc in ad.action.fcurves:
-                points = [(kp.co[0], kp.co[1]) for kp in fc.keyframe_points]
-                data[obj.name][fc.data_path] = points
-        with open(self.filepath, 'w') as f:
-            json.dump(data, f, indent=4)
-        self.report({'INFO'}, f"Exported curves for {len(data)} objects")
-        return {'FINISHED'}
-
-    def invoke(self, context, event):
-        context.window_manager.fileselect_add(self)
-        return {'RUNNING_MODAL'}
-
-
-class ImportCurvesOperator(Operator):
-    bl_idname = "anim.import_curves_json"
-    bl_label = "Import Curves JSON"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    filepath: StringProperty(subtype="FILE_PATH")
-
-    def execute(self, context):
-        with open(self.filepath, 'r') as f:
-            data = json.load(f)
-        for obj_name, curves in data.items():
-            obj = bpy.data.objects.get(obj_name)
-            if not obj:
-                continue
-            ad = obj.animation_data
-            if not ad:
-                obj.animation_data_create()
-                ad = obj.animation_data
-            if not ad.action:
-                ad.action = bpy.data.actions.new(name=f"{obj_name}_imported_action")
-            action = ad.action
-            for dpath, points in curves.items():
-                fc = action.fcurves.find(dpath) or action.fcurves.new(dpath=dpath)
-                fc.keyframe_points.clear()
-                for frame, val in points:
-                    fc.keyframe_points.insert(frame, val, options={'FAST'})
-        bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
-        self.report({'INFO'}, f"Imported curves for {len(data)} objects")
-        return {'FINISHED'}
-
-    def invoke(self, context, event):
-        context.window_manager.fileselect_add(self)
-        return {'RUNNING_MODAL'}
-
-
-class KeyframeManagerPanel(Panel):
-    bl_label = "Advanced Keyframe Manager"
+class DeleteBakeKeyframePanel(bpy.types.Panel):
+    bl_label = "Delete/Bake Keyframe By Interval"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = 'Animation'
+    bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
         layout = self.layout
-        props = context.scene.keyframe_manager_props
+        props = context.scene.del_keyframe_props
 
-        box = layout.box()
+        col = layout.column(align=True)
+        box = col.box()
         box.label(text="Frame Range")
         row = box.row(align=True)
         row.prop(props, "start_frame")
         row.prop(props, "end_frame")
         box.prop(props, "interval")
-        box.prop(props, "invert_selection")
+        box.prop(props, "invert")
 
         box.separator()
         box.label(text="Keyframe Types")
+        # Use prop with update function to keep all selected in sync
         box.prop(props, "all_types")
-        grid = box.grid_flow(columns=2, even_columns=True, even_rows=True)
-        grid.prop(props, "delete_location")
-        grid.prop(props, "delete_rotation")
-        grid.prop(props, "delete_scale")
-        grid.prop(props, "delete_custom")
+        grid = box.grid_flow(columns=2, even_columns=True)
+        grid.prop(props, "pos")
+        grid.prop(props, "rot")
+        grid.prop(props, "scl")
+        grid.prop(props, "custom")
 
-        box.separator()
-        box.prop(props, "filter_text")
+        col.label(text=f"Frames: {calculate_frames(props)}  |  Count: {len(calculate_frames(props))}")
 
-        box.separator()
-        box.label(text=f"Frames Preview (Count: {len(calculate_frames(props))})")
-
-        row = layout.row(align=True)
-        row.operator("anim.delete_keyframe_advanced", icon='TRASH')
-        row.operator("anim.bake_keyframe_advanced", icon='KEY_HLT')
-
-        layout.separator()
-        layout.label(text="Curve Export / Import")
-        row2 = layout.row(align=True)
-        row2.operator("anim.export_curves_json", icon='EXPORT')
-        row2.operator("anim.import_curves_json", icon='IMPORT')
-
+        row = col.row(align=True)
+        row.scale_y = 1.4
+        row.operator("object.delete_keyframe_by_interval", icon='TRASH')
+        row.operator("object.bake_keyframe_by_interval", icon='KEY_HLT')
 
 classes = (
-    KeyframeManagerProperties,
+    DeleteKeyframeProperties,
     DeleteKeyframeOperator,
     BakeKeyframeOperator,
-    ExportCurvesOperator,
-    ImportCurvesOperator,
-    KeyframeManagerPanel,
+    DeleteBakeKeyframePanel,
 )
-
 
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
-    bpy.types.Scene.keyframe_manager_props = PointerProperty(type=KeyframeManagerProperties)
+    bpy.types.Scene.del_keyframe_props = bpy.props.PointerProperty(type=DeleteKeyframeProperties)
 
+    # Link the update function for all_types property to synchronize individual flags when toggled
+    bpy.types.Scene.del_keyframe_props.all_types = bpy.props.BoolProperty(
+        name="ALL (Location,Rot,Scale,Custom)",
+        default=True,
+        description="Affect ALL types below",
+        update=lambda self, context: self.update_all_types(context)
+    )
 
 def unregister():
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
-    del bpy.types.Scene.keyframe_manager_props
-
+    del bpy.types.Scene.del_keyframe_props
 
 if __name__ == "__main__":
     register()
