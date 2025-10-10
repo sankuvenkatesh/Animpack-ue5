@@ -1,3 +1,5 @@
+import bpy
+
 bl_info = {
     "name": "Delete/Bake Keyframe by Interval Extended",
     "author": "Venkatesh Sanku",
@@ -7,8 +9,6 @@ bl_info = {
     "description": "Delete/bake keyframes for object transforms and custom properties by interval, 'all' toggle, and robust UI.",
     "category": "Animation",
 }
-
-import bpy
 
 class DeleteKeyframeProperties(bpy.types.PropertyGroup):
     start_frame: bpy.props.IntProperty(
@@ -21,7 +21,7 @@ class DeleteKeyframeProperties(bpy.types.PropertyGroup):
     )
     interval: bpy.props.IntProperty(
         name="Interval", default=1, min=0, max=100,
-        description="Every nth frame for delete/bake (0 = all frames)"
+        description="Every nth frame for delete/bake; 0 = no skip (all frames)"
     )
     invert: bpy.props.BoolProperty(
         name="Invert", default=False,
@@ -51,26 +51,22 @@ class DeleteKeyframeProperties(bpy.types.PropertyGroup):
         name="Frames to be affected", default=0, options={'HIDDEN'}
     )
 
-    def update_all_types(self, context):
-        if self.all_types:
-            self.pos = True
-            self.rot = True
-            self.scl = True
-            self.custom = True
-        # Optionally: if you want unchecking all_types to uncheck all individually, you can add else block here.
-
 def calculate_frames(props):
     start, end, interval, invert = props.start_frame, props.end_frame, props.interval, props.invert
     if end < start or interval < 0:
         return []
     all_frames = list(range(start, end + 1))
 
+    # Handle interval == 0 explicitly
     if interval == 0:
-        # interval=0 means all frames included (no skipping)
-        select_frames = all_frames
-    else:
-        select_frames = [f for idx, f in enumerate(all_frames) if (idx % interval == 0)]
+        # “No skip” scenario. With invert=False (default), original logic would delete/bake all frames except the selected set.
+        # Define: when interval==0, selected set is all frames. Then:
+        # - invert=True  => affect selected => affect all frames
+        # - invert=False => affect complement => affect none
+        return all_frames if invert else []
 
+    # interval >= 1 keeps original spacing logic
+    select_frames = [f for idx, f in enumerate(all_frames) if (idx % (interval + 1) == 0)]
     if invert:
         return select_frames
     return [f for f in all_frames if f not in select_frames]
@@ -148,7 +144,6 @@ class BakeKeyframeOperator(bpy.types.Operator):
                     obj.keyframe_insert(data_path="scale", frame=f)
                 if types["custom"]:
                     for k in obj.keys():
-                        # Skip Blender internal property keys
                         if k.startswith("_") or not isinstance(obj[k], (int, float)):
                             continue
                         obj.keyframe_insert(data_path=f'["{k}"]', frame=f)
@@ -162,7 +157,6 @@ class BakeKeyframeOperator(bpy.types.Operator):
                             pbn.keyframe_insert(data_path="rotation_quaternion", frame=f)
                         if types["scl"]:
                             pbn.keyframe_insert(data_path="scale", frame=f)
-                        # Custom props for bones are rare, but possible
                         for k in pbn.keys():
                             if k.startswith("_") or not isinstance(pbn[k], (int, float)):
                                 continue
@@ -194,7 +188,6 @@ class DeleteBakeKeyframePanel(bpy.types.Panel):
 
         box.separator()
         box.label(text="Keyframe Types")
-        # Use prop with update function to keep all selected in sync
         box.prop(props, "all_types")
         grid = box.grid_flow(columns=2, even_columns=True)
         grid.prop(props, "pos")
@@ -202,7 +195,8 @@ class DeleteBakeKeyframePanel(bpy.types.Panel):
         grid.prop(props, "scl")
         grid.prop(props, "custom")
 
-        col.label(text=f"Frames: {calculate_frames(props)}  |  Count: {len(calculate_frames(props))}")
+        frames_preview = calculate_frames(props)
+        col.label(text=f"Frames: {frames_preview}  |  Count: {len(frames_preview)}")
 
         row = col.row(align=True)
         row.scale_y = 1.4
@@ -220,14 +214,6 @@ def register():
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.Scene.del_keyframe_props = bpy.props.PointerProperty(type=DeleteKeyframeProperties)
-
-    # Link the update function for all_types property to synchronize individual flags when toggled
-    bpy.types.Scene.del_keyframe_props.all_types = bpy.props.BoolProperty(
-        name="ALL (Location,Rot,Scale,Custom)",
-        default=True,
-        description="Affect ALL types below",
-        update=lambda self, context: self.update_all_types(context)
-    )
 
 def unregister():
     for cls in reversed(classes):
