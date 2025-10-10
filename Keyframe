@@ -3,7 +3,7 @@ import bpy
 bl_info = {
     "name": "Delete/Bake Keyframe by Interval Extended",
     "author": "Venkatesh Sanku",
-    "version": (1, 4, 1),
+    "version": (1, 4, 2),
     "blender": (2, 80, 0),
     "location": "View3D > Sidebar > Animation",
     "description": "Delete/bake keyframes for object transforms and custom properties by interval, 'all' toggle, and robust UI.",
@@ -56,16 +56,8 @@ def calculate_frames(props):
     if end < start or interval < 0:
         return []
     all_frames = list(range(start, end + 1))
-
-    # Handle interval == 0 explicitly
     if interval == 0:
-        # “No skip” scenario. With invert=False (default), original logic would delete/bake all frames except the selected set.
-        # Define: when interval==0, selected set is all frames. Then:
-        # - invert=True  => affect selected => affect all frames
-        # - invert=False => affect complement => affect none
         return all_frames if invert else []
-
-    # interval >= 1 keeps original spacing logic
     select_frames = [f for idx, f in enumerate(all_frames) if (idx % (interval + 1) == 0)]
     if invert:
         return select_frames
@@ -133,7 +125,9 @@ class BakeKeyframeOperator(bpy.types.Operator):
         types = affect_types(props)
         frames = calculate_frames(props)
         props.preview_count = len(frames)
+
         for obj in bpy.context.selected_objects:
+            # Bake keyframes for object transforms
             for f in frames:
                 if types["pos"]:
                     obj.keyframe_insert(data_path="location", frame=f)
@@ -143,12 +137,20 @@ class BakeKeyframeOperator(bpy.types.Operator):
                 if types["scl"]:
                     obj.keyframe_insert(data_path="scale", frame=f)
                 if types["custom"]:
-                    for k in obj.keys():
-                        if k.startswith("_") or not isinstance(obj[k], (int, float)):
-                            continue
-                        obj.keyframe_insert(data_path=f'["{k}"]', frame=f)
+                    for k, v in obj.items():
+                        if not k.startswith("_") and isinstance(v, (int, float)):
+                            try:
+                                obj.keyframe_insert(data_path=f'["{k}"]', frame=f)
+                            except Exception:
+                                pass  # Ignore any invalid custom props
+
+            # Bake keyframes for pose bones in armature objects
             if obj.type == 'ARMATURE' and obj.mode == 'POSE':
-                for pbn in bpy.context.selected_pose_bones:
+                pose_bones = [
+                    pbn for pbn in bpy.context.selected_pose_bones
+                    if pbn.id_data == obj
+                ]
+                for pbn in pose_bones:
                     for f in frames:
                         if types["pos"]:
                             pbn.keyframe_insert(data_path="location", frame=f)
@@ -157,11 +159,14 @@ class BakeKeyframeOperator(bpy.types.Operator):
                             pbn.keyframe_insert(data_path="rotation_quaternion", frame=f)
                         if types["scl"]:
                             pbn.keyframe_insert(data_path="scale", frame=f)
-                        for k in pbn.keys():
-                            if k.startswith("_") or not isinstance(pbn[k], (int, float)):
-                                continue
-                            if types["custom"]:
-                                pbn.keyframe_insert(data_path=f'["{k}"]', frame=f)
+                        if types["custom"]:
+                            for k, v in pbn.items():
+                                if not k.startswith("_") and isinstance(v, (int, float)):
+                                    try:
+                                        pbn.keyframe_insert(data_path=f'["{k}"]', frame=f)
+                                    except Exception:
+                                        pass  # Ignore any invalid bone custom props
+
         bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
         self.report({'INFO'}, f"Baked {len(frames)} keyframes, types: " + ", ".join([k for k, v in types.items() if v]))
         return {'FINISHED'}
