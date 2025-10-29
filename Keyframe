@@ -3,10 +3,10 @@ import bpy
 bl_info = {
     "name": "Delete/Bake Keyframe by Interval Extended",
     "author": "Venkatesh Sanku",
-    "version": (1, 5, 0),
+    "version": (1, 5, 2),
     "blender": (2, 80, 0),
     "location": "View3D > Sidebar > Animation",
-    "description": "Delete or bake keyframes for object transforms and custom properties by interval, avoiding duplicate keyframes.",
+    "description": "Delete/bake keyframes for object transforms and custom properties by interval. Safe duplicate-free baking for objects and pose bones.",
     "category": "Animation",
 }
 
@@ -75,26 +75,30 @@ class DeleteKeyframeOperator(bpy.types.Operator):
                     if ad and ad.action:
                         for fc in ad.action.fcurves:
                             if custom_prop_fcurve(fc):
-                                for kp in list(fc.keyframe_points):
+                                for kp in list(fc.keyframe_points):  # SAFE
                                     if int(round(kp.co[0])) == f:
                                         fc.keyframe_points.remove(kp)
-
+            # Armature pose mode deletion
             if obj.type == 'ARMATURE':
-                if obj.mode != 'POSE':
-                    bpy.ops.object.mode_set(mode='POSE')
-                for pbn in obj.pose.bones:
-                    if not pbn.bone.select:
-                        continue
-                    for f in frames:
-                        if types["pos"]:
-                            pbn.keyframe_delete("location", frame=f)
-                        if types["rot"]:
-                            pbn.keyframe_delete("rotation_euler", frame=f)
-                            pbn.keyframe_delete("rotation_quaternion", frame=f)
-                        if types["scl"]:
-                            pbn.keyframe_delete("scale", frame=f)
+                prev_mode = obj.mode
+                try:
+                    if obj.mode != 'POSE':
+                        bpy.ops.object.mode_set(mode='POSE')
+                    for pbn in obj.pose.bones:
+                        if not pbn.bone.select:
+                            continue
+                        for f in frames:
+                            if types["pos"]:
+                                pbn.keyframe_delete("location", frame=f)
+                            if types["rot"]:
+                                pbn.keyframe_delete("rotation_euler", frame=f)
+                                pbn.keyframe_delete("rotation_quaternion", frame=f)
+                            if types["scl"]:
+                                pbn.keyframe_delete("scale", frame=f)
+                finally:
+                    bpy.ops.object.mode_set(mode=prev_mode)
         bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
-        self.report({'INFO'}, f"Deleted {len(frames)} frames.")
+        self.report({'INFO'}, f"Deleted {len(frames)} frames at interval.")
         return {'FINISHED'}
 
 
@@ -108,7 +112,6 @@ class BakeKeyframeOperator(bpy.types.Operator):
         types = affect_types(props)
         frames = calculate_frames(props)
         props.preview_count = len(frames)
-
         for obj in bpy.context.selected_objects:
             bpy.context.view_layer.objects.active = obj
             ad = obj.animation_data
@@ -116,13 +119,12 @@ class BakeKeyframeOperator(bpy.types.Operator):
                 obj.animation_data_create()
             if not ad.action:
                 ad.action = bpy.data.actions.new(name=f"{obj.name}_BakedAction")
-
-            # Remove existing keys before baking
+            # Remove keyframes at interval before baking (prevents duplicates)
             for fc in ad.action.fcurves:
-                for kp in list(fc.keyframe_points):
+                for kp in list(fc.keyframe_points):  # SAFE
                     if int(round(kp.co[0])) in frames:
                         fc.keyframe_points.remove(kp)
-
+            # Bake transforms/properties on interval
             for f in frames:
                 if types["pos"]:
                     obj.keyframe_insert("location", frame=f)
@@ -140,7 +142,7 @@ class BakeKeyframeOperator(bpy.types.Operator):
                                 obj.keyframe_insert(data_path=f'["{k}"]', frame=f)
                             except:
                                 pass
-
+            # Armature pose bone baking (active selection)
             if obj.type == "ARMATURE":
                 prev_mode = obj.mode
                 try:
@@ -173,9 +175,8 @@ class BakeKeyframeOperator(bpy.types.Operator):
                                             pass
                 finally:
                     bpy.ops.object.mode_set(mode=prev_mode)
-
         bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
-        self.report({'INFO'}, f"Baked {len(frames)} frames without duplicates.")
+        self.report({'INFO'}, f"Baked {len(frames)} frames at interval.")
         return {'FINISHED'}
 
 
@@ -189,7 +190,6 @@ class DeleteBakeKeyframePanel(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         props = context.scene.del_keyframe_props
-
         box = layout.box()
         box.label(text="Frame Range")
         row = box.row(align=True)
@@ -197,7 +197,6 @@ class DeleteBakeKeyframePanel(bpy.types.Panel):
         row.prop(props, "end_frame")
         box.prop(props, "interval")
         box.prop(props, "invert")
-
         box.separator()
         box.label(text="Keyframe Types")
         box.prop(props, "all_types")
@@ -206,10 +205,8 @@ class DeleteBakeKeyframePanel(bpy.types.Panel):
         grid.prop(props, "rot")
         grid.prop(props, "scl")
         grid.prop(props, "custom")
-
         frames_preview = calculate_frames(props)
         layout.label(text=f"Frames: {len(frames_preview)} -> {frames_preview[:12]}{'...' if len(frames_preview) > 12 else ''}")
-
         row = layout.row(align=True)
         row.operator("object.delete_keyframe_by_interval", icon='TRASH')
         row.operator("object.bake_keyframe_by_interval", icon='KEY_HLT')
