@@ -1,0 +1,487 @@
+bl_info = {
+    "name": "Playblast_Animation_Plugin_Ver2_3",
+    "author": "Venkatesh sanku",
+    "version": (2, 3),
+    "blender": (5, 0, 0),
+    "location": "View3D > Sidebar > Playblast",
+    "description": "Preview animation",
+    "warning": "",
+    "doc_url": "",
+    "category": "Animation"
+}
+
+import bpy
+from bpy.types import Operator, Panel
+from bpy.props import (
+    EnumProperty,
+    BoolProperty,
+    IntProperty,
+    FloatProperty,
+    StringProperty,
+)
+
+default_file_path = "/tmp/"
+default_file_name = ""
+tmpImageFileFormat = 'PNG'
+
+# Define properties on WindowManager and Scene for persistent storage
+def init_props():
+    wm = bpy.types.WindowManager
+    scn = bpy.types.Scene
+
+    # WindowManager props
+    wm.resolution_mode: EnumProperty(
+        name="Resolution Mode",
+        items=[
+            ('SYNC', "Use Scene Resolution", ""),
+            ('LIST', "Resolution List", ""),
+            ('CUSTOM', "Custom Resolution", ""),
+        ],
+        default='LIST'
+    )
+    wm.settings_resolution_x: IntProperty(name="Resolution X", default=1920, min=4, subtype='PIXEL')
+    wm.settings_resolution_y: IntProperty(name="Resolution Y", default=1080, min=4, subtype='PIXEL')
+    wm.resolution_percentage: IntProperty(name="Resolution %", default=100, min=1, max=100, subtype='PERCENTAGE')
+    wm.settings_display_resolution: BoolProperty(name="Display Resolution", default=True)
+    wm.settings_extra_info: StringProperty(name="Extra Info", default="")
+    wm.settings_auto_disable_overlays: BoolProperty(name="Auto Disable Overlays", default=True)
+
+    # Scene props
+    scn.output_file_path: StringProperty(name="File Path", subtype="FILE_PATH", default=default_file_path)
+    scn.output_file_name: StringProperty(name="File Name", default=default_file_name)
+    scn.save_output_to_file: BoolProperty(name="Save to File", default=True)
+    scn.image_file_format: EnumProperty(
+        name="Image Format",
+        items=[
+            ('PNG', "PNG", ""),
+            ('JPEG', "JPEG", ""),
+            ('JPEG2000', "JPEG 2000", ""),
+            ('CINEON', "Cineon", ""),
+            ('DPX', "DPX", ""),
+            ('BMP', "BMP", ""),
+            ('TARGA', "Targa", ""),
+            ('TIFF', "TIFF", ""),
+        ],
+        default='PNG'
+    )
+    scn.is_video_file: BoolProperty(name="Is Video File", default=True)
+    scn.output_encoding: EnumProperty(
+        name="Video Format",
+        items=[
+            ('QUICKTIME', "Quicktime", ""),
+            ('MPEG4', "MPEG-4", ""),
+            ('AVI', "AVI", ""),
+            ('OGG', "Ogg", ""),
+            ('MKV', "Matroska", ""),
+            ('IMAGE', "Image", ""),
+        ],
+        default='QUICKTIME',
+    )
+    scn.ffmpeg_codec: EnumProperty(
+        name="Codec",
+        items=[
+            ('H264', "H.264", ""),
+            ('H265', "H.265", ""),
+            ('VP9', "VP9", "")
+        ],
+        default='H264'
+    )
+    scn.output_quality: EnumProperty(
+        name="Quality",
+        items=[
+            ('LOWEST', "Lowest", ""),
+            ('VERYLOW', "Very Low", ""),
+            ('LOW', "Low", ""),
+            ('MEDIUM', "Medium", ""),
+            ('HIGH', "High", ""),
+        ],
+        default='MEDIUM'
+    )
+    scn.ffmpeg_preset: EnumProperty(
+        name="Preset",
+        items=[
+            ('REALTIME', "Realtime", ""),
+            ('ULTRAFAST', "Ultrafast", ""),
+            ('FAST', "Fast", ""),
+            ('MEDIUM', "Medium", ""),
+            ('SLOW', "Slow", ""),
+        ],
+        default='REALTIME'
+    )
+    scn.audio_codec: EnumProperty(
+        name="Audio Codec",
+        items=[
+            ('VORBIS', "Vorbis", ""),
+            ('PCM', "PCM", ""),
+            ('OPUS', "Opus", ""),
+            ('MP3', "MP3", ""),
+            ('MP2', "MP2", ""),
+            ('FLAC', "FLAC", ""),
+            ('AC3', "AC3", ""),
+            ('AAC', "AAC", ""),
+            ('NONE', "No Audio", "Disables audio outputs, for video-only"),
+        ],
+        default='NONE'
+    )
+    scn.audio_bitrate: IntProperty(name="Audio Bitrate", min=32, max=384, default=192, description="Audio bitrate (kb/s)")
+    scn.audio_volume: FloatProperty(name="Audio Volume", min=0.0, max=1.0, default=1.0)
+
+    # Metadata properties
+    scn.use_stamp_camera: BoolProperty(name="Stamp Camera", default=False)
+    scn.use_stamp_lens: BoolProperty(name="Stamp Lens", default=False)
+    scn.use_stamp_scene: BoolProperty(name="Stamp Scene", default=True)
+    scn.use_stamp_note: BoolProperty(name="Stamp Note", default=True)
+
+    # Shading and color mode
+    wm.color_mode: EnumProperty(
+        name="Color Mode",
+        items=[
+            ('WIREFRAME', "Wireframe", ""),
+            ('SOLID', "Solid", ""),
+            ('MATERIAL', "Material", ""),
+            ('RENDERED', "Rendered", "")
+        ],
+        default='MATERIAL'
+    )
+    wm.solid_mode: EnumProperty(
+        name="Solid Mode",
+        items=[
+            ('MATERIAL', "Material", ""),
+            ('OBJECT', "Object", ""),
+            ('VERTEX', "Vertex", ""),
+            ('SINGLE', "Single", ""),
+            ('RANDOM', "Random", ""),
+            ('TEXTURE', "Texture", "")
+        ],
+        default='MATERIAL'
+    )
+
+
+class PlayblastSettings(Operator):
+    bl_idname = "my.playblast_settings"
+    bl_label = "Playblast Settings"
+    bl_options = {'REGISTER', 'UNDO', 'PRESET'}
+
+    def draw(self, context):
+        layout = self.layout
+        wm = context.window_manager
+        scn = context.scene
+
+        layout.label(text="Resolution Settings")
+        box = layout.box()
+        box.prop(wm, "resolution_mode", text="")
+
+        if wm.resolution_mode == 'LIST':
+            box.prop(wm, "settings_resolution_x", text="Resolution X")
+            box.prop(wm, "settings_resolution_y", text="Resolution Y")
+            box.prop(wm, "resolution_percentage")
+        elif wm.resolution_mode == 'CUSTOM':
+            box.prop(wm, "settings_resolution_x")
+            box.prop(wm, "settings_resolution_y")
+            box.prop(wm, "resolution_percentage")
+
+        layout.label(text="Output Settings", icon='OUTPUT')
+        box = layout.box()
+        if scn.save_output_to_file:
+            box.prop(scn, "output_file_path")
+            box.prop(scn, "output_file_name")
+        box.prop(scn, "save_output_to_file")
+
+        if scn.save_output_to_file:
+            layout.label(text="Video Settings", icon='OUTLINER_DATA_CAMERA')
+            box = layout.box()
+            box.prop(scn, "output_encoding")
+            if scn.output_encoding != 'IMAGE':
+                box.prop(scn, "output_quality")
+            else:
+                box.prop(scn, "image_file_format")
+
+        layout.label(text="Audio Settings", icon='SOUND')
+        box = layout.box()
+        box.prop(scn, "audio_codec")
+        if scn.audio_codec != 'NONE':
+            box.prop(scn, "audio_bitrate")
+            box.prop(scn, "audio_volume")
+
+        layout.label(text="Metadata")
+        box = layout.box()
+        box.prop(scn, "use_stamp_camera")
+        box.prop(scn, "use_stamp_lens")
+        box.prop(scn, "use_stamp_scene")
+        box.prop(scn, "use_stamp_note")
+
+        layout.label(text="Texture")
+        box = layout.box()
+        box.prop(wm, "color_mode")
+        if wm.color_mode == 'SOLID':
+            box.prop(wm, "solid_mode")
+        layout.prop(wm, "settings_auto_disable_overlays")
+
+    def execute(self, context):
+        wm = context.window_manager
+        scn = context.scene
+
+        if wm.resolution_mode == 'SYNC':
+            wm.settings_resolution_x = scn.render.resolution_x
+            wm.settings_resolution_y = scn.render.resolution_y
+            wm.resolution_percentage = scn.render.resolution_percentage
+
+        bpy.types.WindowManager.resolution_mode = wm.resolution_mode
+        bpy.types.WindowManager.settings_resolution_x = wm.settings_resolution_x
+        bpy.types.WindowManager.settings_resolution_y = wm.settings_resolution_y
+        bpy.types.WindowManager.resolution_percentage = wm.resolution_percentage
+        bpy.types.WindowManager.settings_display_resolution = wm.settings_display_resolution
+        bpy.types.WindowManager.settings_extra_info = wm.settings_extra_info
+        bpy.types.WindowManager.settings_auto_disable_overlays = wm.settings_auto_disable_overlays
+
+        scn.output_file_path = scn.output_file_path or default_file_path
+        scn.output_file_name = scn.output_file_name or default_file_name
+        scn.save_output_to_file = scn.save_output_to_file
+        scn.image_file_format = scn.image_file_format or tmpImageFileFormat
+        scn.is_video_file = scn.is_video_file
+        scn.output_encoding = scn.output_encoding
+        scn.ffmpeg_codec = scn.ffmpeg_codec
+        scn.output_quality = scn.output_quality
+        scn.ffmpeg_preset = scn.ffmpeg_preset
+        scn.audio_codec = scn.audio_codec
+        scn.audio_bitrate = scn.audio_bitrate
+        scn.audio_volume = scn.audio_volume
+        scn.use_stamp_camera = scn.use_stamp_camera
+        scn.use_stamp_lens = scn.use_stamp_lens
+        scn.use_stamp_scene = scn.use_stamp_scene
+        scn.use_stamp_note = scn.use_stamp_note
+
+        space = context.space_data
+        if space and space.type == 'VIEW_3D':
+            space.shading.type = wm.color_mode
+            if wm.color_mode == 'SOLID':
+                space.shading.color_type = wm.solid_mode
+
+        return {'FINISHED'}
+
+
+class Playblast(Operator):
+    bl_idname = "my.playblast"
+    bl_label = "Playblast"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        self.playblast(context)
+        return {'FINISHED'}
+
+    def playblast(self, context):
+        scn = context.scene
+        wm = context.window_manager
+        space = context.space_data
+
+        old = {
+            "resolution_x": scn.render.resolution_x,
+            "resolution_y": scn.render.resolution_y,
+            "resolution_percentage": scn.render.resolution_percentage,
+            "use_overwrite": scn.render.use_overwrite,
+            "filepath": scn.render.filepath,
+            "use_file_extension": scn.render.use_file_extension,
+            "image_file_format": scn.render.image_settings.file_format,
+            "ffmpeg_format": scn.render.ffmpeg.format,
+            "ffmpeg_codec": scn.render.ffmpeg.codec,
+            "ffmpeg_quality": scn.render.ffmpeg.constant_rate_factor,
+            "ffmpeg_preset": scn.render.ffmpeg.ffmpeg_preset,
+            "audio_codec": scn.render.ffmpeg.audio_codec,
+            "audio_bitrate": scn.render.ffmpeg.audio_bitrate,
+            "audio_volume": scn.render.ffmpeg.audio_volume,
+            "use_stamp_date": scn.render.use_stamp_date,
+            "use_stamp_time": scn.render.use_stamp_time,
+            "use_stamp_render_time": scn.render.use_stamp_render_time,
+            "use_stamp_frame": scn.render.use_stamp_frame,
+            "use_stamp_frame_range": scn.render.use_stamp_frame_range,
+            "use_stamp_memory": scn.render.use_stamp_memory,
+            "use_stamp_hostname": scn.render.use_stamp_hostname,
+            "use_stamp_camera": scn.render.use_stamp_camera,
+            "use_stamp_lens": scn.render.use_stamp_lens,
+            "use_stamp_scene": scn.render.use_stamp_scene,
+            "use_stamp_note": scn.render.use_stamp_note,
+            "stamp_note_text": scn.render.stamp_note_text,
+            "show_overlays": space.overlay.show_overlays if space else True,
+        }
+
+        if wm.resolution_mode != 'SYNC':
+            scn.render.resolution_x = wm.settings_resolution_x
+            scn.render.resolution_y = wm.settings_resolution_y
+            scn.render.resolution_percentage = wm.resolution_percentage
+
+        if scn.save_output_to_file:
+            scn.render.filepath = scn.output_file_path
+            if scn.output_file_name:
+                scn.render.filepath += scn.output_file_name + "_"
+            if scn.is_video_file:
+                scn.render.image_settings.file_format = 'FFMPEG'
+                scn.render.ffmpeg.format = scn.output_encoding
+                scn.render.ffmpeg.codec = scn.ffmpeg_codec
+                scn.render.ffmpeg.constant_rate_factor = scn.output_quality
+                scn.render.ffmpeg.ffmpeg_preset = scn.ffmpeg_preset
+                scn.render.ffmpeg.audio_codec = scn.audio_codec
+                scn.render.ffmpeg.audio_bitrate = scn.audio_bitrate
+                scn.render.ffmpeg.audio_volume = scn.audio_volume
+            else:
+                scn.render.image_settings.file_format = scn.image_file_format
+        else:
+            scn.render.filepath = default_file_path
+            scn.render.image_settings.file_format = 'PNG'
+
+        scn.render.use_stamp_date = True
+        scn.render.use_stamp_time = True
+        scn.render.use_stamp_frame = True
+        scn.render.use_stamp_camera = scn.use_stamp_camera
+        scn.render.use_stamp_lens = scn.use_stamp_lens
+        scn.render.use_stamp_scene = scn.use_stamp_scene
+        scn.render.use_stamp_note = scn.use_stamp_note
+
+        note = "Playblast, Blender Version: " + bpy.app.version_string
+        if wm.settings_display_resolution:
+            res_factor = scn.render.resolution_percentage / 100.0
+            res_x = int(scn.render.resolution_x * res_factor)
+            res_y = int(scn.render.resolution_y * res_factor)
+            note += f"
+Resolution: {res_x} x {res_y} px"
+        if wm.settings_extra_info:
+            note += f"
+{wm.settings_extra_info}"
+        scn.render.stamp_note_text = note
+        scn.render.use_stamp = True
+
+        if wm.settings_auto_disable_overlays and space:
+            space.overlay.show_overlays = False
+
+        bpy.ops.render.opengl(animation=True)
+
+        scn.render.ffmpeg.codec = old["ffmpeg_codec"]
+        scn.render.ffmpeg.constant_rate_factor = old["ffmpeg_quality"]
+        scn.render.ffmpeg.ffmpeg_preset = old["ffmpeg_preset"]
+        scn.render.ffmpeg.audio_codec = old["audio_codec"]
+        scn.render.ffmpeg.audio_bitrate = old["audio_bitrate"]
+        scn.render.ffmpeg.audio_volume = old["audio_volume"]
+
+        scn.render.resolution_x = old["resolution_x"]
+        scn.render.resolution_y = old["resolution_y"]
+        scn.render.resolution_percentage = old["resolution_percentage"]
+
+        scn.render.use_stamp_date = old["use_stamp_date"]
+        scn.render.use_stamp_time = old["use_stamp_time"]
+        scn.render.use_stamp_render_time = old["use_stamp_render_time"]
+        scn.render.use_stamp_frame = old["use_stamp_frame"]
+        scn.render.use_stamp_frame_range = old["use_stamp_frame_range"]
+        scn.render.use_stamp_memory = old["use_stamp_memory"]
+        scn.render.use_stamp_hostname = old["use_stamp_hostname"]
+        scn.render.use_stamp_camera = old["use_stamp_camera"]
+        scn.render.use_stamp_lens = old["use_stamp_lens"]
+        scn.render.use_stamp_scene = old["use_stamp_scene"]
+        scn.render.use_stamp_note = old["use_stamp_note"]
+        scn.render.stamp_note_text = old["stamp_note_text"]
+
+        if space:
+            space.overlay.show_overlays = old["show_overlays"]
+
+        bpy.ops.render.play_rendered_anim()
+        bpy.ops.screen.frame_jump(end=False)
+        scn.render.image_settings.file_format = old["image_file_format"]
+        scn.render.filepath = old["filepath"]
+        scn.render.use_overwrite = old["use_overwrite"]
+        scn.render.use_file_extension = old["use_file_extension"]
+        scn.render.ffmpeg.format = old["ffmpeg_format"]
+
+
+class ViewPlayblast(Operator):
+    bl_idname = "my.playblast_play"
+    bl_label = "View Playblast"
+    bl_description = "Play back rendered Playblast using an external player"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        scn = context.scene
+        default_path = default_file_path
+
+        old_filepath = scn.render.filepath
+        old_use_file_extension = scn.render.use_file_extension
+        old_format = scn.render.image_settings.file_format
+        old_ffmpeg_format = scn.render.ffmpeg.format
+        old_audio_codec = scn.render.ffmpeg.audio_codec
+
+        scn.render.use_file_extension = True
+
+        if scn.save_output_to_file:
+            scn.render.filepath = scn.output_file_path
+            if scn.output_file_name:
+                scn.render.filepath += scn.output_file_name + "_"
+            if scn.is_video_file:
+                scn.render.image_settings.file_format = 'FFMPEG'
+                scn.render.ffmpeg.format = scn.output_encoding
+            else:
+                scn.render.image_settings.file_format = scn.image_file_format
+                scn.render.ffmpeg.audio_codec = scn.audio_codec
+        else:
+            scn.render.filepath = default_path
+            scn.render.image_settings.file_format = 'PNG'
+
+        bpy.ops.render.play_rendered_anim()
+
+        scn.render.image_settings.file_format = old_format
+        scn.render.filepath = old_filepath
+        scn.render.use_file_extension = old_use_file_extension
+        scn.render.ffmpeg.format = old_ffmpeg_format
+        scn.render.ffmpeg.audio_codec = old_audio_codec
+
+        return {'FINISHED'}
+
+
+class PlayblastMainPanel(Panel):
+    bl_label = "Playblast"
+    bl_category = "Playblast"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = 'UI'
+
+    def draw(self, context):
+        layout = self.layout
+        wm = context.window_manager
+
+        col = layout.column(align=True)
+        col.scale_y = 1.5
+        col.operator("my.playblast", text="PLAYBLAST", icon="PLAY")
+
+        col = layout.column(align=True)
+        col.scale_y = 1.5
+        col.operator("my.playblast_play", text="VIEW (LAST)", icon="RENDER_ANIMATION")
+
+        col = layout.column(align=True)
+        col.scale_y = 1.5
+        col.operator("my.playblast_settings", text="SETTING", icon="MODIFIER_DATA")
+
+
+def menu_func(self, context):
+    self.layout.operator(Playblast.bl_idname)
+    self.layout.operator(ViewPlayblast.bl_idname)
+    self.layout.operator(PlayblastSettings.bl_idname)
+
+
+classes = (
+    PlayblastSettings,
+    Playblast,
+    ViewPlayblast,
+    PlayblastMainPanel,
+)
+
+
+def register():
+    init_props()
+    for cls in classes:
+        bpy.utils.register_class(cls)
+    bpy.types.VIEW3D_MT_mesh_add.append(menu_func)
+
+
+def unregister():
+    for cls in classes:
+        bpy.utils.unregister_class(cls)
+    bpy.types.VIEW3D_MT_mesh_add.remove(menu_func)
+
+
+if __name__ == "__main__":
+    register()
