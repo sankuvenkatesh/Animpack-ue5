@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Delete/Bake Keyframe by Interval Extended",
     "author": "Venkatesh Sanku",
-    "version": (1, 5, 0),
+    "version": (1, 5, 1),
     "blender": (2, 80, 0),
     "location": "View3D > Sidebar > Animation",
     "description": "Delete/bake keyframes by interval with full property support, entire key deletion, and all-property toggle.",
@@ -282,12 +282,15 @@ class DeleteBakeKeyframePanel(bpy.types.Panel):
         box.separator()
         box.label(text="Keyframe Types")
         box.prop(props, "all_types")
-        row = box.row(align=True)
-        row.enabled = not props.all_types
-        row.prop(props, "pos")
-        row.prop(props, "rot")
+        
+        # Individual toggles DISABLED when ALL is enabled
+        row1 = box.row(align=True)
+        row1.enabled = not props.all_types  # DISABLED when all_types=True
+        row1.prop(props, "pos")
+        row1.prop(props, "rot")
+        
         row2 = box.row(align=True)
-        row2.enabled = not props.all_types
+        row2.enabled = not props.all_types  # DISABLED when all_types=True
         row2.prop(props, "scl")
         row2.prop(props, "custom")
 
