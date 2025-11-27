@@ -1,15 +1,14 @@
 bl_info = {
     "name": "Delete/Bake Keyframe by Interval Extended",
     "author": "Venkatesh Sanku",
-    "version": (1, 6, 1),
-    "blender": (4, 2, 0),  # Updated for Blender 5.0 compatibility
+    "version": (1, 6, 2),
+    "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Animation",
     "description": "Delete/bake keyframes by interval with selected-only mode and live UI preview.",
     "category": "Animation",
 }
 
 import bpy
-import bmesh
 
 class DeleteKeyframeProperties(bpy.types.PropertyGroup):
     start_frame: bpy.props.IntProperty(
@@ -104,41 +103,40 @@ def get_selected_objects_or_bones(context):
             return context.selected_pose_bones
     return context.selected_objects
 
+def get_animation_data(obj_or_bone):
+    """Safe animation data retrieval for Blender 5.0"""
+    if hasattr(obj_or_bone, 'id_data'):
+        return obj_or_bone.id_data.animation_data
+    return getattr(obj_or_bone, 'animation_data', None)
+
 def delete_all_keyframes_at_frame(obj_or_bone, frame):
-    """Delete ALL keyframes at specific frame for object or pose bone - Blender 5.0 fix"""
-    ad = obj_or_bone.id_data.animation_data if hasattr(obj_or_bone, 'id_data') else obj_or_bone.animation_data
+    """Delete ALL keyframes at specific frame - FIXED for Blender 5.0"""
+    ad = get_animation_data(obj_or_bone)
     if not ad or not ad.action:
-        return
+        return 0
     
+    deleted = 0
     action = ad.action
-    fcurves_to_remove = []
     
-    # Collect fcurves with keyframes at target frame
+    # Safe fcurves access
+    if not hasattr(action, 'fcurves'):
+        return 0
+    
     for fc in action.fcurves:
-        for kp in fc.keyframe_points:
-            if abs(kp.co[0] - frame) < 0.5:  # More robust frame matching
-                fcurves_to_remove.append(fc)
-                break
-    
-    # Remove keyframes safely
-    for fc in fcurves_to_remove:
         for kp in list(fc.keyframe_points):
             if abs(kp.co[0] - frame) < 0.5:
                 fc.keyframe_points.remove(kp)
+                deleted += 1
+    
+    return deleted
 
 def safe_keyframe_delete(target, data_path, frame):
     """Safe keyframe delete for Blender 5.0"""
     try:
         target.keyframe_delete(data_path=data_path, frame=frame, index=-1)
+        return True
     except:
-        pass
-
-def safe_keyframe_insert(target, data_path, frame):
-    """Safe keyframe insert for Blender 5.0"""
-    try:
-        target.keyframe_insert(data_path=data_path, frame=frame, index=-1)
-    except:
-        pass
+        return False
 
 class DeleteKeyframeOperator(bpy.types.Operator):
     bl_idname = "object.delete_keyframe_by_interval"
@@ -153,41 +151,38 @@ class DeleteKeyframeOperator(bpy.types.Operator):
         targets = get_selected_objects_or_bones(context) if types["only_selected"] else context.selected_objects
         deleted_count = 0
 
-        bpy.context.view_layer.update()
-        
         for target in targets:
-            ad = target.animation_data if hasattr(target, 'animation_data') else target.id_data.animation_data
+            ad = get_animation_data(target)
             
-            if ad and ad.action:
+            if ad and ad.action and hasattr(ad.action, 'fcurves'):
                 for f in frames:
                     if types["all"]:
-                        delete_all_keyframes_at_frame(target, f)
-                        deleted_count += 1
+                        deleted_count += delete_all_keyframes_at_frame(target, f)
                     else:
-                        if types["pos"]:
-                            safe_keyframe_delete(target, "location", f)
+                        if types["pos"] and safe_keyframe_delete(target, "location", f):
+                            deleted_count += 1
                         if types["rot"]:
-                            safe_keyframe_delete(target, "rotation_euler", f)
-                            safe_keyframe_delete(target, "rotation_quaternion", f)
-                        if types["scl"]:
-                            safe_keyframe_delete(target, "scale", f)
+                            if safe_keyframe_delete(target, "rotation_euler", f):
+                                deleted_count += 1
+                            if safe_keyframe_delete(target, "rotation_quaternion", f):
+                                deleted_count += 1
+                        if types["scl"] and safe_keyframe_delete(target, "scale", f):
+                            deleted_count += 1
                         if types["custom"]:
-                            action = ad.action
-                            for fc in action.fcurves:
+                            for fc in ad.action.fcurves:
                                 if fc.data_path.startswith('["') and fc.data_path.endswith('"]'):
                                     for kp in list(fc.keyframe_points):
                                         if abs(kp.co[0] - f) < 0.5:
                                             fc.keyframe_points.remove(kp)
                                             deleted_count += 1
 
-        # Force full update for Blender 5.0
-        bpy.context.view_layer.update()
-        bpy.context.window_manager.progress_begin(0, 1)
+        # Multiple viewport updates for Blender 5.0
+        for _ in range(3):
+            bpy.context.view_layer.update()
         bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
-        bpy.context.window_manager.progress_end()
         
         mode_text = "pose bones" if context.mode == 'POSE' else "objects"
-        self.report({'INFO'}, f"Deleted keyframes on {len(frames)} frames for {len(targets)} {mode_text}")
+        self.report({'INFO'}, f"Deleted {deleted_count} keyframes on {len(frames)} frames for {len(targets)} {mode_text}")
         return {'FINISHED'}
 
 class BakeKeyframeOperator(bpy.types.Operator):
@@ -206,15 +201,12 @@ class BakeKeyframeOperator(bpy.types.Operator):
         original_frame = scene.frame_current
         baked_count = 0
 
-        bpy.context.view_layer.update()
-        
         for target in targets:
             for f in frames:
                 scene.frame_set(f)
                 bpy.context.view_layer.update()
                 
                 if types["all"]:
-                    # Full keyframe insert with safety
                     if types["pos"]:
                         safe_keyframe_insert(target, "location", f)
                     if types["rot"]:
@@ -225,7 +217,6 @@ class BakeKeyframeOperator(bpy.types.Operator):
                             safe_keyframe_insert(target, "rotation_euler", f)
                     if types["scl"]:
                         safe_keyframe_insert(target, "scale", f)
-                    # Custom properties - safer approach
                     try:
                         for prop_name in target.keys():
                             if not prop_name.startswith('_') and isinstance(target[prop_name], (int, float)):
@@ -233,7 +224,6 @@ class BakeKeyframeOperator(bpy.types.Operator):
                     except:
                         pass
                 else:
-                    # Individual properties
                     if types["pos"]:
                         safe_keyframe_insert(target, "location", f)
                     if types["rot"]:
@@ -255,11 +245,19 @@ class BakeKeyframeOperator(bpy.types.Operator):
 
         scene.frame_set(original_frame)
         bpy.context.view_layer.update()
-        bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=2)
+        bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
         
         mode_text = "pose bones" if context.mode == 'POSE' else "objects"
         self.report({'INFO'}, f"Baked {len(frames)} keyframes for {len(targets)} {mode_text}")
         return {'FINISHED'}
+
+def safe_keyframe_insert(target, data_path, frame):
+    """Safe keyframe insert for Blender 5.0"""
+    try:
+        target.keyframe_insert(data_path=data_path, frame=frame, index=-1)
+        return True
+    except:
+        return False
 
 class DeleteBakeKeyframePanel(bpy.types.Panel):
     bl_label = "🔧 Delete/Bake Keyframe By Interval"
@@ -272,7 +270,6 @@ class DeleteBakeKeyframePanel(bpy.types.Panel):
         layout = self.layout
         props = context.scene.del_keyframe_props
 
-        # Main frame range box with better visual separation
         col = layout.column(align=True)
         box = col.box()
         box.prop(props, "start_frame")
@@ -280,13 +277,11 @@ class DeleteBakeKeyframePanel(bpy.types.Panel):
         box.prop(props, "interval")
         box.prop(props, "invert")
 
-        # Target selection box
         box = col.box()
         box.label(text="🎯 Target Selection", icon='OBJECT_DATA')
         box.prop(props, "only_selected")
         box.prop(props, "all_types")
 
-        # Property types box (disabled when ALL is checked)
         box = col.box()
         box.label(text="⚙️ Property Types", icon='DRIVER')
         row1 = box.row(align=True)
@@ -299,13 +294,11 @@ class DeleteBakeKeyframePanel(bpy.types.Panel):
         row2.prop(props, "scl")
         row2.prop(props, "custom")
 
-        # Preview with better styling
         preview_box = col.box()
         preview_box.scale_y = 1.2
         frames_preview = calculate_frames(props)
         preview_box.label(text=f"📊 Preview: {len(frames_preview)} frames will be affected", icon='INFO')
 
-        # Action buttons with improved styling
         row = col.row(align=True)
         row.scale_y = 1.5
         row.operator("object.delete_keyframe_by_interval", icon='TRASH', text="🗑️ Delete")
