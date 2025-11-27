@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Delete/Bake Keyframe by Interval Extended",
     "author": "Venkatesh Sanku",
-    "version": (1, 5, 1),
+    "version": (1, 5, 2),
     "blender": (2, 80, 0),
     "location": "View3D > Sidebar > Animation",
-    "description": "Delete/bake keyframes by interval with full property support, entire key deletion, and all-property toggle.",
+    "description": "Delete/bake keyframes by interval with full property support and clean UI.",
     "category": "Animation",
 }
 
@@ -80,87 +80,96 @@ def affect_types(props):
         custom=props.custom,
     )
 
-def custom_prop_fcurve(fcurve):
-    dp = fcurve.data_path
-    return dp.startswith('["') and dp.endswith('"]')
+def delete_all_keyframes_at_frame(obj, frame):
+    """Delete ALL keyframes at specific frame for object or armature"""
+    ad = obj.animation_data
+    if not ad or not ad.action:
+        return
+    
+    fcurves_to_remove = []
+    for fc in ad.action.fcurves:
+        for kp in list(fc.keyframe_points):
+            if int(round(kp.co[0])) == frame:
+                fc.keyframe_points.remove(kp)
+        if not fc.keyframe_points:
+            fcurves_to_remove.append(fc)
+    
+    # Clean up empty fcurves
+    for fc in fcurves_to_remove:
+        ad.action.fcurves.remove(fc)
 
 class DeleteKeyframeOperator(bpy.types.Operator):
     bl_idname = "object.delete_keyframe_by_interval"
     bl_label = "Delete Keyframes"
     bl_options = {'REGISTER', 'UNDO'}
-    bl_description = "Delete entire keyframes at specified frames for selected objects and bones (all properties)."
+    bl_description = "Delete keyframes at specified frames for selected objects and bones."
 
     def execute(self, context):
         props = context.scene.del_keyframe_props
         types = affect_types(props)
         frames = calculate_frames(props)
         props.preview_count = len(frames)
+        deleted_count = 0
 
-        for obj in bpy.context.selected_objects:
-            ad = obj.animation_data
-            if not ad or not ad.action:
-                continue
-
-            for frame in frames:
-                if types["all"]:
-                    # Delete entire keyframe across all fcurves at frame
-                    for fc in ad.action.fcurves:
-                        for kp in list(fc.keyframe_points):
-                            if int(round(kp.co[0])) == frame:
-                                fc.keyframe_points.remove(kp)
-                else:
-                    # Delete selected keyframe types only
+        for obj in context.selected_objects:
+            # Handle object keyframes
+            if types["all"]:
+                for f in frames:
+                    delete_all_keyframes_at_frame(obj, f)
+                    deleted_count += 1
+            else:
+                for f in frames:
                     if types["pos"]:
-                        obj.keyframe_delete(data_path="location", frame=frame)
+                        obj.keyframe_delete(data_path="location", frame=f)
                     if types["rot"]:
-                        obj.keyframe_delete(data_path="rotation_euler", frame=frame)
-                        obj.keyframe_delete(data_path="rotation_quaternion", frame=frame)
+                        obj.keyframe_delete(data_path="rotation_euler", frame=f)
+                        obj.keyframe_delete(data_path="rotation_quaternion", frame=f)
                     if types["scl"]:
-                        obj.keyframe_delete(data_path="scale", frame=frame)
+                        obj.keyframe_delete(data_path="scale", frame=f)
                     if types["custom"]:
-                        for fc in ad.action.fcurves:
-                            if custom_prop_fcurve(fc):
-                                for kp in list(fc.keyframe_points):
-                                    if int(round(kp.co[0])) == frame:
-                                        fc.keyframe_points.remove(kp)
+                        ad = obj.animation_data
+                        if ad and ad.action:
+                            for fc in ad.action.fcurves:
+                                if fc.data_path.startswith('["') and fc.data_path.endswith('"]'):
+                                    for kp in list(fc.keyframe_points):
+                                        if int(round(kp.co[0])) == f:
+                                            fc.keyframe_points.remove(kp)
+                    deleted_count += 1
 
-            # Delete keys for pose bones similarly
-            if obj.type == 'ARMATURE' and obj.mode == 'POSE':
-                for pbn in bpy.context.selected_pose_bones:
-                    ad_p = pbn.id_data.animation_data
-                    if not ad_p or not ad_p.action:
-                        continue
-
-                    for frame in frames:
-                        if types["all"]:
-                            for fc in ad_p.action.fcurves:
-                                for kp in list(fc.keyframe_points):
-                                    if int(round(kp.co[0])) == frame:
-                                        fc.keyframe_points.remove(kp)
-                        else:
+            # Handle pose bones
+            if obj.type == 'ARMATURE' and context.mode == 'POSE':
+                for pbn in context.selected_pose_bones:
+                    if types["all"]:
+                        delete_all_keyframes_at_frame(obj, f)
+                        deleted_count += 1
+                    else:
+                        for f in frames:
                             if types["pos"]:
-                                pbn.keyframe_delete(data_path="location", frame=frame)
+                                pbn.keyframe_delete(data_path="location", frame=f)
                             if types["rot"]:
-                                pbn.keyframe_delete(data_path="rotation_euler", frame=frame)
-                                pbn.keyframe_delete(data_path="rotation_quaternion", frame=frame)
+                                pbn.keyframe_delete(data_path="rotation_euler", frame=f)
+                                pbn.keyframe_delete(data_path="rotation_quaternion", frame=f)
                             if types["scl"]:
-                                pbn.keyframe_delete(data_path="scale", frame=frame)
+                                pbn.keyframe_delete(data_path="scale", frame=f)
                             if types["custom"]:
-                                for fc in ad_p.action.fcurves:
-                                    if custom_prop_fcurve(fc):
-                                        for kp in list(fc.keyframe_points):
-                                            if int(round(kp.co[0])) == frame:
-                                                fc.keyframe_points.remove(kp)
+                                ad = obj.animation_data
+                                if ad and ad.action:
+                                    for fc in ad.action.fcurves:
+                                        if fc.data_path.startswith('["') and fc.data_path.endswith('"]'):
+                                            for kp in list(fc.keyframe_points):
+                                                if int(round(kp.co[0])) == f:
+                                                    fc.keyframe_points.remove(kp)
+                            deleted_count += 1
 
-        bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
-        self.report({'INFO'}, f"Deleted {len(frames)} frames, types: " + ", ".join([k for k, v in types.items() if v]))
+        context.view_layer.update()
+        self.report({'INFO'}, f"Deleted keyframes on {len(frames)} frames for {len(context.selected_objects)} objects")
         return {'FINISHED'}
 
 class BakeKeyframeOperator(bpy.types.Operator):
     bl_idname = "object.bake_keyframe_by_interval"
     bl_label = "Bake Keyframes"
     bl_options = {'REGISTER', 'UNDO'}
-    bl_description = "Insert keyframes at specified frames for selected objects and bones (all properties and transforms)."
+    bl_description = "Bake keyframes at specified frames for selected objects and bones."
 
     def execute(self, context):
         props = context.scene.del_keyframe_props
@@ -170,93 +179,66 @@ class BakeKeyframeOperator(bpy.types.Operator):
 
         scene = context.scene
         original_frame = scene.frame_current
+        baked_count = 0
 
-        for obj in bpy.context.selected_objects:
-            ad = obj.animation_data
-            existing_frames = set()
-            if ad and ad.action:
-                for fc in ad.action.fcurves:
-                    for kp in fc.keyframe_points:
-                        frame = int(round(kp.co[0]))
-                        existing_frames.add((fc.data_path, frame))
-
+        for obj in context.selected_objects:
             for f in frames:
                 scene.frame_set(f)
+                context.view_layer.update()
+                
                 if types["all"]:
-                    bpy.ops.object.select_all(action='DESELECT')
-                    obj.select_set(True)
-                    scene.view_layers[0].objects.active = obj
-                    bpy.ops.anim.keyframe_insert(type='LocRotScale', confirm_success=False)
-                    for k in obj.keys():
-                        if k.startswith("_") or not isinstance(obj[k], (int, float)):
-                            continue
-                        obj.keyframe_insert(data_path=f'["{k}"]', frame=f)
+                    # Full keyframe insert using Blender's standard method
+                    bpy.context.view_layer.objects.active = obj
+                    bpy.ops.anim.keyframe_insert(type='LocRotScale')
+                    # Add custom properties
+                    for prop_name in obj.keys():
+                        if not prop_name.startswith('_') and isinstance(obj[prop_name], (int, float)):
+                            obj.keyframe_insert(data_path=f'["{prop_name}"]', frame=f)
+                    baked_count += 1
                 else:
+                    # Individual property keyframing
                     if types["pos"]:
-                        if ("location", f) not in existing_frames:
-                            obj.keyframe_insert(data_path="location", frame=f)
+                        obj.keyframe_insert(data_path="location", frame=f)
                     if types["rot"]:
-                        if ("rotation_euler", f) not in existing_frames:
-                            obj.keyframe_insert(data_path="rotation_euler", frame=f)
-                        if ("rotation_quaternion", f) not in existing_frames:
-                            obj.keyframe_insert(data_path="rotation_quaternion", frame=f)
+                        obj.keyframe_insert(data_path="rotation_euler", frame=f)
                     if types["scl"]:
-                        if ("scale", f) not in existing_frames:
-                            obj.keyframe_insert(data_path="scale", frame=f)
+                        obj.keyframe_insert(data_path="scale", frame=f)
                     if types["custom"]:
-                        for k in obj.keys():
-                            if k.startswith("_") or not isinstance(obj[k], (int, float)):
-                                continue
-                            path = f'["{k}"]'
-                            if (path, f) not in existing_frames:
-                                obj.keyframe_insert(data_path=path, frame=f)
+                        for prop_name in obj.keys():
+                            if not prop_name.startswith('_') and isinstance(obj[prop_name], (int, float)):
+                                obj.keyframe_insert(data_path=f'["{prop_name}"]', frame=f)
+                    baked_count += 1
 
-            if obj.type == 'ARMATURE' and obj.mode == 'POSE':
-                for pbn in bpy.context.selected_pose_bones:
-                    ad_p = pbn.id_data.animation_data
-                    existing_frames_p = set()
-                    if ad_p and ad_p.action:
-                        for fc in ad_p.action.fcurves:
-                            for kp in fc.keyframe_points:
-                                frame = int(round(kp.co[0]))
-                                existing_frames_p.add((fc.data_path, frame))
-
+            # Handle pose bones
+            if obj.type == 'ARMATURE' and context.mode == 'POSE':
+                for pbn in context.selected_pose_bones:
                     for f in frames:
                         scene.frame_set(f)
+                        context.view_layer.update()
+                        
                         if types["all"]:
-                            bpy.ops.pose.select_all(action='DESELECT')
-                            pbn.bone.select = True
-                            obj.data.bones.active = pbn.bone
-                            bpy.ops.anim.keyframe_insert(type='LocRotScale', confirm_success=False)
-                            for k in pbn.keys():
-                                if k.startswith("_") or not isinstance(pbn[k], (int, float)):
-                                    continue
-                                path = f'["{k}"]'
-                                if (path, f) not in existing_frames_p:
-                                    pbn.keyframe_insert(data_path=path, frame=f)
+                            bpy.context.view_layer.objects.active = obj
+                            bpy.ops.pose.insert_keyframe(type='LocRotScale')
+                            for prop_name in pbn.keys():
+                                if not prop_name.startswith('_') and isinstance(pbn[prop_name], (int, float)):
+                                    pbn.keyframe_insert(data_path=f'["{prop_name}"]', frame=f)
+                            baked_count += 1
                         else:
                             if types["pos"]:
-                                if ("location", f) not in existing_frames_p:
-                                    pbn.keyframe_insert(data_path="location", frame=f)
+                                pbn.keyframe_insert(data_path="location", frame=f)
                             if types["rot"]:
-                                if ("rotation_euler", f) not in existing_frames_p:
-                                    pbn.keyframe_insert(data_path="rotation_euler", frame=f)
-                                if ("rotation_quaternion", f) not in existing_frames_p:
-                                    pbn.keyframe_insert(data_path="rotation_quaternion", frame=f)
+                                pbn.keyframe_insert(data_path="rotation_euler", frame=f)
                             if types["scl"]:
-                                if ("scale", f) not in existing_frames_p:
-                                    pbn.keyframe_insert(data_path="scale", frame=f)
+                                pbn.keyframe_insert(data_path="scale", frame=f)
                             if types["custom"]:
-                                for k in pbn.keys():
-                                    if k.startswith("_") or not isinstance(pbn[k], (int, float)):
-                                        continue
-                                    path = f'["{k}"]'
-                                    if (path, f) not in existing_frames_p:
-                                        pbn.keyframe_insert(data_path=path, frame=f)
+                                for prop_name in pbn.keys():
+                                    if not prop_name.startswith('_') and isinstance(pbn[prop_name], (int, float)):
+                                        pbn.keyframe_insert(data_path=f'["{prop_name}"]', frame=f)
+                            baked_count += 1
 
         scene.frame_set(original_frame)
-        bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
-        self.report({'INFO'}, f"Baked {len(frames)} keyframes, types: " + ", ".join([k for k, v in types.items() if v]))
+        context.view_layer.update()
+        self.report({'INFO'}, f"Baked {len(frames)} keyframes for {len(context.selected_objects)} objects")
         return {'FINISHED'}
 
 class DeleteBakeKeyframePanel(bpy.types.Panel):
@@ -285,22 +267,22 @@ class DeleteBakeKeyframePanel(bpy.types.Panel):
         
         # Individual toggles DISABLED when ALL is enabled
         row1 = box.row(align=True)
-        row1.enabled = not props.all_types  # DISABLED when all_types=True
+        row1.enabled = not props.all_types
         row1.prop(props, "pos")
         row1.prop(props, "rot")
         
         row2 = box.row(align=True)
-        row2.enabled = not props.all_types  # DISABLED when all_types=True
+        row2.enabled = not props.all_types
         row2.prop(props, "scl")
         row2.prop(props, "custom")
 
         frames_preview = calculate_frames(props)
-        col.label(text=f"Frames: {frames_preview}  |  Count: {len(frames_preview)}")
+        col.label(text=f"Frames: {len(frames_preview)} frames affected")
 
         row = col.row(align=True)
         row.scale_y = 1.4
-        row.operator("object.delete_keyframe_by_interval", icon='TRASH')
-        row.operator("object.bake_keyframe_by_interval", icon='KEY_HLT')
+        row.operator("object.delete_keyframe_by_interval", icon='TRASH', text="Delete")
+        row.operator("object.bake_keyframe_by_interval", icon='KEY_HLT', text="Bake")
 
 classes = (
     DeleteKeyframeProperties,
