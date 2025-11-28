@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Delete/Bake Keyframe by Interval Extended",
     "author": "Venkatesh Sanku",
-    "version": (1, 6, 3),
+    "version": (1, 6, 4),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Animation",
     "description": "Delete/bake keyframes by interval with selected-only mode and live UI preview.",
@@ -104,27 +104,29 @@ def get_selected_objects_or_bones(context):
     return context.selected_objects
 
 def delete_all_keyframes_at_frame(obj_or_bone, frame):
-    """Delete ALL keyframes at specific frame - BLENDER 5.0 WORKING VERSION"""
-    ad = obj_or_bone.id_data.animation_data if hasattr(obj_or_bone, 'id_data') else obj_or_bone.animation_data
-    if not ad or not ad.action:
+    """Robust: delete ALL keyframes at specific frame for object or pose bone (objects, pose bones, NLA-safe)."""
+    # Get animation_data safely from object or pose bone
+    ad = getattr(obj_or_bone, "animation_data", None)
+    if ad is None and hasattr(obj_or_bone, "id_data"):
+        ad = getattr(obj_or_bone.id_data, "animation_data", None)
+    if ad is None:
         return 0
-    
-    action = ad.action
+
+    action = getattr(ad, "action", None)
+    # Some animation setups (NLA, library overrides, etc.) may have no action or a non-Action user
+    if action is None or not hasattr(action, "fcurves"):
+        return 0
+
     deleted = 0
-    
-    # Direct fcurve iteration with proper frame matching
-    fcurves = action.fcurves
-    for i in range(len(fcurves)):
-        fc = fcurves[i]
-        keyframe_points = fc.keyframe_points
-        
-        # Iterate backwards to avoid index issues
-        for j in range(len(keyframe_points) - 1, -1, -1):
-            kp = keyframe_points[j]
+    # Iterate fcurves and remove matching keyframe points
+    for fc in list(action.fcurves):
+        kps = fc.keyframe_points
+        # iterate backwards so indices stay valid while removing
+        for i in range(len(kps) - 1, -1, -1):
+            kp = kps[i]
             if round(kp.co[0]) == frame:
-                fc.keyframe_points.remove(kp)
+                kps.remove(kp)
                 deleted += 1
-    
     return deleted
 
 class DeleteKeyframeOperator(bpy.types.Operator):
@@ -148,12 +150,11 @@ class DeleteKeyframeOperator(bpy.types.Operator):
         # Process each target
         for target in targets:
             # Get animation data safely
-            if hasattr(target, 'id_data'):
-                ad = target.id_data.animation_data
-            else:
-                ad = target.animation_data
+            ad = getattr(target, "animation_data", None)
+            if ad is None and hasattr(target, "id_data"):
+                ad = getattr(target.id_data, "animation_data", None)
             
-            if ad and ad.action:
+            if ad and ad.action and hasattr(ad.action, "fcurves"):
                 for frame in frames:
                     if types["all"]:
                         # Delete ALL keyframes at this frame
@@ -170,15 +171,15 @@ class DeleteKeyframeOperator(bpy.types.Operator):
                                 target.keyframe_delete(data_path="scale", frame=frame, index=-1)
                             if types["custom"]:
                                 action = ad.action
-                                fcurves = action.fcurves
-                                for i in range(len(fcurves)):
-                                    fc = fcurves[i]
-                                    if fc.data_path.startswith('["') and fc.data_path.endswith('"]'):
-                                        for j in range(len(fc.keyframe_points) - 1, -1, -1):
-                                            kp = fc.keyframe_points[j]
-                                            if round(kp.co[0]) == frame:
-                                                fc.keyframe_points.remove(kp)
-                                                total_deleted += 1
+                                if hasattr(action, "fcurves"):
+                                    for fc in list(action.fcurves):
+                                        if fc.data_path.startswith('["') and fc.data_path.endswith('"]'):
+                                            kps = fc.keyframe_points
+                                            for i in range(len(kps) - 1, -1, -1):
+                                                kp = kps[i]
+                                                if round(kp.co[0]) == frame:
+                                                    kps.remove(kp)
+                                                    total_deleted += 1
                         except:
                             pass
 
