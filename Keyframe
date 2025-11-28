@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Delete/Bake Keyframe by Interval Extended",
     "author": "Venkatesh Sanku",
-    "version": (1, 6, 10),
-    "blender": (4, 2, 0),
+    "version": (1, 6, 11),
+    "blender": (4, 2, 0),  # Compatible with Blender 5.0+
     "location": "View3D > Sidebar > Animation",
-    "description": "Delete/bake keyframes by interval with selected-only mode and live UI preview. FIXED: Bones work properly after delete/bake.",
+    "description": "Delete/bake keyframes by interval with selected-only mode and live UI preview. FIXED: PoseBone attribute errors + Blender 5.0 compatible.",
     "category": "Animation",
 }
 
@@ -85,51 +85,52 @@ def calculate_frames(props):
     return [f for f in all_frames if f not in select_frames]
 
 def get_selected_objects_or_bones(context):
-    if context.mode == 'POSE':
+    """Proper PoseBone selection detection - Blender 5.0 compatible"""
+    if context.mode == 'POSE' and context.object and context.object.type == 'ARMATURE':
         armature = context.object
-        if armature and armature.type == 'ARMATURE':
-            return [armature.pose.bones[bone.name] for bone in armature.data.bones if bone.select]  # Use selected edit bones
+        return [pb for pb in armature.pose.bones if pb.bone.select]
     return context.selected_objects
 
 def delete_keyframes_pose_bone(pose_bone, frame, props):
-    """Delete keyframes for a specific PoseBone using proper bone properties"""
-    armature = pose_bone.id_data
-    deleted = False
-    
-    # Location
-    if props.all_types or props.pos:
-        pose_bone.keyframe_delete(data_path="location", frame=frame, index=-1)
-        deleted = True
-    
-    # Rotation (check rotation mode)
-    if props.all_types or props.rot:
-        rot_mode = armature.bone_constraints.active.rotation_mode if armature.bone_constraints else 'QUATERNION'
-        if hasattr(pose_bone, 'rotation_mode') and pose_bone.rotation_mode == 'QUATERNION':
-            pose_bone.keyframe_delete(data_path="rotation_quaternion", frame=frame, index=-1)
-        else:
-            pose_bone.keyframe_delete(data_path="rotation_euler", frame=frame, index=-1)
-        deleted = True
-    
-    # Scale
-    if props.all_types or props.scl:
-        pose_bone.keyframe_delete(data_path="scale", frame=frame, index=-1)
-        deleted = True
-    
-    return deleted
+    """Safe PoseBone keyframe deletion - no attribute errors"""
+    try:
+        deleted = 0
+        
+        # Location
+        if (props.all_types or props.pos) and hasattr(pose_bone, 'location'):
+            pose_bone.keyframe_delete(data_path="location", frame=frame, index=-1)
+            deleted += 1
+        
+        # Rotation - handles both Euler and Quaternion
+        if props.all_types or props.rot:
+            if hasattr(pose_bone, 'rotation_euler'):
+                pose_bone.keyframe_delete(data_path="rotation_euler", frame=frame, index=-1)
+                deleted += 1
+            if hasattr(pose_bone, 'rotation_quaternion'):
+                pose_bone.keyframe_delete(data_path="rotation_quaternion", frame=frame, index=-1)
+                deleted += 1
+        
+        # Scale
+        if (props.all_types or props.scl) and hasattr(pose_bone, 'scale'):
+            pose_bone.keyframe_delete(data_path="scale", frame=frame, index=-1)
+            deleted += 1
+            
+        return deleted
+    except Exception as e:
+        print(f"❌ PoseBone delete error: {e}")
+        return 0
 
-def delete_keyframes_interval_robust(targets, frames, props):
-    """FIXED: Proper PoseBone keyframe deletion that keeps bones working"""
+def delete_keyframes_interval_robust(targets, frames, props, context):
+    """Handles both PoseBones and Objects without errors - Blender 5.0 safe"""
     deleted_count = 0
     
     for target in targets:
-        if hasattr(target, 'id_data') and target.id_data.type == 'ARMATURE':
-            # Handle PoseBone
-            obj = target.id_data
-            pose_bone = target  # target is already PoseBone
-        else:
-            # Handle Object
-            obj = target
+        if context.mode == 'POSE' and hasattr(target, 'bone'):  # PoseBone
+            pose_bone = target
+            obj = pose_bone.id_data
+        else:  # Object
             pose_bone = None
+            obj = target
         
         if not obj.animation_data or not obj.animation_data.action:
             continue
@@ -137,56 +138,54 @@ def delete_keyframes_interval_robust(targets, frames, props):
         print(f"🎯 Processing {obj.name}{' (PoseBone)' if pose_bone else ''}")
         
         for frame in frames:
-            scene = bpy.context.scene
-            original_frame = scene.frame_current
-            scene.frame_set(frame)
-            
             try:
                 if pose_bone:
                     # PoseBone deletion
-                    if delete_keyframes_pose_bone(pose_bone, frame, props):
-                        deleted_count += 1
-                        print(f"   Frame {frame}: ✅ DELETED (PoseBone)")
+                    deleted = delete_keyframes_pose_bone(pose_bone, frame, props)
+                    deleted_count += deleted
+                    if deleted > 0:
+                        print(f"   Frame {frame}: ✅ DELETED {deleted} props (PoseBone)")
                 else:
-                    # Object deletion (original method)
+                    # Object deletion
                     obj.keyframe_delete(data_path="location", frame=frame, index=-1)
                     obj.keyframe_delete(data_path="rotation_euler", frame=frame, index=-1)
                     obj.keyframe_delete(data_path="rotation_quaternion", frame=frame, index=-1)
                     obj.keyframe_delete(data_path="scale", frame=frame, index=-1)
-                    deleted_count += 1
-                    print(f"   Frame {frame}: ✅ DELETED")
+                    deleted_count += 4
+                    print(f"   Frame {frame}: ✅ DELETED (Object)")
             except Exception as e:
                 print(f"   Frame {frame}: ❌ {e}")
-            finally:
-                scene.frame_set(original_frame)
     
     return deleted_count
 
 def bake_keyframes_pose_bone(pose_bone, frame, props):
-    """Bake keyframes for a specific PoseBone"""
-    armature = pose_bone.id_data
-    baked = False
-    
-    # Location
-    if props.all_types or props.pos:
-        pose_bone.keyframe_insert(data_path="location", frame=frame)
-        baked = True
-    
-    # Rotation
-    if props.all_types or props.rot:
-        rot_mode = getattr(pose_bone, 'rotation_mode', 'QUATERNION')
-        if rot_mode == 'QUATERNION':
-            pose_bone.keyframe_insert(data_path="rotation_quaternion", frame=frame)
-        else:
-            pose_bone.keyframe_insert(data_path="rotation_euler", frame=frame)
-        baked = True
-    
-    # Scale
-    if props.all_types or props.scl:
-        pose_bone.keyframe_insert(data_path="scale", frame=frame)
-        baked = True
-    
-    return baked
+    """Safe PoseBone keyframe insertion"""
+    try:
+        baked = 0
+        
+        # Location
+        if (props.all_types or props.pos) and hasattr(pose_bone, 'location'):
+            pose_bone.keyframe_insert(data_path="location", frame=frame)
+            baked += 1
+        
+        # Rotation
+        if props.all_types or props.rot:
+            if hasattr(pose_bone, 'rotation_euler'):
+                pose_bone.keyframe_insert(data_path="rotation_euler", frame=frame)
+                baked += 1
+            if hasattr(pose_bone, 'rotation_quaternion'):
+                pose_bone.keyframe_insert(data_path="rotation_quaternion", frame=frame)
+                baked += 1
+        
+        # Scale
+        if (props.all_types or props.scl) and hasattr(pose_bone, 'scale'):
+            pose_bone.keyframe_insert(data_path="scale", frame=frame)
+            baked += 1
+            
+        return baked
+    except Exception as e:
+        print(f"❌ PoseBone bake error: {e}")
+        return 0
 
 class DeleteKeyframeOperator(bpy.types.Operator):
     bl_idname = "object.delete_keyframe_by_interval"
@@ -199,21 +198,19 @@ class DeleteKeyframeOperator(bpy.types.Operator):
         targets = get_selected_objects_or_bones(context) if props.only_selected else context.selected_objects
         
         print(f"🔍 INTERVAL: Start={props.start_frame}, End={props.end_frame}, Interval={props.interval}, Invert={props.invert}")
-        print(f"🔍 FRAMES TO DELETE: {frames}")
+        print(f"🔍 TARGETS: {len(targets)} ({'Pose' if context.mode == 'POSE' else 'Object'})")
+        print(f"🔍 FRAMES: {frames}")
         
-        deleted_count = delete_keyframes_interval_robust(targets, frames, props)
+        deleted_count = delete_keyframes_interval_robust(targets, frames, props, context)
         
-        # FORCE FULL UPDATE - FIXED bones not working issue
-        bpy.context.view_layer.update()
-        bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
-        
-        # Clear pose transforms and update depsgraph
+        # FORCE UPDATE - Blender 5.0 compatible
+        context.view_layer.update()
         if context.mode == 'POSE':
-            bpy.ops.pose.transforms_clear()  # Reset pose to rest position
-        bpy.context.view_layer.depsgraph.update()
+            bpy.ops.pose.transforms_clear(only_values=False)
+        context.view_layer.depsgraph.update()
         
         mode_text = "pose bones" if context.mode == 'POSE' else "objects"
-        self.report({'INFO'}, f"✅ DELETED {deleted_count} keyframe sets from {len(frames)} frames ({len(targets)} {mode_text})")
+        self.report({'INFO'}, f"✅ DELETED {deleted_count} keyframes from {len(targets)} {mode_text}")
         return {'FINISHED'}
 
 class BakeKeyframeOperator(bpy.types.Operator):
@@ -231,8 +228,10 @@ class BakeKeyframeOperator(bpy.types.Operator):
         baked_count = 0
 
         for target in targets:
-            obj = target.id_data if hasattr(target, 'id_data') else target
-            pose_bone = target if hasattr(target, 'id_data') else None
+            if context.mode == 'POSE' and hasattr(target, 'bone'):  # PoseBone
+                pose_bone = target
+            else:
+                pose_bone = None
             
             for f in frames:
                 scene.frame_set(f)
@@ -240,9 +239,10 @@ class BakeKeyframeOperator(bpy.types.Operator):
                 
                 try:
                     if pose_bone:
-                        if bake_keyframes_pose_bone(pose_bone, f, props):
-                            baked_count += 1
+                        baked = bake_keyframes_pose_bone(pose_bone, f, props)
+                        baked_count += baked
                     else:
+                        obj = target
                         if props.all_types or props.pos:
                             obj.keyframe_insert(data_path="location", frame=f)
                         if props.all_types or props.rot:
@@ -253,14 +253,14 @@ class BakeKeyframeOperator(bpy.types.Operator):
                                 obj.keyframe_insert(data_path="rotation_euler", frame=f)
                         if props.all_types or props.scl:
                             obj.keyframe_insert(data_path="scale", frame=f)
-                        baked_count += 1
-                except:
-                    pass
+                        baked_count += 3
+                except Exception as e:
+                    print(f"Bake error frame {f}: {e}")
 
         scene.frame_set(original_frame)
         context.view_layer.update()
-        bpy.context.view_layer.depsgraph.update()
-        self.report({'INFO'}, f"Baked {baked_count} keyframes")
+        context.view_layer.depsgraph.update()
+        self.report({'INFO'}, f"✅ BAKED {baked_count} keyframes")
         return {'FINISHED'}
 
 class DeleteBakeKeyframePanel(bpy.types.Panel):
