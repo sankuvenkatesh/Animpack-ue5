@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Delete/Bake Keyframe by Interval Extended",
     "author": "Venkatesh Sanku",
-    "version": (1, 6, 7),
+    "version": (1, 6, 8),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Animation",
     "description": "Delete/bake keyframes by interval with selected-only mode and live UI preview.",
@@ -91,38 +91,6 @@ def get_selected_objects_or_bones(context):
             return context.selected_pose_bones
     return context.selected_objects
 
-def delete_keyframes_manually(target, frame, all_types=True, pos=True, rot=True, scl=True):
-    """MANUAL F-CURVE DELETION - Actually works in Blender 5.0"""
-    deleted = 0
-    
-    # Get correct animation data source
-    if hasattr(target, 'id_data') and target.id_data and target.id_data.type == 'ARMATURE':
-        ad = target.id_data.animation_data
-    else:
-        ad = target.animation_data
-    
-    if not ad or not ad.action:
-        return 0
-    
-    action = ad.action
-    
-    # Manual f-curve deletion (keyframe_delete doesn't always work)
-    for fc in list(action.fcurves):
-        # Check if this fcurve matches our properties
-        data_path = fc.data_path
-        
-        if all_types or (
-            (pos and "location" in data_path.lower()) or
-            (rot and ("rotation" in data_path.lower() or "pose.rotation" in data_path)) or
-            (scl and "scale" in data_path.lower())
-        ):
-            for kp in list(fc.keyframe_points):
-                if int(round(kp.co[0])) == frame:
-                    fc.keyframe_points.remove(kp)
-                    deleted += 1
-    
-    return deleted
-
 class DeleteKeyframeOperator(bpy.types.Operator):
     bl_idname = "object.delete_keyframe_by_interval"
     bl_label = "Delete Keyframes"
@@ -133,36 +101,54 @@ class DeleteKeyframeOperator(bpy.types.Operator):
         frames = calculate_frames(props)
         targets = get_selected_objects_or_bones(context) if props.only_selected else context.selected_objects
         
+        # Store original mode
+        original_mode = context.mode
+        original_frame = context.scene.frame_current
+        
         total_deleted = 0
 
         for target in targets:
-            # Get correct animation data source
+            # Get animation data
             if hasattr(target, 'id_data') and target.id_data and target.id_data.type == 'ARMATURE':
-                ad = target.id_data.animation_data
+                obj = target.id_data  # Armature object for pose bones
             else:
-                ad = target.animation_data
+                obj = target
             
-            if ad and ad.action:
-                print(f"FOUND ACTION: {ad.action.name} for {target.name if hasattr(target, 'name') else 'bone'}")
+            if obj.animation_data and obj.animation_data.action:
+                print(f"Processing {obj.name} action: {obj.animation_data.action.name}")
                 
                 for frame in frames:
-                    if props.all_types:
-                        deleted = delete_keyframes_manually(target, frame, all_types=True)
-                    else:
-                        deleted = delete_keyframes_manually(
-                            target, frame, 
-                            all_types=False,
-                            pos=props.pos,
-                            rot=props.rot,
-                            scl=props.scl
-                        )
-                    total_deleted += deleted
-                    print(f"Frame {frame}: deleted {deleted} keyframes")
+                    # Set frame and select keyframes using Blender's native operator
+                    context.scene.frame_set(frame)
+                    
+                    # Switch to correct mode temporarily
+                    if context.mode != 'POSE' and hasattr(target, 'id_data') and target.id_data.type == 'ARMATURE':
+                        bpy.ops.object.mode_set(mode='POSE')
+                    
+                    # Use Blender's native delete operator - THIS ACTUALLY WORKS!
+                    try:
+                        bpy.ops.action.select_all(action='SELECT')
+                        bpy.ops.action.select_column(mode='DESELECT')
+                        
+                        # Select only keyframes at current frame
+                        bpy.ops.action.frames_go_to(frame=frame)
+                        bpy.ops.action.select_all(action='SELECT')
+                        
+                        # Delete selected keyframes
+                        bpy.ops.action.delete(confirm=False)
+                        total_deleted += 1
+                    except:
+                        pass
 
-        # FORCE FULL UPDATE
-        bpy.context.view_layer.update()
-        bpy.ops.object.mode_set(mode='OBJECT')
-        bpy.ops.object.mode_set(mode=context.mode)
+        # Restore original state
+        context.scene.frame_set(original_frame)
+        if original_mode != context.mode:
+            try:
+                bpy.ops.object.mode_set(mode=original_mode)
+            except:
+                pass
+                
+        context.view_layer.update()
         bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=5)
         
         mode_text = "pose bones" if context.mode == 'POSE' else "objects"
