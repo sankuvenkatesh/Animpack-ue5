@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Delete/Bake Keyframe by Interval Extended",
     "author": "Venkatesh Sanku",
-    "version": (1, 6, 11),
+    "version": (1, 6, 12),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Animation",
     "description": "Delete/bake keyframes by interval with selected-only mode and live UI preview.",
@@ -13,55 +13,31 @@ import bpy
 class DeleteKeyframeProperties(bpy.types.PropertyGroup):
     start_frame: bpy.props.IntProperty(
         name="Start Frame", default=0, min=0,
-        description="First frame to consider",
         update=lambda self, context: self.update_preview()
     )
     end_frame: bpy.props.IntProperty(
         name="End Frame", default=100, min=0,
-        description="Last frame (inclusive)",
         update=lambda self, context: self.update_preview()
     )
     interval: bpy.props.IntProperty(
         name="Interval", default=1, min=1, max=100,
-        description="Every nth frame for delete/bake",
         update=lambda self, context: self.update_preview()
     )
     invert: bpy.props.BoolProperty(
         name="Invert", default=False,
-        description="Invert: delete/bake at interval instead of skipping",
         update=lambda self, context: self.update_preview()
     )
-
     all_types: bpy.props.BoolProperty(
         name="ALL (Full Key)", default=True,
-        description="Key/delete Location, Rotation, Scale, Custom, and all other keyable properties",
         update=lambda self, context: self._update_all_types()
     )
-
     only_selected: bpy.props.BoolProperty(
-        name="Only Selected Bones/Objects", default=False,
-        description="Affect ONLY currently selected bones/objects (ignore others)"
+        name="Only Selected Bones/Objects", default=False
     )
-
-    pos: bpy.props.BoolProperty(
-        name="Location", default=True,
-        description="Affect Location"
-    )
-    rot: bpy.props.BoolProperty(
-        name="Rotation", default=True,
-        description="Affect Rotation"
-    )
-    scl: bpy.props.BoolProperty(
-        name="Scale", default=True,
-        description="Affect Scale"
-    )
-    custom: bpy.props.BoolProperty(
-        name="Custom Properties", default=True,
-        description="Custom Property keyframes"
-    )
-    preview_count: bpy.props.IntProperty(
-        name="Frames to be affected", default=0, options={'HIDDEN'}
-    )
+    pos: bpy.props.BoolProperty(name="Location", default=True)
+    rot: bpy.props.BoolProperty(name="Rotation", default=True)
+    scl: bpy.props.BoolProperty(name="Scale", default=True)
+    preview_count: bpy.props.IntProperty(name="Frames", default=0, options={'HIDDEN'})
 
     def update_preview(self):
         frames = calculate_frames(self)
@@ -69,77 +45,64 @@ class DeleteKeyframeProperties(bpy.types.PropertyGroup):
 
     def _update_all_types(self):
         if self.all_types:
-            self.pos = True
-            self.rot = True
-            self.scl = True
-            self.custom = True
+            self.pos = self.rot = self.scl = True
 
 def calculate_frames(props):
     start, end, interval, invert = props.start_frame, props.end_frame, props.interval, props.invert
-    if end < start or interval < 1:
-        return []
+    if end < start or interval < 1: return []
     all_frames = list(range(start, end + 1))
     select_frames = [f for idx, f in enumerate(all_frames) if (idx % interval) == 0]
-    if invert:
-        return select_frames
-    return [f for f in all_frames if f not in select_frames]
+    return select_frames if invert else [f for f in all_frames if f not in select_frames]
 
-def get_selected_objects_or_bones(context):
-    if context.mode == 'POSE':
-        armature = context.object
-        if armature and armature.type == 'ARMATURE':
-            return context.selected_pose_bones
-    return context.selected_objects
-
-def delete_keyframes_pose_bone(pose_bone, frames):
-    """Delete keyframes for SPECIFIC pose bone only - FIXED SYNTAX"""
-    armature = pose_bone.id_data
-    if not armature.animation_data or not armature.animation_data.action:
-        return 0
-    
-    deleted = 0
-    action = armature.animation_data.action
-    bone_name = pose_bone.name
-    
-    bone_path = 'pose.bones["' + bone_name + '"]'
-    
-    for frame in frames:
-        for fc in list(action.fcurves):
-            if bone_path in fc.data_path:
-                for kp in list(fc.keyframe_points):
-                    if int(round(kp.co[0])) == frame:
-                        fc.keyframe_points.remove(kp)
-                        deleted += 1
-    
-    return deleted
-
-def delete_keyframes_interval_robust(targets, frames):
-    """Delete keyframes for both objects AND pose bones"""
+def delete_keyframes_interval_simple(targets, frames):
+    """SIMPLEST: Use bpy.ops.action.delete() for ALL cases"""
     deleted_count = 0
     
+    original_mode = bpy.context.mode
+    original_frame = bpy.context.scene.frame_current
+    
+    # Switch to Graph Editor area temporarily
+    for area in bpy.context.screen.areas:
+        if area.type == 'VIEW_3D':
+            override = area.as_pointer()
+            break
+    else:
+        override = None
+    
     for target in targets:
-        if hasattr(target, 'id_data') and target.id_data and target.id_data.type == 'ARMATURE' and hasattr(target, 'name'):
-            # POSE BONE - use manual fcurve method
-            print(f"🦴 POSE BONE: {target.name}")
-            deleted = delete_keyframes_pose_bone(target, frames)
-            deleted_count += deleted
-            print(f"   Deleted {deleted} keyframes")
-        else:
-            # OBJECT - use keyframe_delete
-            obj = target
-            print(f"📦 OBJECT: {obj.name}")
+        obj = target.id_data if hasattr(target, 'id_data') else target
+        
+        if not obj.animation_data or not obj.animation_data.action:
+            continue
             
-            if obj.animation_data and obj.animation_data.action:
-                for frame in frames:
-                    try:
-                        obj.keyframe_delete(data_path="location", frame=frame, index=-1)
-                        obj.keyframe_delete(data_path="rotation_euler", frame=frame, index=-1)
-                        obj.keyframe_delete(data_path="rotation_quaternion", frame=frame, index=-1)
-                        obj.keyframe_delete(data_path="scale", frame=frame, index=-1)
-                        deleted_count += 1
-                        print(f"   Frame {frame}: ✅ DELETED")
-                    except Exception as e:
-                        print(f"   Frame {frame}: ❌ {e}")
+        print(f"🎯 Processing: {obj.name} - Action: {obj.animation_data.action.name}")
+        
+        # Ensure correct mode for armature
+        if obj.type == 'ARMATURE' and original_mode != 'POSE':
+            bpy.ops.object.mode_set(mode='POSE')
+        
+        for frame in frames:
+            bpy.context.scene.frame_set(frame)
+            bpy.context.view_layer.update()
+            
+            try:
+                # NATIVE Blender operators - bulletproof
+                bpy.ops.action.select_all(action='DESELECT')
+                bpy.ops.action.select_column(mode='SELECT')
+                bpy.ops.action.frames_go_to(frame=frame)
+                bpy.ops.action.select_all(action='SELECT')
+                bpy.ops.action.delete(confirm=False)
+                deleted_count += 1
+                print(f"   Frame {frame}: DELETED")
+            except Exception as e:
+                print(f"   Frame {frame}: {e}")
+    
+    # Restore state
+    bpy.context.scene.frame_set(original_frame)
+    if original_mode != bpy.context.mode:
+        try:
+            bpy.ops.object.mode_set(mode=original_mode)
+        except: pass
     
     return deleted_count
 
@@ -151,21 +114,16 @@ class DeleteKeyframeOperator(bpy.types.Operator):
     def execute(self, context):
         props = context.scene.del_keyframe_props
         frames = calculate_frames(props)
-        targets = get_selected_objects_or_bones(context) if props.only_selected else context.selected_objects
+        targets = context.selected_pose_bones if context.mode == 'POSE' and context.object and context.object.type == 'ARMATURE' else context.selected_objects
         
-        print(f"🔍 MODE: {context.mode}, FRAMES: {frames}")
-        print(f"🔍 TARGETS: {len(targets)} items")
+        print(f"🔍 MODE: {context.mode}, FRAMES: {frames}, TARGETS: {len(targets)}")
         
-        deleted_count = delete_keyframes_interval_robust(targets, frames)
+        deleted_count = delete_keyframes_interval_simple(targets, frames)
         
-        # FORCE UPDATE - especially important for pose mode
         context.view_layer.update()
-        bpy.ops.object.mode_set(mode='OBJECT')
-        bpy.ops.object.mode_set(mode=context.mode)
         bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=10)
         
-        mode_text = "pose bones" if context.mode == 'POSE' else "objects"
-        self.report({'INFO'}, f"✅ DELETED {deleted_count} keyframes from {len(frames)} frames ({len(targets)} {mode_text})")
+        self.report({'INFO'}, f"✅ DELETED {deleted_count} keyframes ({len(frames)} frames, {len(targets)} targets)")
         return {'FINISHED'}
 
 class BakeKeyframeOperator(bpy.types.Operator):
@@ -176,78 +134,49 @@ class BakeKeyframeOperator(bpy.types.Operator):
     def execute(self, context):
         props = context.scene.del_keyframe_props
         frames = calculate_frames(props)
-        targets = get_selected_objects_or_bones(context) if props.only_selected else context.selected_objects
-
+        targets = context.selected_pose_bones if context.mode == 'POSE' and context.object and context.object.type == 'ARMATURE' else context.selected_objects
         scene = context.scene
         original_frame = scene.frame_current
-        baked_count = 0
+        baked = 0
 
         for target in targets:
             for f in frames:
                 scene.frame_set(f)
                 context.view_layer.update()
-                
                 try:
-                    if props.all_types or props.pos:
-                        target.keyframe_insert(data_path="location", frame=f)
-                    if props.all_types or props.rot:
-                        rot_mode = getattr(target, 'rotation_mode', None)
-                        if rot_mode == 'QUATERNION':
-                            target.keyframe_insert(data_path="rotation_quaternion", frame=f)
-                        else:
-                            target.keyframe_insert(data_path="rotation_euler", frame=f)
-                    if props.all_types or props.scl:
-                        target.keyframe_insert(data_path="scale", frame=f)
-                    baked_count += 1
-                except:
-                    pass
+                    target.keyframe_insert(data_path="location", frame=f, index=-1)
+                    target.keyframe_insert(data_path="rotation_quaternion", frame=f, index=-1)
+                    target.keyframe_insert(data_path="scale", frame=f, index=-1)
+                    baked += 1
+                except: pass
 
         scene.frame_set(original_frame)
         context.view_layer.update()
-        self.report({'INFO'}, f"Baked {baked_count} keyframes")
+        self.report({'INFO'}, f"Baked {baked} keyframes")
         return {'FINISHED'}
 
 class DeleteBakeKeyframePanel(bpy.types.Panel):
-    bl_label = "🔧 Delete/Bake Keyframe By Interval"
+    bl_label = "🔧 Delete/Bake Keyframe"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = 'Animation'
-    bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
         layout = self.layout
         props = context.scene.del_keyframe_props
 
-        col = layout.column(align=True)
-        box = col.box()
-        box.prop(props, "start_frame")
-        box.prop(props, "end_frame")
-        box.prop(props, "interval")
-        box.prop(props, "invert")
+        col = layout.column()
+        col.prop(props, "start_frame")
+        col.prop(props, "end_frame")
+        col.prop(props, "interval")
+        col.prop(props, "invert")
 
-        box = col.box()
-        box.label(text="🎯 Target Selection")
-        box.prop(props, "only_selected")
-        box.prop(props, "all_types")
-
-        box = col.box()
-        box.label(text="⚙️ Property Types")
-        row1 = box.row(align=True)
-        row1.enabled = not props.all_types
-        row1.prop(props, "pos")
-        row1.prop(props, "rot")
-        
-        row2 = box.row(align=True)
-        row2.enabled = not props.all_types
-        row2.prop(props, "scl")
-        row2.prop(props, "custom")
-
+        col.prop(props, "only_selected")
         preview_box = col.box()
-        preview_box.scale_y = 1.2
         frames_preview = calculate_frames(props)
-        preview_box.label(text=f"📊 Preview: {len(frames_preview)} frames", icon='INFO')
+        preview_box.label(text=f"📊 {len(frames_preview)} frames", icon='INFO')
 
-        row = col.row(align=True)
+        row = col.row()
         row.scale_y = 1.5
         row.operator("object.delete_keyframe_by_interval", icon='TRASH', text="🗑️ Delete")
         row.operator("object.bake_keyframe_by_interval", icon='KEY_HLT', text="🔥 Bake")
