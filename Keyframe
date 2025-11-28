@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Delete/Bake Keyframe by Interval Extended",
     "author": "Venkatesh Sanku",
-    "version": (1, 6, 10),
+    "version": (1, 6, 11),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Animation",
     "description": "Delete/bake keyframes by interval with selected-only mode and live UI preview.",
@@ -57,7 +57,7 @@ class DeleteKeyframeProperties(bpy.types.PropertyGroup):
     )
     custom: bpy.props.BoolProperty(
         name="Custom Properties", default=True,
-        description="Affect Custom Property keyframes"
+        description="Custom Property keyframes"
     )
     preview_count: bpy.props.IntProperty(
         name="Frames to be affected", default=0, options={'HIDDEN'}
@@ -92,20 +92,20 @@ def get_selected_objects_or_bones(context):
     return context.selected_objects
 
 def delete_keyframes_pose_bone(pose_bone, frames):
-    """Delete keyframes for SPECIFIC pose bone only"""
+    """Delete keyframes for SPECIFIC pose bone only - FIXED SYNTAX"""
     armature = pose_bone.id_data
     if not armature.animation_data or not armature.animation_data.action:
         return 0
     
     deleted = 0
     action = armature.animation_data.action
-    
     bone_name = pose_bone.name
     
+    bone_path = 'pose.bones["' + bone_name + '"]'
+    
     for frame in frames:
-        # Find fcurves for this specific bone
         for fc in list(action.fcurves):
-            if f"pose.bones["{bone_name}"]" in fc.data_path:
+            if bone_path in fc.data_path:
                 for kp in list(fc.keyframe_points):
                     if int(round(kp.co[0])) == frame:
                         fc.keyframe_points.remove(kp)
