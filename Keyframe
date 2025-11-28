@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Delete/Bake Keyframe by Interval Extended (Full Animation Cleanup)",
     "author": "Venkatesh Sanku",
-    "version": (1, 7, 1),
+    "version": (1, 7, 2),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Animation",
     "description": "Delete keyframes by interval with FULL fcurve cleanup - NO rest pose snapping.",
@@ -16,10 +16,15 @@ class DeleteKeyframeProperties(bpy.types.PropertyGroup):
     interval: bpy.props.IntProperty(name="Interval", default=1, min=1, update=lambda self, context: self.update_preview())
     invert: bpy.props.BoolProperty(name="Invert", default=False, update=lambda self, context: self.update_preview())
     only_selected: bpy.props.BoolProperty(name="Only Selected", default=False)
+    all_types: bpy.props.BoolProperty(name="ALL Properties", default=True, update=lambda self, context: self._update_all())
     preview_count: bpy.props.IntProperty(default=0, options={'HIDDEN'})
 
     def update_preview(self):
         self.preview_count = len(calculate_frames(self))
+
+    def _update_all(self):
+        if self.all_types:
+            pass  # Simplified for fcurve approach
 
 def calculate_frames(props):
     if props.end_frame < props.start_frame or props.interval < 1:
@@ -29,27 +34,39 @@ def calculate_frames(props):
     return selected if props.invert else [f for f in all_frames if f not in selected]
 
 def get_pose_bone_targets(context):
-    """FIXED: Proper selected pose bones detection"""
-    if context.mode == 'POSE' and context.object and context.object.type == 'ARMATURE':
+    """Get selected pose bones - FIXED for only_selected"""
+    if (context.mode == 'POSE' and 
+        context.object and 
+        context.object.type == 'ARMATURE'):
         armature = context.object
         props = context.scene.del_keyframe_props
         if props.only_selected:
-            return [pb for pb in armature.pose.bones if pb.bone.select]  # ✅ FIXED: Correct selection
-        return armature.pose.bones
+            # Only selected pose bones
+            selected_bones = [pb for pb in armature.pose.bones if pb.bone.select]
+            return selected_bones if selected_bones else []
+        else:
+            # All pose bones in the armature
+            return list(armature.pose.bones)
     return []
 
 def get_object_targets(context):
-    """FIXED: Proper selected objects detection"""
+    """Get selected objects - FIXED for only_selected"""
     props = context.scene.del_keyframe_props
     if props.only_selected:
-        return [obj for obj in context.selected_objects if obj.animation_data]  # ✅ FIXED: Only animated selected
-    return [obj for obj in context.scene.objects if obj.animation_data]
+        objs = [obj for obj in context.selected_objects if hasattr(obj, 'animation_data') and obj.animation_data]
+        return objs if objs else []
+    else:
+        # All objects with animation data in the scene
+        objs = [obj for obj in context.scene.objects 
+                if hasattr(obj, 'animation_data') and obj.animation_data]
+        return objs if objs else []
 
 def delete_keyframes_fcure_range(obj, start_frame, end_frame, frames_to_delete):
     """
     FULL CLEANUP: Delete keyframes by frame interval using F-Curves
+    Removes actual keyframe points from animation curves
     """
-    if not obj.animation_data or not obj.animation_data.action:
+    if not hasattr(obj, 'animation_data') or not obj.animation_data or not obj.animation_data.action:
         return 0
     
     action = obj.animation_data.action
@@ -98,8 +115,21 @@ class DeleteKeyframeOperator(bpy.types.Operator):
         
         total_deleted = 0
         
-        # Handle Pose Mode - FIXED only_selected
+        # Get targets FIRST - FIXED selection handling
         pose_bones = get_pose_bone_targets(context)
+        objects = get_object_targets(context)
+        
+        # FIXED: Robust validation for only_selected
+        if props.only_selected:
+            if not pose_bones and not objects:
+                self.report({'WARNING'}, "No selected objects or pose bones with animation data found")
+                return {'CANCELLED'}
+        else:
+            if not pose_bones and not objects:
+                self.report({'WARNING'}, "No objects or pose bones with animation data found")
+                return {'CANCELLED'}
+        
+        # Process pose bones if any
         if pose_bones:
             print(f"🦴 Processing {len(pose_bones)} pose bones...")
             for pb in pose_bones:
@@ -107,8 +137,7 @@ class DeleteKeyframeOperator(bpy.types.Operator):
                 total_deleted += deleted
                 print(f"  Bone '{pb.name}': deleted {deleted} keyframes")
         
-        # Handle Object Mode - FIXED only_selected  
-        objects = get_object_targets(context)
+        # Process objects if any
         if objects:
             print(f"📦 Processing {len(objects)} objects...")
             for obj in objects:
@@ -123,8 +152,11 @@ class DeleteKeyframeOperator(bpy.types.Operator):
         bpy.context.view_layer.depsgraph.update()
         bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
         
+        targets_count = len(pose_bones) + len(objects)
         mode = "pose bones" if pose_bones else "objects"
-        self.report({'INFO'}, f"✅ Deleted {total_deleted} keyframes from {len(pose_bones or objects)} {mode}")
+        if pose_bones and objects:
+            mode = "pose bones & objects"
+        self.report({'INFO'}, f"✅ Deleted {total_deleted} keyframes from {targets_count} {mode}")
         return {'FINISHED'}
 
 class BakeKeyframeOperator(bpy.types.Operator):
@@ -144,8 +176,19 @@ class BakeKeyframeOperator(bpy.types.Operator):
         original_frame = scene.frame_current
         baked_count = 0
         
+        # FIXED: Get targets with proper validation
         pose_bones = get_pose_bone_targets(context)
         objects = get_object_targets(context)
+        
+        # FIXED: Robust validation for only_selected
+        if props.only_selected:
+            if not pose_bones and not objects:
+                self.report({'WARNING'}, "No selected objects or pose bones found for baking")
+                return {'CANCELLED'}
+        else:
+            if not pose_bones and not objects:
+                self.report({'WARNING'}, "No objects or pose bones with animation data found for baking")
+                return {'CANCELLED'}
         
         for frame in frames_to_bake:
             scene.frame_set(frame)
@@ -153,9 +196,10 @@ class BakeKeyframeOperator(bpy.types.Operator):
             
             # Bake pose bones
             for pb in pose_bones:
-                pb.keyframe_insert(data_path="location", frame=frame)
-                pb.keyframe_insert(data_path="rotation_quaternion", frame=frame)
-                pb.keyframe_insert(data_path="scale", frame=frame)
+                armature = pb.id_data
+                armature.pose.bones[pb.name].keyframe_insert(data_path="location", frame=frame)
+                armature.pose.bones[pb.name].keyframe_insert(data_path="rotation_quaternion", frame=frame)
+                armature.pose.bones[pb.name].keyframe_insert(data_path="scale", frame=frame)
                 baked_count += 3
             
             # Bake objects
@@ -193,6 +237,14 @@ class DeleteBakeKeyframePanel(bpy.types.Panel):
         layout.separator()
         layout.prop(props, "only_selected")
         layout.label(text=f"Preview: {props.preview_count} frames")
+        
+        # Status info
+        pose_bones = get_pose_bone_targets(context)
+        objects = get_object_targets(context)
+        if props.only_selected:
+            layout.label(text=f"Targets: {len(pose_bones)} bones, {len(objects)} objects")
+        else:
+            layout.label(text=f"Total: {len(pose_bones)} bones, {len(objects)} objects")
         
         # Buttons
         row = layout.row(align=True)
