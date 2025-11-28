@@ -118,7 +118,7 @@ def delete_keyframes_interval_robust(targets, frames):
     deleted_count = 0
     
     for target in targets:
-        if hasattr(target, 'id_data') and target.id_data.type == 'ARMATURE' and hasattr(target, 'name'):
+        if hasattr(target, 'id_data') and target.id_data and target.id_data.type == 'ARMATURE' and hasattr(target, 'name'):
             # POSE BONE - use manual fcurve method
             print(f"🦴 POSE BONE: {target.name}")
             deleted = delete_keyframes_pose_bone(target, frames)
@@ -269,5 +269,5 @@ def unregister():
         bpy.utils.unregister_class(cls)
     del bpy.types.Scene.del_keyframe_props
 
-if __name__ == "__MAIN__":
+if __name__ == "__main__":
     register()
