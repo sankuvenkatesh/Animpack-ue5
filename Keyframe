@@ -34,28 +34,26 @@ def calculate_frames(props):
     return selected if props.invert else [f for f in all_frames if f not in selected]
 
 def get_pose_bone_targets(context):
-    """Get selected pose bones - FIXED"""
+    """Get selected pose bones ONLY when only_selected is True, otherwise all bones"""
     if context.mode == 'POSE' and context.object and context.object.type == 'ARMATURE':
         armature = context.object
         if context.scene.del_keyframe_props.only_selected:
-            selected_bones = [pb for pb in armature.pose.bones if pb.bone.select]
-            return selected_bones if selected_bones else []
-        return armature.pose.bones
+            return [pb for pb in armature.pose.bones if pb.bone.select]  # Only selected bones
+        return armature.pose.bones  # All bones
     return []
 
 def get_object_targets(context):
-    """Get selected objects - FIXED"""
+    """Get selected objects ONLY when only_selected is True, otherwise all animated objects"""
     if context.scene.del_keyframe_props.only_selected:
-        objs = [obj for obj in context.selected_objects if hasattr(obj, 'animation_data') and obj.animation_data]
-        return objs if objs else []
-    return [obj for obj in context.scene.objects if hasattr(obj, 'animation_data') and obj.animation_data]
+        return [obj for obj in context.selected_objects if obj.animation_data]  # Only selected objects
+    return [obj for obj in context.scene.objects if obj.animation_data]  # All animated objects
 
 def delete_keyframes_fcure_range(obj, start_frame, end_frame, frames_to_delete):
     """
     FULL CLEANUP: Delete keyframes by frame interval using F-Curves
     Removes actual keyframe points from animation curves
     """
-    if not hasattr(obj, 'animation_data') or not obj.animation_data or not obj.animation_data.action:
+    if not obj.animation_data or not obj.animation_data.action:
         return 0
     
     action = obj.animation_data.action
@@ -104,12 +102,8 @@ class DeleteKeyframeOperator(bpy.types.Operator):
         
         total_deleted = 0
         
-        # Handle Pose Mode
+        # Handle Pose Mode - ONLY selected bones when only_selected=True
         pose_bones = get_pose_bone_targets(context)
-        if props.only_selected and not pose_bones:
-            self.report({'WARNING'}, "No pose bones selected")
-            return {'CANCELLED'}
-        
         if pose_bones:
             print(f"🦴 Processing {len(pose_bones)} pose bones...")
             for pb in pose_bones:
@@ -117,12 +111,8 @@ class DeleteKeyframeOperator(bpy.types.Operator):
                 total_deleted += deleted
                 print(f"  Bone '{pb.name}': deleted {deleted} keyframes")
         
-        # Handle Object Mode  
+        # Handle Object Mode - ONLY selected objects when only_selected=True  
         objects = get_object_targets(context)
-        if props.only_selected and not objects and not pose_bones:
-            self.report({'WARNING'}, "No selected objects found")
-            return {'CANCELLED'}
-        
         if objects:
             print(f"📦 Processing {len(objects)} objects...")
             for obj in objects:
@@ -159,20 +149,13 @@ class BakeKeyframeOperator(bpy.types.Operator):
         baked_count = 0
         
         pose_bones = get_pose_bone_targets(context)
-        if props.only_selected and not pose_bones:
-            self.report({'WARNING'}, "No pose bones selected")
-            return {'CANCELLED'}
-        
         objects = get_object_targets(context)
-        if props.only_selected and not objects and not pose_bones:
-            self.report({'WARNING'}, "No selected objects found")
-            return {'CANCELLED'}
         
         for frame in frames_to_bake:
             scene.frame_set(frame)
             context.view_layer.update()
             
-            # Bake pose bones
+            # Bake pose bones - ONLY selected bones when only_selected=True
             for pb in pose_bones:
                 armature = pb.id_data
                 armature.pose.bones[pb.name].keyframe_insert(data_path="location", frame=frame)
@@ -180,7 +163,7 @@ class BakeKeyframeOperator(bpy.types.Operator):
                 armature.pose.bones[pb.name].keyframe_insert(data_path="scale", frame=frame)
                 baked_count += 3
             
-            # Bake objects
+            # Bake objects - ONLY selected objects when only_selected=True
             for obj in objects:
                 obj.keyframe_insert(data_path="location", frame=frame)
                 obj.keyframe_insert(data_path="rotation_quaternion", frame=frame)
