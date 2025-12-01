@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Delete/Bake Keyframe by Interval Extended",
     "author": "Venkatesh Sanku",
-    "version": (1, 6, 16),
+    "version": (1, 6, 17),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Animation",
-    "description": "Delete/bake keyframes by interval with selected-only mode and live UI preview - POSE BONE ACTION.DELETE FIXED",
+    "description": "Delete/bake keyframes by interval with selected-only mode and live UI preview - ATTRIBUTE ERROR FIXED",
     "category": "Animation",
 }
 
@@ -92,9 +92,9 @@ def get_selected_objects_or_bones(context):
     return context.selected_objects
 
 def delete_keyframes_pose_bone(pose_bone, frames):
-    """Delete keyframes for SPECIFIC pose bone only using direct F-Curve deletion - FIXED"""
+    """Delete keyframes for SPECIFIC pose bone only - BULLETPROOF POSE FIX"""
     armature = pose_bone.id_data
-    if not armature.animation_data or not armature.animation_data.action:
+    if not armature or not armature.animation_data or not armature.animation_data.action:
         return 0
     
     deleted = 0
@@ -116,36 +116,46 @@ def delete_keyframes_pose_bone(pose_bone, frames):
                     deleted += 1
                     break  # Only one per frame per fcurve
     
-    if action:
-        action.update()  # Force action update
+    action.update()  # Force action update
     return deleted
 
 def delete_keyframes_interval_robust(targets, frames):
-    """Delete keyframes for both objects AND pose bones - ORIGINAL LOGIC RESTORED"""
+    """Delete keyframes for both objects AND pose bones - ATTRIBUTE ERROR FIXED"""
     deleted_count = 0
     
     for target in targets:
-        if hasattr(target, 'id_data') and target.id_data and target.id_data.type == 'ARMATURE' and hasattr(target, 'name'):
-            # POSE BONE - ORIGINAL BULLETPROOF LOGIC (UNCHANGED)
-            print(f"🦴 POSE BONE: {target.name}")
-            deleted = delete_keyframes_pose_bone(target, frames)
-            deleted_count += deleted
-            print(f"   Deleted {deleted} keyframes from bone")
-        else:
-            # OBJECT - UNCHANGED ORIGINAL LOGIC
-            obj = target
-            print(f"📦 OBJECT: {obj.name}")
-            
-            if obj.animation_data and obj.animation_data.action:
-                for frame in frames:
-                    try:
-                        obj.keyframe_delete(data_path="location", frame=frame, index=-1)
-                        obj.keyframe_delete(data_path="rotation_euler", frame=frame, index=-1)
-                        obj.keyframe_delete(data_path="rotation_quaternion", frame=frame, index=-1)
-                        obj.keyframe_delete(data_path="scale", frame=frame, index=-1)
-                        deleted_count += 1
-                    except Exception as e:
-                        print(f"   Frame {frame}: ❌ {e}")
+        # SAFER POSE BONE CHECK - FIXED ATTRIBUTE ERROR
+        try:
+            if (hasattr(target, 'id_data') and 
+                target.id_data and 
+                target.id_data.type == 'ARMATURE' and 
+                hasattr(target, 'name')):
+                # POSE BONE
+                print(f"🦴 POSE BONE: {target.name}")
+                deleted = delete_keyframes_pose_bone(target, frames)
+                deleted_count += deleted
+                print(f"   Deleted {deleted} keyframes from bone")
+            else:
+                # OBJECT
+                obj = target
+                if hasattr(obj, 'name'):
+                    print(f"📦 OBJECT: {obj.name}")
+                    
+                    if hasattr(obj, 'animation_data') and obj.animation_data and obj.animation_data.action:
+                        for frame in frames:
+                            try:
+                                obj.keyframe_delete(data_path="location", frame=frame, index=-1)
+                                obj.keyframe_delete(data_path="rotation_euler", frame=frame, index=-1)
+                                obj.keyframe_delete(data_path="rotation_quaternion", frame=frame, index=-1)
+                                obj.keyframe_delete(data_path="scale", frame=frame, index=-1)
+                                deleted_count += 1
+                            except Exception as e:
+                                print(f"   Frame {frame}: ❌ {e}")
+                else:
+                    print(f"⚠️  Skipping target without name attribute")
+        except Exception as e:
+            print(f"❌ Error processing target: {e}")
+            continue
     
     return deleted_count
 
