@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Delete/Bake Keyframe by Interval Extended",
     "author": "Venkatesh Sanku",
-    "version": (1, 6, 15),
+    "version": (1, 6, 16),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Animation",
     "description": "Delete/bake keyframes by interval with selected-only mode and live UI preview - POSE BONE ACTION.DELETE FIXED",
@@ -82,7 +82,7 @@ def calculate_frames(props):
     select_frames = [f for idx, f in enumerate(all_frames) if (idx % interval) == 0]
     if invert:
         return select_frames
-    return [f for f in all_frames if f in select_frames]
+    return [f for f in all_frames if f not in select_frames]
 
 def get_selected_objects_or_bones(context):
     if context.mode == 'POSE':
@@ -92,7 +92,7 @@ def get_selected_objects_or_bones(context):
     return context.selected_objects
 
 def delete_keyframes_pose_bone(pose_bone, frames):
-    """Delete keyframes for SPECIFIC pose bone only using bpy.ops.action.delete(confirm=False)"""
+    """Delete keyframes for SPECIFIC pose bone only using direct F-Curve deletion - FIXED"""
     armature = pose_bone.id_data
     if not armature.animation_data or not armature.animation_data.action:
         return 0
@@ -100,49 +100,33 @@ def delete_keyframes_pose_bone(pose_bone, frames):
     deleted = 0
     action = armature.animation_data.action
     bone_name = pose_bone.name
+    bone_path = 'pose.bones["' + bone_name + '"]'
     
-    # Store original context
-    original_active = bpy.context.view_layer.objects.active
-    original_mode = bpy.context.mode
+    # Get ALL fcurves for this bone first
+    bone_fcurves = []
+    for fc in action.fcurves:
+        if bone_path in fc.data_path:
+            bone_fcurves.append(fc)
     
-    try:
-        # Make armature active and switch to pose mode
-        bpy.context.view_layer.objects.active = armature
-        bpy.ops.object.mode_set(mode='POSE')
-        
-        # Ensure only this bone is selected
-        for pb in armature.pose.bones:
-            pb.bone.select = (pb.name == bone_name)
-        
-        # Process each frame
+    for fc in bone_fcurves:
         for frame in frames:
-            try:
-                bpy.context.scene.frame_current = frame
-                bpy.ops.action.select_all(action='DESELECT')
-                bpy.ops.action.select_column(mode='CFRA')
-                bpy.ops.action.delete(confirm=False)
-                deleted += 1
-            except RuntimeError:
-                continue  # Skip if no keys or context error
-        
-        if action:
-            action.update()
-            
-    finally:
-        # Restore original context
-        bpy.context.view_layer.objects.active = original_active
-        if original_mode != 'POSE' and bpy.context.object == armature:
-            bpy.ops.object.mode_set(mode=original_mode)
+            for kp in list(fc.keyframe_points):
+                if abs(kp.co[0] - frame) < 1.0:  # Float precision fix
+                    fc.keyframe_points.remove(kp)
+                    deleted += 1
+                    break  # Only one per frame per fcurve
     
+    if action:
+        action.update()  # Force action update
     return deleted
 
 def delete_keyframes_interval_robust(targets, frames):
-    """Delete keyframes for both objects AND pose bones - POSE BONE ACTION.DELETE FIXED"""
+    """Delete keyframes for both objects AND pose bones - ORIGINAL LOGIC RESTORED"""
     deleted_count = 0
     
     for target in targets:
         if hasattr(target, 'id_data') and target.id_data and target.id_data.type == 'ARMATURE' and hasattr(target, 'name'):
-            # POSE BONE - NEW ACTION.DELETE LOGIC
+            # POSE BONE - ORIGINAL BULLETPROOF LOGIC (UNCHANGED)
             print(f"🦴 POSE BONE: {target.name}")
             deleted = delete_keyframes_pose_bone(target, frames)
             deleted_count += deleted
