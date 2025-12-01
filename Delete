@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Delete/Bake Keyframe by Interval Extended",
     "author": "Venkatesh Sanku",
-    "version": (1, 6, 21),
+    "version": (1, 6, 22),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Animation",
-    "description": "Delete/bake keyframes by interval - VALUE ERROR FIXED + KEY DELETION CONFIRMED",
+    "description": "Delete/bake keyframes by interval - CONSISTENT DELETION FIXED",
     "category": "Animation",
 }
 
@@ -91,38 +91,88 @@ def get_selected_objects_or_bones(context):
             return context.selected_pose_bones
     return context.selected_objects
 
-def delete_keyframes_pose_bone(pose_bone, frames_set):
-    """Delete keyframes using keyframe_delete - SIMPLIFIED AND WORKING"""
+def delete_keyframes_pose_bone(pose_bone, frames):
+    """Delete keyframes for pose bone - CONSISTENT WITH FRAME TOLERANCE"""
     armature = pose_bone.id_data
     if not armature or not armature.animation_data or not armature.animation_data.action:
         return 0
     
     deleted = 0
+    action = armature.animation_data.action
     bone_name = pose_bone.name
+    bone_path = f'pose.bones["{bone_name}"]'
     
-    # Use keyframe_delete directly on pose bone (works reliably)
+    # Find ALL F-Curves for this bone (including custom properties)
+    bone_fcurves = [fc for fc in action.fcurves if fc.data_path.startswith(bone_path)]
+    
+    for fc in bone_fcurves:
+        keyframes_to_remove = []
+        
+        # Mark keyframes within ±0.5 frame tolerance of target frames
+        for kp in fc.keyframe_points:
+            kp_frame = kp.co[0]
+            for target_frame in frames:
+                if abs(kp_frame - target_frame) <= 0.5:  # Tolerant matching
+                    keyframes_to_remove.append(kp)
+                    break
+        
+        # Remove marked keyframes
+        for kp in keyframes_to_remove:
+            fc.keyframe_points.remove(kp)
+            deleted += 1
+    
+    # ALSO try keyframe_delete as backup
     try:
-        for frame in frames_set:
-            # Location (XYZ)
-            if armature.pose.bones[bone_name].keyframe_delete(data_path="location", frame=frame, index=-1):
-                deleted += 1
-            # Rotation (Euler or Quaternion)
-            if armature.pose.bones[bone_name].keyframe_delete(data_path="rotation_euler", frame=frame, index=-1):
-                deleted += 1
-            if armature.pose.bones[bone_name].keyframe_delete(data_path="rotation_quaternion", frame=frame, index=-1):
-                deleted += 1
-            # Scale (XYZ)
-            if armature.pose.bones[bone_name].keyframe_delete(data_path="scale", frame=frame, index=-1):
-                deleted += 1
+        for frame in frames:
+            pose_bone.keyframe_delete(data_path="location", frame=frame, index=-1)
+            pose_bone.keyframe_delete(data_path="rotation_euler", frame=frame, index=-1)
+            pose_bone.keyframe_delete(data_path="rotation_quaternion", frame=frame, index=-1)
+            pose_bone.keyframe_delete(data_path="scale", frame=frame, index=-1)
     except:
         pass
+    
+    action.update()
+    return deleted
+
+def delete_keyframes_object(obj, frames):
+    """Delete keyframes for objects - DUAL METHOD"""
+    deleted = 0
+    
+    # Method 1: keyframe_delete (primary)
+    for frame in frames:
+        try:
+            if obj.keyframe_delete(data_path="location", frame=frame, index=-1):
+                deleted += 1
+            if obj.keyframe_delete(data_path="rotation_euler", frame=frame, index=-1):
+                deleted += 1
+            if obj.keyframe_delete(data_path="rotation_quaternion", frame=frame, index=-1):
+                deleted += 1
+            if obj.keyframe_delete(data_path="scale", frame=frame, index=-1):
+                deleted += 1
+        except:
+            pass
+    
+    # Method 2: F-Curve backup for any missed keys
+    if obj.animation_data and obj.animation_data.action:
+        action = obj.animation_data.action
+        for fc in action.fcurves:
+            keyframes_to_remove = []
+            for kp in fc.keyframe_points:
+                kp_frame = kp.co[0]
+                for frame in frames:
+                    if abs(kp_frame - frame) <= 0.5:
+                        keyframes_to_remove.append(kp)
+                        break
+            for kp in keyframes_to_remove:
+                fc.keyframe_points.remove(kp)
+                deleted += 1
+        action.update()
     
     return deleted
 
 def delete_keyframes_interval_robust(targets, frames):
-    """Delete keyframes - SIMPLIFIED RELIABLE METHOD"""
+    """Delete keyframes - DUAL METHOD FOR CONSISTENCY"""
     deleted_count = 0
-    frames_set = set(frames)  # Faster lookup
     
     for target in targets:
         try:
@@ -130,30 +180,17 @@ def delete_keyframes_interval_robust(targets, frames):
                 target.id_data and 
                 target.id_data.type == 'ARMATURE' and 
                 hasattr(target, 'name')):
-                # POSE BONE - USE keyframe_delete
-                print(f"🦴 POSE BONE: {target.name}")
-                deleted = delete_keyframes_pose_bone(target, frames_set)
+                # POSE BONE
+                deleted = delete_keyframes_pose_bone(target, frames)
                 deleted_count += deleted
-                print(f"   Deleted {deleted} keyframes")
             else:
-                # OBJECT - keyframe_delete
+                # OBJECT
                 obj = target
                 if hasattr(obj, 'name'):
-                    print(f"📦 OBJECT: {obj.name}")
-                    for frame in frames_set:
-                        try:
-                            if obj.keyframe_delete(data_path="location", frame=frame, index=-1):
-                                deleted_count += 1
-                            if obj.keyframe_delete(data_path="rotation_euler", frame=frame, index=-1):
-                                deleted_count += 1
-                            if obj.keyframe_delete(data_path="rotation_quaternion", frame=frame, index=-1):
-                                deleted_count += 1
-                            if obj.keyframe_delete(data_path="scale", frame=frame, index=-1):
-                                deleted_count += 1
-                        except:
-                            pass
+                    deleted = delete_keyframes_object(obj, frames)
+                    deleted_count += deleted
         except Exception as e:
-            print(f"❌ Error: {e}")
+            print(f"❌ Error processing target: {e}")
             continue
     
     return deleted_count
@@ -173,16 +210,17 @@ class DeleteKeyframeOperator(bpy.types.Operator):
         
         deleted_count = delete_keyframes_interval_robust(targets, frames)
         
-        # SIMPLE RELIABLE UPDATE - NO VALUE ERRORS
+        # COMPREHENSIVE UPDATE
         context.view_layer.update()
-        bpy.context.view_layer.depsgraph.update()
+        if context.view_layer.depsgraph:
+            context.view_layer.depsgraph.update()
         
-        # Redraw areas
+        # Force redraw ALL animation editors
         for area in context.screen.areas:
-            if area.type in {'VIEW_3D', 'DOPESHEET_EDITOR', 'GRAPH_EDITOR'}:
+            if area.type in {'VIEW_3D', 'DOPESHEET_EDITOR', 'GRAPH_EDITOR', 'TIMELINE'}:
                 area.tag_redraw()
         
-        bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
+        bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=2)
         
         mode_text = "pose bones" if context.mode == 'POSE' else "objects"
         self.report({'INFO'}, f"✅ DELETED {deleted_count} keyframes ({len(targets)} {mode_text})")
