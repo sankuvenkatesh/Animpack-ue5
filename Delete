@@ -1,15 +1,14 @@
 bl_info = {
     "name": "Delete/Bake Keyframe by Interval Extended",
     "author": "Venkatesh Sanku",
-    "version": (1, 6, 19),
+    "version": (1, 6, 20),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Animation",
-    "description": "Delete/bake keyframes by interval - KEYFRAME DELETION FIXED",
+    "description": "Delete/bake keyframes by interval with selected-only mode and live UI preview - DEPSGRAPH UPDATE FIXED",
     "category": "Animation",
 }
 
 import bpy
-import bmesh
 
 class DeleteKeyframeProperties(bpy.types.PropertyGroup):
     start_frame: bpy.props.IntProperty(
@@ -103,35 +102,27 @@ def delete_keyframes_pose_bone(pose_bone, frames):
     bone_name = pose_bone.name
     bone_path = f'pose.bones["{bone_name}"]'
     
-    print(f"🔍 Searching F-Curves for bone: {bone_path}")
-    
-    # Get ALL fcurves for this bone - FIXED MATCHING
     bone_fcurves = [fc for fc in action.fcurves if bone_path in fc.data_path]
-    print(f"   Found {len(bone_fcurves)} F-Curves")
     
     for fc in bone_fcurves:
-        print(f"   Processing F-Curve: {fc.data_path}")
         keyframes_to_remove = []
         
-        # Find keyframes to delete FIRST (don't modify during iteration)
+        # Mark keyframes for deletion
         for kp in fc.keyframe_points:
-            frame = round(kp.co[0])  # Convert to integer frame
+            frame = round(kp.co[0])  # integer frame
             if frame in frames:
                 keyframes_to_remove.append(kp)
-                print(f"      Found keyframe at frame {frame} - MARKED FOR DELETION")
         
-        # Now delete them
+        # Actually remove keyframes
         for kp in keyframes_to_remove:
             fc.keyframe_points.remove(kp)
             deleted += 1
-            print(f"      DELETED keyframe at {round(kp.co[0])}")
     
     action.update()
-    print(f"✅ Total deleted for bone {bone_name}: {deleted}")
     return deleted
 
 def delete_keyframes_interval_robust(targets, frames):
-    """Delete keyframes for both objects AND pose bones - DEBUG FIXED"""
+    """Delete keyframes for both objects AND pose bones with depsgraph-safe updates"""
     deleted_count = 0
     
     for target in targets:
@@ -141,22 +132,15 @@ def delete_keyframes_interval_robust(targets, frames):
                 target.id_data.type == 'ARMATURE' and 
                 hasattr(target, 'name')):
                 # POSE BONE
-                print(f"🦴 PROCESSING POSE BONE: {target.name}")
                 deleted = delete_keyframes_pose_bone(target, frames)
                 deleted_count += deleted
             else:
                 # OBJECT
                 obj = target
                 if hasattr(obj, 'name'):
-                    print(f"📦 PROCESSING OBJECT: {obj.name}")
-                    
                     if hasattr(obj, 'animation_data') and obj.animation_data and obj.animation_data.action:
-                        action = obj.animation_data.action
-                        print(f"   Action: {action.name}, F-Curves: {len(action.fcurves)}")
-                        
                         for frame in frames:
                             try:
-                                # Try multiple delete calls and count successes
                                 if obj.keyframe_delete(data_path="location", frame=frame, index=-1):
                                     deleted_count += 1
                                 if obj.keyframe_delete(data_path="rotation_euler", frame=frame, index=-1):
@@ -167,8 +151,6 @@ def delete_keyframes_interval_robust(targets, frames):
                                     deleted_count += 1
                             except Exception as e:
                                 print(f"   Frame {frame}: ❌ {e}")
-                else:
-                    print(f"⚠️  Skipping target without name")
         except Exception as e:
             print(f"❌ Error processing target: {e}")
             continue
@@ -185,24 +167,18 @@ class DeleteKeyframeOperator(bpy.types.Operator):
         frames = calculate_frames(props)
         targets = get_selected_objects_or_bones(context) if props.only_selected else context.selected_objects
         
-        print(f"
-🔍 DELETE OPERATION STARTED")
-        print(f"   MODE: {context.mode}")
-        print(f"   FRAMES TO DELETE: {frames}")
-        print(f"   TARGETS: {[t.name if hasattr(t, 'name') else str(t) for t in targets]}")
-        
         deleted_count = delete_keyframes_interval_robust(targets, frames)
         
-        # FORCE FULL UPDATE
+        # Force dependency graph and viewport update
         context.view_layer.update()
         for area in context.screen.areas:
-            if area.type == 'VIEW_3D':
+            if area.type in {'VIEW_3D', 'GRAPH_EDITOR', 'DOPESHEET_EDITOR'}:
                 area.tag_redraw()
-        bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
+        bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=2)
+        context.window_manager.update_tag(refresh={'ALL'})
         
         mode_text = "pose bones" if context.mode == 'POSE' else "objects"
         self.report({'INFO'}, f"✅ DELETED {deleted_count} keyframes from {len(frames)} frames ({len(targets)} {mode_text})")
-        print(f"🎉 OPERATION COMPLETE: {deleted_count} keyframes deleted")
         return {'FINISHED'}
 
 class BakeKeyframeOperator(bpy.types.Operator):
@@ -223,7 +199,6 @@ class BakeKeyframeOperator(bpy.types.Operator):
             for f in frames:
                 scene.frame_set(f)
                 context.view_layer.update()
-                
                 try:
                     if props.all_types or props.pos:
                         target.keyframe_insert(data_path="location", frame=f)
