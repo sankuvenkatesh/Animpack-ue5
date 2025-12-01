@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Delete/Bake Keyframe by Interval Extended",
     "author": "Venkatesh Sanku",
-    "version": (1, 6, 17),
+    "version": (1, 6, 18),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Animation",
-    "description": "Delete/bake keyframes by interval with selected-only mode and live UI preview - ATTRIBUTE ERROR FIXED",
+    "description": "Delete/bake keyframes by interval with selected-only mode and live UI preview - POSE UPDATE FIXED",
     "category": "Animation",
 }
 
@@ -180,7 +180,6 @@ class DeleteKeyframeOperator(bpy.types.Operator):
                 area.tag_redraw()
         
         if context.mode == 'POSE':
-            bpy.ops.pose.anim_channels_update()
             context.view_layer.update()
         
         bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
