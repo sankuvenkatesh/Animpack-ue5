@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Delete/Bake Keyframe by Interval Extended",
     "author": "Venkatesh Sanku",
-    "version": (1, 6, 28),
+    "version": (1, 6, 29),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Animation",
-    "description": "Delete/bake keyframes by interval (robust object + pose bone F-Curve delete)",
+    "description": "Delete/bake keyframes by interval with frame tolerance and debug logging",
     "category": "Animation",
 }
 
@@ -91,31 +91,37 @@ def get_selected_objects_or_bones(context):
             return context.selected_pose_bones
     return context.selected_objects
 
-# ------------- CORE DELETE LOGIC (FIXED) -------------
+# ------------- CORE DELETE LOGIC (WITH TOLERANCE + DEBUG) -------------
 
 def delete_keyframes_pose_bone(pose_bone, frames):
-    """Delete keyframes on given frames for a single pose bone via F-Curves."""
+    """Delete keyframes on given frames for a single pose bone with ±0.5 frame tolerance."""
     arm = pose_bone.id_data
     if not arm or not arm.animation_data or not arm.animation_data.action:
+        print(f"[DEBUG] No action for pose bone: {pose_bone.name}")
         return 0
 
     action = arm.animation_data.action
     bone_name = pose_bone.name
-    frames_set = set(frames)
     deleted = 0
+    frames_set = set(frames)
 
-    # In an armature action, pose bone paths contain ["BoneName"]
-    marker = f'["{bone_name}"]'
+    bone_marker = f'["{bone_name}"]'
+    
+    print(f"[DEBUG] Scanning bone: {bone_name}, Frames to delete: {sorted(frames_set)}")
 
     for fc in action.fcurves:
-        if marker not in fc.data_path:
+        if bone_marker not in fc.data_path:
             continue
 
         to_remove = []
         for kp in fc.keyframe_points:
-            f_int = round(kp.co[0])
-            if f_int in frames_set:
+            frame_val = kp.co[0]
+            # Match within ±0.5 frames tolerance
+            if any(abs(frame_val - f) <= 0.5 for f in frames_set):
                 to_remove.append(kp)
+
+        if to_remove:
+            print(f"[DEBUG] Deleting {len(to_remove)} keyframes from {fc.data_path}")
 
         for kp in to_remove:
             fc.keyframe_points.remove(kp)
@@ -123,23 +129,34 @@ def delete_keyframes_pose_bone(pose_bone, frames):
 
     if deleted:
         action.update()
+        print(f"[DEBUG] ✅ Deleted {deleted} keyframes from bone {bone_name}")
+    else:
+        print(f"[DEBUG] ⚠️ No keyframes deleted from bone {bone_name}")
+
     return deleted
 
 def delete_keyframes_object(obj, frames):
-    """Delete keyframes on given frames for an object via F-Curves."""
+    """Delete keyframes on given frames for an object with ±0.5 frame tolerance."""
     if not obj.animation_data or not obj.animation_data.action:
+        print(f"[DEBUG] No action for object: {obj.name}")
         return 0
 
     action = obj.animation_data.action
-    frames_set = set(frames)
     deleted = 0
+    frames_set = set(frames)
+
+    print(f"[DEBUG] Scanning object: {obj.name}, Frames to delete: {sorted(frames_set)}")
 
     for fc in action.fcurves:
         to_remove = []
         for kp in fc.keyframe_points:
-            f_int = round(kp.co[0])
-            if f_int in frames_set:
+            frame_val = kp.co[0]
+            # Match within ±0.5 frames tolerance
+            if any(abs(frame_val - f) <= 0.5 for f in frames_set):
                 to_remove.append(kp)
+
+        if to_remove:
+            print(f"[DEBUG] Deleting {len(to_remove)} keyframes from {fc.data_path}")
 
         for kp in to_remove:
             fc.keyframe_points.remove(kp)
@@ -147,11 +164,21 @@ def delete_keyframes_object(obj, frames):
 
     if deleted:
         action.update()
+        print(f"[DEBUG] ✅ Deleted {deleted} keyframes from object {obj.name}")
+    else:
+        print(f"[DEBUG] ⚠️ No keyframes deleted from object {obj.name}")
+
     return deleted
 
 def delete_keyframes_interval_robust(targets, frames):
     """Dispatch deletion for each target (pose bone or object)."""
     deleted_count = 0
+    
+    print(f"
+[DEBUG] ========== DELETE OPERATION START ==========")
+    print(f"[DEBUG] Total targets: {len(targets)}")
+    print(f"[DEBUG] Frames to delete: {sorted(frames)}")
+    
     for target in targets:
         try:
             # Pose bone
@@ -161,8 +188,11 @@ def delete_keyframes_interval_robust(targets, frames):
             elif hasattr(target, "animation_data"):
                 deleted_count += delete_keyframes_object(target, frames)
         except Exception as e:
-            print(f"Error deleting keyframes for target {getattr(target, 'name', str(target))}: {e}")
+            print(f"[DEBUG] ❌ Error deleting keyframes for target {getattr(target, 'name', str(target))}: {e}")
             continue
+    
+    print(f"[DEBUG] ========== TOTAL DELETED: {deleted_count} ==========
+")
     return deleted_count
 
 # ------------- OPERATORS / UI -------------
