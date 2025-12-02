@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Delete/Bake Keyframe by Interval Extended",
     "author": "Venkatesh Sanku",
-    "version": (1, 6, 26),
+    "version": (1, 6, 27),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Animation",
-    "description": "Delete/bake keyframes by interval - OPERATOR-BASED DELETION (GUARANTEED)",
+    "description": "Delete/bake keyframes by interval with operator-based deletion per frame",
     "category": "Animation",
 }
 
@@ -92,50 +92,54 @@ def get_selected_objects_or_bones(context):
     return context.selected_objects
 
 def delete_keyframes_with_operators(context, targets, frames):
-    """Use Blender's native operators - 100% reliable like manual Alt+I deletion"""
     deleted_count = 0
     original_mode = context.mode
     original_frame = context.scene.frame_current
-    
+
     try:
         for target in targets:
-            # Make target active
-            context.view_layer.objects.active = target.id_data if hasattr(target, 'id_data') else target
-            
-            if context.mode != 'POSE':
-                bpy.ops.object.mode_set(mode='OBJECT')
-            
-            for frame in frames:
-                context.scene.frame_set(frame)
+            if hasattr(target, 'id_data') and target.id_data and target.id_data.type == 'ARMATURE':
+                # Pose bone
+                arm = target.id_data
+                context.view_layer.objects.active = arm
+                bpy.ops.object.mode_set(mode='POSE')
+
+                bpy.ops.pose.select_all(action='DESELECT')
+                target.bone.select = True
                 
-                # Select only this target/bone
-                if context.mode == 'POSE':
-                    bpy.ops.pose.select_all(action='DESELECT')
-                    target.bone.select = True
-                else:
-                    bpy.ops.object.select_all(action='DESELECT')
-                    target.select_set(True)
-                
-                # Delete keyframes on current frame (Alt+I equivalent)
-                with context.temp_override(active_object=context.view_layer.objects.active):
+                for f in frames:
+                    context.scene.frame_set(f)
                     try:
-                        bpy.ops.anim.keyframe_clear_v3d(confirm=False)
+                        bpy.ops.anim.keyframe_clear_v3d()
                         deleted_count += 1
-                    except:
-                        pass
-        
-        # Restore original state
+                    except Exception as e:
+                        print(f"Pose bone deletion error at frame {f}: {e}")
+
+            else:
+                # Object
+                context.view_layer.objects.active = target
+                bpy.ops.object.mode_set(mode='OBJECT')
+                bpy.ops.object.select_all(action='DESELECT')
+                target.select_set(True)
+
+                for f in frames:
+                    context.scene.frame_set(f)
+                    try:
+                        bpy.ops.anim.keyframe_clear_v3d()
+                        deleted_count += 1
+                    except Exception as e:
+                        print(f"Object deletion error at frame {f}: {e}")
+
         context.scene.frame_set(original_frame)
-        if original_mode == 'POSE':
-            bpy.ops.object.mode_set(mode='POSE')
-            
+        if original_mode != context.mode:
+            bpy.ops.object.mode_set(mode=original_mode)
+
     except Exception as e:
-        print(f"Operator error: {e}")
-    
+        print(f"General deletion error: {e}")
+
     return deleted_count
 
 def delete_keyframes_interval_robust(targets, frames):
-    """Wrapper for operator-based deletion"""
     context = bpy.context
     return delete_keyframes_with_operators(context, targets, frames)
 
@@ -148,20 +152,17 @@ class DeleteKeyframeOperator(bpy.types.Operator):
         props = context.scene.del_keyframe_props
         frames = calculate_frames(props)
         targets = get_selected_objects_or_bones(context) if props.only_selected else context.selected_objects
-        
-        print(f"Deleting {len(frames)} frames from {len(targets)} targets using operators")
-        
+
         deleted_count = delete_keyframes_interval_robust(targets, frames)
-        
-        # Full refresh
+
         context.view_layer.update()
         for area in context.screen.areas:
             if area.type in {'VIEW_3D', 'DOPESHEET_EDITOR', 'GRAPH_EDITOR', 'TIMELINE'}:
                 area.tag_redraw()
         bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=2)
-        
+
         mode_text = "pose bones" if context.mode == 'POSE' else "objects"
-        self.report({'INFO'}, f"✅ DELETED {deleted_count} keyframes ({len(targets)} {mode_text})")
+        self.report({'INFO'}, f"Deleted {deleted_count} keyframes ({len(targets)} {mode_text})")
         return {'FINISHED'}
 
 class BakeKeyframeOperator(bpy.types.Operator):
@@ -231,7 +232,7 @@ class DeleteBakeKeyframePanel(bpy.types.Panel):
         row1.enabled = not props.all_types
         row1.prop(props, "pos")
         row1.prop(props, "rot")
-        
+
         row2 = box.row(align=True)
         row2.enabled = not props.all_types
         row2.prop(props, "scl")
