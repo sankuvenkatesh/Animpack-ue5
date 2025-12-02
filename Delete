@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Delete/Bake Keyframe by Interval Extended",
     "author": "Venkatesh Sanku",
-    "version": (1, 8, 0),
+    "version": (1, 8, 1),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Animation",
-    "description": "Delete/bake keyframes by interval - BLENDER 5.0 POSE BONE FIXED",
+    "description": "Delete/bake keyframes by interval - Blender 5.0 pose bone safe deletion",
     "category": "Animation",
 }
 
@@ -91,73 +91,35 @@ def get_selected_objects_or_bones(context):
             return context.selected_pose_bones
     return context.selected_objects
 
-# ------------- POSE BONE DELETION (DIRECT F-CURVE METHOD) -------------
-def delete_keyframes_pose_bone_safe(armature, bone_name, frames, props):
-    """Delete pose bone keyframes by directly targeting F-Curves - BLENDER 5.0 SAFE."""
-    if not armature.animation_data or not armature.animation_data.action:
-        print(f"[DEBUG] No action for bone '{bone_name}'")
+def delete_pose_bone_keyframes(armature, bone_name, frames):
+    """Delete keyframes of specific pose bone at given frames."""
+    if not (armature and armature.animation_data and armature.animation_data.action):
         return 0
-    
+
     action = armature.animation_data.action
     frames_set = set(frames)
-    deleted = 0
-    
-    # Bone F-Curve marker: pose.bones["BoneName"].property
-    bone_marker = f'pose.bones["{bone_name}"]'
-    print(f"[DEBUG] Targeting bone '{bone_name}' F-Curves with marker: {bone_marker}")
-    
-    # Filter relevant F-Curves based on props
-    relevant_fc = []
-    for fc in action.fcurves:
-        if bone_marker not in fc.data_path:
-            continue
-        
-        # Check property type
-        data_path_lower = fc.data_path.lower()
-        if (props.all_types or 
-            (props.pos and 'location' in data_path_lower) or
-            (props.rot and 'rotation' in data_path_lower) or
-            (props.scl and 'scale' in data_path_lower) or
-            (props.custom and 'custom' in data_path_lower)):
-            relevant_fc.append(fc)
-    
-    print(f"[DEBUG] Found {len(relevant_fc)} relevant F-Curves for bone '{bone_name}'")
-    
-    # SAFE deletion: collect indices first, then remove in reverse order
-    for fc in relevant_fc:
-        to_remove_indices = []
-        for i, kp in enumerate(fc.keyframe_points):
-            if round(kp.co[0]) in frames_set:
-                to_remove_indices.append(i)
-        
-        # Remove in reverse order to avoid index shifting issues
-        for i in reversed(to_remove_indices):
-            try:
-                del fc.keyframe_points[i]
-                deleted += 1
-            except Exception as e:
-                print(f"[DEBUG] Failed to delete keyframe at index {i}: {e}")
-    
-    if deleted > 0:
-        action.update()
-        print(f"[DEBUG] ✅ Deleted {deleted} keyframes from bone '{bone_name}'")
-    else:
-        print(f"[DEBUG] ⚠️ No keyframes found for bone '{bone_name}' on target frames")
-    
-    return deleted
+    deleted_count = 0
 
-# ------------- OBJECT DELETION (STANDARD METHOD) -------------
-def delete_keyframes_object_safe(obj, frames, props):
-    """Delete keyframes from object using keyframe_delete API."""
-    if not obj.animation_data or not obj.animation_data.action:
-        print(f"[DEBUG] No action for object '{obj.name}'")
+    bone_path = f'pose.bones["{bone_name}"]'
+
+    bone_fcurves = [fc for fc in action.fcurves if bone_path in fc.data_path]
+
+    for fc in bone_fcurves:
+        to_remove_indices = [i for i, kp in enumerate(fc.keyframe_points) if round(kp.co[0]) in frames_set]
+        for i in reversed(to_remove_indices):
+            del fc.keyframe_points[i]
+            deleted_count += 1
+
+    if deleted_count > 0:
+        action.update()
+    return deleted_count
+
+def delete_object_keyframes(obj, frames, props):
+    if not (obj and obj.animation_data and obj.animation_data.action):
         return 0
     
     deleted = 0
     frames_set = set(frames)
-    print(f"[DEBUG] Processing object '{obj.name}', frames: {sorted(list(frames_set)[:5])}...")
-    
-    # Build data paths based on props
     data_paths = []
     if props.all_types or props.pos:
         data_paths.append("location")
@@ -166,24 +128,17 @@ def delete_keyframes_object_safe(obj, frames, props):
     if props.all_types or props.scl:
         data_paths.append("scale")
     
-    # Delete keyframes safely
     for f in frames_set:
-        for data_path in data_paths:
+        for dp in data_paths:
             try:
-                obj.keyframe_delete(data_path=data_path, frame=f)
+                obj.keyframe_delete(data_path=dp, frame=f)
                 deleted += 1
             except RuntimeError:
-                pass  # No keyframe exists, safe to ignore
-    
+                pass
+
     if deleted > 0:
         obj.animation_data.action.update()
-        print(f"[DEBUG] ✅ Deleted {deleted} keyframes from object '{obj.name}'")
-    else:
-        print(f"[DEBUG] ⚠️ No keyframes found for object '{obj.name}'")
-    
     return deleted
-
-# ------------- OPERATORS -------------
 
 class DeleteKeyframeOperator(bpy.types.Operator):
     bl_idname = "object.delete_keyframe_by_interval"
@@ -196,56 +151,36 @@ class DeleteKeyframeOperator(bpy.types.Operator):
         targets = get_selected_objects_or_bones(context) if props.only_selected else context.selected_objects
 
         if not frames:
-            self.report({'WARNING'}, "No frames to process!")
+            self.report({'WARNING'}, "No frames to delete")
             return {'CANCELLED'}
-        
         if not targets:
-            self.report({'WARNING'}, "No targets selected!")
+            self.report({'WARNING'}, "No targets selected")
             return {'CANCELLED'}
 
         scene = context.scene
         original_frame = scene.frame_current
         deleted_count = 0
 
-        print(f"
-[DELETE] ========================================")
-        print(f"[DELETE] Starting deletion on {len(frames)} frames for {len(targets)} targets")
-        print(f"[DELETE] Mode: {context.mode}")
-        print(f"[DELETE] Frames: {sorted(frames[:10])}...")
-
         for target in targets:
             try:
-                # POSE BONE: Use direct F-Curve method
                 if context.mode == 'POSE' and hasattr(target, 'id_data') and target.id_data.type == 'ARMATURE':
                     armature = target.id_data
                     bone_name = target.name
-                    deleted = delete_keyframes_pose_bone_safe(armature, bone_name, frames, props)
-                    deleted_count += deleted
-                
-                # OBJECT: Use keyframe_delete method
+                    deleted = delete_pose_bone_keyframes(armature, bone_name, frames)
                 else:
-                    deleted = delete_keyframes_object_safe(target, frames, props)
-                    deleted_count += deleted
-                
+                    deleted = delete_object_keyframes(target, frames, props)
+                deleted_count += deleted
             except Exception as e:
-                print(f"[DELETE] ❌ Error processing target {getattr(target, 'name', 'unknown')}: {e}")
-                import traceback
-                traceback.print_exc()
+                print(f"Error deleting keyframes on target {getattr(target, 'name', 'unknown')}: {e}")
                 continue
 
-        # Restore frame and update
         scene.frame_set(original_frame)
         context.view_layer.update()
-        
         for area in context.screen.areas:
             if area.type in {'VIEW_3D', 'GRAPH_EDITOR', 'DOPESHEET_EDITOR', 'TIMELINE'}:
                 area.tag_redraw()
 
-        mode_text = "pose bones" if context.mode == 'POSE' else "objects"
-        print(f"[DELETE] ========================================")
-        print(f"[DELETE] ✅ TOTAL DELETED: {deleted_count}
-")
-        self.report({'INFO'}, f"Deleted {deleted_count} keyframes from {len(frames)} frames ({len(targets)} {mode_text})")
+        self.report({'INFO'}, f"Deleted {deleted_count} keyframes from {len(frames)} frames ({len(targets)} targets)")
         return {'FINISHED'}
 
 class BakeKeyframeOperator(bpy.types.Operator):
@@ -259,19 +194,15 @@ class BakeKeyframeOperator(bpy.types.Operator):
         targets = get_selected_objects_or_bones(context) if props.only_selected else context.selected_objects
 
         if not frames:
-            self.report({'WARNING'}, "No frames to process!")
+            self.report({'WARNING'}, "No frames to bake")
             return {'CANCELLED'}
-        
         if not targets:
-            self.report({'WARNING'}, "No targets selected!")
+            self.report({'WARNING'}, "No targets selected")
             return {'CANCELLED'}
 
         scene = context.scene
         original_frame = scene.frame_current
         baked_count = 0
-
-        print(f"
-[BAKE] Starting bake on {len(frames)} frames for {len(targets)} targets")
 
         for target in targets:
             for f in frames:
@@ -281,27 +212,24 @@ class BakeKeyframeOperator(bpy.types.Operator):
                     if props.all_types or props.pos:
                         target.keyframe_insert(data_path="location")
                     if props.all_types or props.rot:
-                        rot_mode = getattr(target, 'rotation_mode', 'QUATERNION')
-                        if rot_mode == 'QUATERNION':
+                        rm = getattr(target, "rotation_mode", "QUATERNION")
+                        if rm == "QUATERNION":
                             target.keyframe_insert(data_path="rotation_quaternion")
                         else:
                             target.keyframe_insert(data_path="rotation_euler")
                     if props.all_types or props.scl:
                         target.keyframe_insert(data_path="scale")
                     baked_count += 1
-                except Exception as e:
-                    print(f"[BAKE] Error on {target.name} at frame {f}: {e}")
+                except:
                     pass
 
         scene.frame_set(original_frame)
         context.view_layer.update()
-        
         for area in context.screen.areas:
             if area.type in {'VIEW_3D', 'GRAPH_EDITOR', 'DOPESHEET_EDITOR', 'TIMELINE'}:
                 area.tag_redraw()
 
-        self.report({'INFO'}, f"Baked {baked_count} keyframes on {len(frames)} frames")
-        print(f"[BAKE] ✅ TOTAL BAKED: {baked_count}")
+        self.report({'INFO'}, f"Baked {baked_count} keyframes")
         return {'FINISHED'}
 
 class DeleteBakeKeyframePanel(bpy.types.Panel):
@@ -356,15 +284,18 @@ classes = (
     DeleteBakeKeyframePanel,
 )
 
+
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.Scene.del_keyframe_props = bpy.props.PointerProperty(type=DeleteKeyframeProperties)
 
+
 def unregister():
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
     del bpy.types.Scene.del_keyframe_props
+
 
 if __name__ == "__main__":
     register()
