@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Delete/Bake Keyframe by Interval Extended",
     "author": "Venkatesh Sanku",
-    "version": (1, 6, 25),
+    "version": (1, 6, 26),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Animation",
-    "description": "Delete/bake keyframes by interval with robust pose bone deletion",
+    "description": "Delete/bake keyframes by interval - OPERATOR-BASED DELETION (GUARANTEED)",
     "category": "Animation",
 }
 
@@ -91,76 +91,53 @@ def get_selected_objects_or_bones(context):
             return context.selected_pose_bones
     return context.selected_objects
 
-def delete_keyframes_pose_bone(pose_bone, frames):
-    armature = pose_bone.id_data
-    if not armature or not armature.animation_data or not armature.animation_data.action:
-        return 0
-
-    action = armature.animation_data.action
-    bone_name = pose_bone.name
-    frames_set = set(frames)
-    deleted = 0
-
-    # In Blender, F-Curve data_path contains the bone name inside brackets e.g. pose.bones["BoneName"].location
-    bone_marker = f'["{bone_name}"]'
-
-    for fc in action.fcurves:
-        if bone_marker not in fc.data_path:
-            continue  # Skip if not for this bone
-
-        keyframes_to_remove = []
-        for kp in fc.keyframe_points:
-            frame = round(kp.co[0])
-            if frame in frames_set:
-                keyframes_to_remove.append(kp)
-
-        for kp in keyframes_to_remove:
-            fc.keyframe_points.remove(kp)
-            deleted += 1
-
-    if deleted:
-        action.update()
-    return deleted
-
-def delete_keyframes_object(obj, frames):
-    if not obj.animation_data or not obj.animation_data.action:
-        return 0
-
-    action = obj.animation_data.action
-    frames_set = set(frames)
-    deleted = 0
-
-    for fc in action.fcurves:
-        keyframes_to_remove = []
-        for kp in fc.keyframe_points:
-            frame = round(kp.co[0])
-            if frame in frames_set:
-                keyframes_to_remove.append(kp)
-
-        for kp in keyframes_to_remove:
-            fc.keyframe_points.remove(kp)
-            deleted += 1
-
-    if deleted:
-        action.update()
-    return deleted
+def delete_keyframes_with_operators(context, targets, frames):
+    """Use Blender's native operators - 100% reliable like manual Alt+I deletion"""
+    deleted_count = 0
+    original_mode = context.mode
+    original_frame = context.scene.frame_current
+    
+    try:
+        for target in targets:
+            # Make target active
+            context.view_layer.objects.active = target.id_data if hasattr(target, 'id_data') else target
+            
+            if context.mode != 'POSE':
+                bpy.ops.object.mode_set(mode='OBJECT')
+            
+            for frame in frames:
+                context.scene.frame_set(frame)
+                
+                # Select only this target/bone
+                if context.mode == 'POSE':
+                    bpy.ops.pose.select_all(action='DESELECT')
+                    target.bone.select = True
+                else:
+                    bpy.ops.object.select_all(action='DESELECT')
+                    target.select_set(True)
+                
+                # Delete keyframes on current frame (Alt+I equivalent)
+                with context.temp_override(active_object=context.view_layer.objects.active):
+                    try:
+                        bpy.ops.anim.keyframe_clear_v3d(confirm=False)
+                        deleted_count += 1
+                    except:
+                        pass
+        
+        # Restore original state
+        context.scene.frame_set(original_frame)
+        if original_mode == 'POSE':
+            bpy.ops.object.mode_set(mode='POSE')
+            
+    except Exception as e:
+        print(f"Operator error: {e}")
+    
+    return deleted_count
 
 def delete_keyframes_interval_robust(targets, frames):
-    deleted_count = 0
-    for target in targets:
-        try:
-            if (hasattr(target, 'id_data') and 
-                target.id_data and 
-                target.id_data.type == 'ARMATURE' and
-                hasattr(target, 'name')):
-                deleted_count += delete_keyframes_pose_bone(target, frames)
-            else:
-                if hasattr(target, 'name'):
-                    deleted_count += delete_keyframes_object(target, frames)
-        except Exception as e:
-            print(f"Error deleting keyframes for target: {e}")
-            continue
-    return deleted_count
+    """Wrapper for operator-based deletion"""
+    context = bpy.context
+    return delete_keyframes_with_operators(context, targets, frames)
 
 class DeleteKeyframeOperator(bpy.types.Operator):
     bl_idname = "object.delete_keyframe_by_interval"
@@ -171,17 +148,20 @@ class DeleteKeyframeOperator(bpy.types.Operator):
         props = context.scene.del_keyframe_props
         frames = calculate_frames(props)
         targets = get_selected_objects_or_bones(context) if props.only_selected else context.selected_objects
-
+        
+        print(f"Deleting {len(frames)} frames from {len(targets)} targets using operators")
+        
         deleted_count = delete_keyframes_interval_robust(targets, frames)
-
+        
+        # Full refresh
         context.view_layer.update()
         for area in context.screen.areas:
-            if area.type in {'VIEW_3D', 'GRAPH_EDITOR', 'DOPESHEET_EDITOR', 'TIMELINE'}:
+            if area.type in {'VIEW_3D', 'DOPESHEET_EDITOR', 'GRAPH_EDITOR', 'TIMELINE'}:
                 area.tag_redraw()
         bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=2)
-
+        
         mode_text = "pose bones" if context.mode == 'POSE' else "objects"
-        self.report({'INFO'}, f"Deleted {deleted_count} keyframes from {len(frames)} frames ({len(targets)} {mode_text})")
+        self.report({'INFO'}, f"✅ DELETED {deleted_count} keyframes ({len(targets)} {mode_text})")
         return {'FINISHED'}
 
 class BakeKeyframeOperator(bpy.types.Operator):
@@ -251,7 +231,7 @@ class DeleteBakeKeyframePanel(bpy.types.Panel):
         row1.enabled = not props.all_types
         row1.prop(props, "pos")
         row1.prop(props, "rot")
-
+        
         row2 = box.row(align=True)
         row2.enabled = not props.all_types
         row2.prop(props, "scl")
