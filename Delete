@@ -4,7 +4,7 @@ bl_info = {
     "version": (1, 6, 28),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Animation",
-    "description": "Delete/bake keyframes by interval - F-CURVE DEBUG + BULLETPROOF",
+    "description": "Delete/bake keyframes by interval (robust object + pose bone F-Curve delete)",
     "category": "Animation",
 }
 
@@ -86,110 +86,86 @@ def calculate_frames(props):
 
 def get_selected_objects_or_bones(context):
     if context.mode == 'POSE':
-        armature = context.object
-        if armature and armature.type == 'ARMATURE':
+        arm = context.object
+        if arm and arm.type == 'ARMATURE':
             return context.selected_pose_bones
     return context.selected_objects
 
-def delete_keyframes_pose_bone_debug(pose_bone, frames_set):
-    """DEBUG VERSION - shows EXACTLY what F-Curves and frames are found"""
-    armature = pose_bone.id_data
-    if not armature or not armature.animation_data or not armature.animation_data.action:
-        print(f"❌ NO ACTION for bone {pose_bone.name}")
-        return 0
-    
-    action = armature.animation_data.action
-    bone_name = pose_bone.name
-    deleted = 0
-    
-    print(f"
-🔍 DEBUG BONE: {bone_name}")
-    print(f"   Action: {action.name}")
-    print(f"   Total F-Curves in action: {len(action.fcurves)}")
-    print(f"   Target frames: {sorted(frames_set)}")
-    
-    bone_fcurves_found = 0
-    for fc in action.fcurves:
-        # TRY MULTIPLE MATCHING STRATEGIES
-        if (f'["{bone_name}"]' in fc.data_path or 
-            f'"{bone_name}"' in fc.data_path or 
-            bone_name in fc.data_path):
-            bone_fcurves_found += 1
-            print(f"   🟢 F-CURVE MATCH: {fc.data_path}")
-            
-            # Count keys BEFORE deletion
-            before_count = len(fc.keyframe_points)
-            to_remove = []
-            
-            for kp in fc.keyframe_points:
-                frame = round(kp.co[0])
-                if frame in frames_set:
-                    to_remove.append(kp)
-                    print(f"     📍 Found keyframe at frame {frame} (target)")
-            
-            # DELETE
-            for kp in to_remove:
-                fc.keyframe_points.remove(kp)
-                deleted += 1
-            
-            after_count = len(fc.keyframe_points)
-            print(f"     Keys: {before_count} → {after_count} (deleted {before_count-after_count})")
-    
-    print(f"✅ BONE {bone_name}: Found {bone_fcurves_found} F-Curves, DELETED {deleted} keys")
-    action.update()
-    return deleted
+# ------------- CORE DELETE LOGIC (FIXED) -------------
 
-def delete_keyframes_object_debug(obj, frames_set):
-    """DEBUG object deletion"""
-    if not obj.animation_data or not obj.animation_data.action:
-        print(f"❌ NO ACTION for object {obj.name}")
+def delete_keyframes_pose_bone(pose_bone, frames):
+    """Delete keyframes on given frames for a single pose bone via F-Curves."""
+    arm = pose_bone.id_data
+    if not arm or not arm.animation_data or not arm.animation_data.action:
         return 0
-    
-    action = obj.animation_data.action
+
+    action = arm.animation_data.action
+    bone_name = pose_bone.name
+    frames_set = set(frames)
     deleted = 0
-    
-    print(f"
-🔍 DEBUG OBJECT: {obj.name}")
-    print(f"   Action: {action.name}")
-    
+
+    # In an armature action, pose bone paths contain ["BoneName"]
+    marker = f'["{bone_name}"]'
+
     for fc in action.fcurves:
-        before_count = len(fc.keyframe_points)
+        if marker not in fc.data_path:
+            continue
+
         to_remove = []
-        
         for kp in fc.keyframe_points:
-            frame = round(kp.co[0])
-            if frame in frames_set:
+            f_int = round(kp.co[0])
+            if f_int in frames_set:
                 to_remove.append(kp)
-        
+
         for kp in to_remove:
             fc.keyframe_points.remove(kp)
             deleted += 1
-        
-        if len(fc.keyframe_points) < before_count:
-            print(f"   FCurve {fc.data_path}: {before_count} → {len(fc.keyframe_points)}")
-    
-    action.update()
+
+    if deleted:
+        action.update()
+    return deleted
+
+def delete_keyframes_object(obj, frames):
+    """Delete keyframes on given frames for an object via F-Curves."""
+    if not obj.animation_data or not obj.animation_data.action:
+        return 0
+
+    action = obj.animation_data.action
+    frames_set = set(frames)
+    deleted = 0
+
+    for fc in action.fcurves:
+        to_remove = []
+        for kp in fc.keyframe_points:
+            f_int = round(kp.co[0])
+            if f_int in frames_set:
+                to_remove.append(kp)
+
+        for kp in to_remove:
+            fc.keyframe_points.remove(kp)
+            deleted += 1
+
+    if deleted:
+        action.update()
     return deleted
 
 def delete_keyframes_interval_robust(targets, frames):
-    frames_set = set(frames)
-    total_deleted = 0
-    
-    print(f"
-🎯 DELETION DEBUG: {len(frames)} frames = {sorted(frames_set)}")
-    
+    """Dispatch deletion for each target (pose bone or object)."""
+    deleted_count = 0
     for target in targets:
         try:
-            if (hasattr(target, 'id_data') and target.id_data and target.id_data.type == 'ARMATURE'):
-                total_deleted += delete_keyframes_pose_bone_debug(target, frames_set)
-            elif hasattr(target, 'name'):
-                total_deleted += delete_keyframes_object_debug(target, frames_set)
+            # Pose bone
+            if hasattr(target, "id_data") and target.id_data and target.id_data.type == 'ARMATURE':
+                deleted_count += delete_keyframes_pose_bone(target, frames)
+            # Object
+            elif hasattr(target, "animation_data"):
+                deleted_count += delete_keyframes_object(target, frames)
         except Exception as e:
-            print(f"❌ Target error: {e}")
-    
-    print(f"
-🎉 TOTAL DELETED: {total_deleted}")
-    return total_deleted
+            print(f"Error deleting keyframes for target {getattr(target, 'name', str(target))}: {e}")
+            continue
+    return deleted_count
+
+# ------------- OPERATORS / UI -------------
 
 class DeleteKeyframeOperator(bpy.types.Operator):
     bl_idname = "object.delete_keyframe_by_interval"
@@ -200,18 +176,16 @@ class DeleteKeyframeOperator(bpy.types.Operator):
         props = context.scene.del_keyframe_props
         frames = calculate_frames(props)
         targets = get_selected_objects_or_bones(context) if props.only_selected else context.selected_objects
-        
+
         deleted_count = delete_keyframes_interval_robust(targets, frames)
-        
-        # Refresh
+
         context.view_layer.update()
         for area in context.screen.areas:
-            if area.type in {'VIEW_3D', 'DOPESHEET_EDITOR', 'GRAPH_EDITOR'}:
+            if area.type in {'VIEW_3D', 'GRAPH_EDITOR', 'DOPESHEET_EDITOR', 'TIMELINE'}:
                 area.tag_redraw()
-        bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=2)
-        
+
         mode_text = "pose bones" if context.mode == 'POSE' else "objects"
-        self.report({'INFO'}, f"DELETED {deleted_count} keyframes ({len(targets)} {mode_text})")
+        self.report({'INFO'}, f"Deleted {deleted_count} keyframes from {len(frames)} frames ({len(targets)} {mode_text})")
         return {'FINISHED'}
 
 class BakeKeyframeOperator(bpy.types.Operator):
@@ -281,7 +255,7 @@ class DeleteBakeKeyframePanel(bpy.types.Panel):
         row1.enabled = not props.all_types
         row1.prop(props, "pos")
         row1.prop(props, "rot")
-        
+
         row2 = box.row(align=True)
         row2.enabled = not props.all_types
         row2.prop(props, "scl")
