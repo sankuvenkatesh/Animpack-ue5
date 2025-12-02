@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Delete/Bake Keyframe by Interval Extended",
     "author": "Venkatesh Sanku",
-    "version": (1, 6, 24),
+    "version": (1, 6, 25),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Animation",
-    "description": "Delete/bake keyframes by interval - POSE BONE DELETION FIXED (DATA PATH FLEXIBLE MATCH)",
+    "description": "Delete/bake keyframes by interval with robust pose bone deletion",
     "category": "Animation",
 }
 
@@ -92,7 +92,6 @@ def get_selected_objects_or_bones(context):
     return context.selected_objects
 
 def delete_keyframes_pose_bone(pose_bone, frames):
-    """Delete keyframes for pose bone - flexible data_path matching"""
     armature = pose_bone.id_data
     if not armature or not armature.animation_data or not armature.animation_data.action:
         return 0
@@ -102,31 +101,34 @@ def delete_keyframes_pose_bone(pose_bone, frames):
     frames_set = set(frames)
     deleted = 0
 
+    # In Blender, F-Curve data_path contains the bone name inside brackets e.g. pose.bones["BoneName"].location
     bone_marker = f'["{bone_name}"]'
 
     for fc in action.fcurves:
-        # Check if bone_name exists in data_path (flexible)
-        if bone_marker in fc.data_path:
-            keyframes_to_remove = []
-            for kp in fc.keyframe_points:
-                frame = round(kp.co[0])
-                if frame in frames_set:
-                    keyframes_to_remove.append(kp)
-            for kp in keyframes_to_remove:
-                fc.keyframe_points.remove(kp)
-                deleted += 1
+        if bone_marker not in fc.data_path:
+            continue  # Skip if not for this bone
 
-    action.update()
+        keyframes_to_remove = []
+        for kp in fc.keyframe_points:
+            frame = round(kp.co[0])
+            if frame in frames_set:
+                keyframes_to_remove.append(kp)
+
+        for kp in keyframes_to_remove:
+            fc.keyframe_points.remove(kp)
+            deleted += 1
+
+    if deleted:
+        action.update()
     return deleted
 
 def delete_keyframes_object(obj, frames):
-    """Delete keyframes for object similarly"""
-    deleted = 0
-    frames_set = set(frames)
     if not obj.animation_data or not obj.animation_data.action:
         return 0
 
     action = obj.animation_data.action
+    frames_set = set(frames)
+    deleted = 0
 
     for fc in action.fcurves:
         keyframes_to_remove = []
@@ -134,11 +136,13 @@ def delete_keyframes_object(obj, frames):
             frame = round(kp.co[0])
             if frame in frames_set:
                 keyframes_to_remove.append(kp)
+
         for kp in keyframes_to_remove:
             fc.keyframe_points.remove(kp)
             deleted += 1
 
-    action.update()
+    if deleted:
+        action.update()
     return deleted
 
 def delete_keyframes_interval_robust(targets, frames):
@@ -147,16 +151,14 @@ def delete_keyframes_interval_robust(targets, frames):
         try:
             if (hasattr(target, 'id_data') and 
                 target.id_data and 
-                target.id_data.type == 'ARMATURE' and 
+                target.id_data.type == 'ARMATURE' and
                 hasattr(target, 'name')):
-                deleted = delete_keyframes_pose_bone(target, frames)
-                deleted_count += deleted
+                deleted_count += delete_keyframes_pose_bone(target, frames)
             else:
                 if hasattr(target, 'name'):
-                    deleted = delete_keyframes_object(target, frames)
-                    deleted_count += deleted
+                    deleted_count += delete_keyframes_object(target, frames)
         except Exception as e:
-            print(f"Error deleting keyframes on target: {e}")
+            print(f"Error deleting keyframes for target: {e}")
             continue
     return deleted_count
 
@@ -174,7 +176,7 @@ class DeleteKeyframeOperator(bpy.types.Operator):
 
         context.view_layer.update()
         for area in context.screen.areas:
-            if area.type in {'VIEW_3D', 'DOPESHEET_EDITOR', 'GRAPH_EDITOR'}:
+            if area.type in {'VIEW_3D', 'GRAPH_EDITOR', 'DOPESHEET_EDITOR', 'TIMELINE'}:
                 area.tag_redraw()
         bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=2)
 
@@ -249,7 +251,7 @@ class DeleteBakeKeyframePanel(bpy.types.Panel):
         row1.enabled = not props.all_types
         row1.prop(props, "pos")
         row1.prop(props, "rot")
-        
+
         row2 = box.row(align=True)
         row2.enabled = not props.all_types
         row2.prop(props, "scl")
