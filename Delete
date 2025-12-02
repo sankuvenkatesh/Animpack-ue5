@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Delete/Bake Keyframe by Interval Extended",
     "author": "Venkatesh Sanku",
-    "version": (1, 7, 0),
+    "version": (1, 7, 1),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Animation",
-    "description": "Delete/bake keyframes by interval - MIRROR BAKE LOGIC",
+    "description": "Delete/bake keyframes by interval - POSE BONE FIXED WITH ARMATURE ACTION",
     "category": "Animation",
 }
 
@@ -91,7 +91,66 @@ def get_selected_objects_or_bones(context):
             return context.selected_pose_bones
     return context.selected_objects
 
-# ------------- DELETE LOGIC - EXACT MIRROR OF BAKE -------------
+# ------------- ROBUST POSE BONE DELETION VIA ARMATURE ACTION -------------
+
+def delete_keyframes_pose_bone(armature, pose_bone_name, frames):
+    """Delete keyframes from armature action for specific pose bone."""
+    if not armature.animation_data or not armature.animation_data.action:
+        return 0
+
+    action = armature.animation_data.action
+    frames_set = set(frames)
+    deleted = 0
+
+    # Bone F-Curves contain ["BoneName"] in data_path
+    bone_marker = f'["{pose_bone_name}"]'
+
+    for fc in action.fcurves:
+        if bone_marker not in fc.data_path:
+            continue
+
+        to_remove = [kp for kp in fc.keyframe_points if round(kp.co[0]) in frames_set]
+
+        for kp in to_remove:
+            fc.keyframe_points.remove(kp)
+            deleted += 1
+
+    if deleted:
+        action.update()
+    return deleted
+
+def delete_keyframes_object(obj, frames):
+    """Delete keyframes from object using keyframe_delete API."""
+    deleted_count = 0
+    
+    for f in frames:
+        try:
+            if obj.keyframe_delete(data_path="location", frame=f):
+                deleted_count += 1
+        except:
+            pass
+        
+        try:
+            if obj.keyframe_delete(data_path="rotation_euler", frame=f):
+                deleted_count += 1
+        except:
+            pass
+        
+        try:
+            if obj.keyframe_delete(data_path="rotation_quaternion", frame=f):
+                deleted_count += 1
+        except:
+            pass
+        
+        try:
+            if obj.keyframe_delete(data_path="scale", frame=f):
+                deleted_count += 1
+        except:
+            pass
+    
+    return deleted_count
+
+# ------------- OPERATORS -------------
 
 class DeleteKeyframeOperator(bpy.types.Operator):
     bl_idname = "object.delete_keyframe_by_interval"
@@ -112,31 +171,19 @@ class DeleteKeyframeOperator(bpy.types.Operator):
         print(f"[DELETE] Frames: {frames[:10]}{'...' if len(frames) > 10 else ''}")
 
         for target in targets:
-            for f in frames:
-                # Don't need to set frame for deletion
-                try:
-                    # Location
-                    if props.all_types or props.pos:
-                        target.keyframe_delete(data_path="location", frame=f)
-                        deleted_count += 1
-                    
-                    # Rotation
-                    if props.all_types or props.rot:
-                        rot_mode = getattr(target, 'rotation_mode', None)
-                        if rot_mode == 'QUATERNION':
-                            target.keyframe_delete(data_path="rotation_quaternion", frame=f)
-                        else:
-                            target.keyframe_delete(data_path="rotation_euler", frame=f)
-                        deleted_count += 1
-                    
-                    # Scale
-                    if props.all_types or props.scl:
-                        target.keyframe_delete(data_path="scale", frame=f)
-                        deleted_count += 1
-                        
-                except Exception as e:
-                    # Key might not exist on this frame - that's OK
-                    pass
+            # Check if target is pose bone
+            if hasattr(target, 'id_data') and target.id_data and target.id_data.type == 'ARMATURE':
+                # POSE BONE - use armature action method
+                armature = target.id_data
+                bone_name = target.name
+                deleted = delete_keyframes_pose_bone(armature, bone_name, frames)
+                deleted_count += deleted
+                print(f"[DELETE] Pose bone '{bone_name}': {deleted} keyframes deleted")
+            else:
+                # OBJECT - use keyframe_delete method
+                deleted = delete_keyframes_object(target, frames)
+                deleted_count += deleted
+                print(f"[DELETE] Object '{target.name}': {deleted} keyframes deleted")
 
         scene.frame_set(original_frame)
         context.view_layer.update()
@@ -146,8 +193,8 @@ class DeleteKeyframeOperator(bpy.types.Operator):
                 area.tag_redraw()
 
         mode_text = "pose bones" if context.mode == 'POSE' else "objects"
-        print(f"[DELETE] ✅ Completed: {deleted_count} property deletions attempted")
-        self.report({'INFO'}, f"Deleted keyframes from {len(frames)} frames ({len(targets)} {mode_text})")
+        print(f"[DELETE] ✅ Total deleted: {deleted_count}")
+        self.report({'INFO'}, f"Deleted {deleted_count} keyframes from {len(frames)} frames ({len(targets)} {mode_text})")
         return {'FINISHED'}
 
 class BakeKeyframeOperator(bpy.types.Operator):
