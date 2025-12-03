@@ -1,10 +1,11 @@
+
 bl_info = {
     "name": "Delete/Bake Keyframe by Interval Extended",
     "author": "Venkatesh Sanku",
-    "version": (4, 4, 0),
+    "version": (4, 3, 0),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Animation",
-    "description": "Delete/bake keyframes by interval - INVERT+SELECTION FIX",
+    "description": "Delete/bake keyframes by interval - EXACT COUNT MATCH",
     "category": "Animation",
 }
 
@@ -75,62 +76,48 @@ class DeleteKeyframeProperties(bpy.types.PropertyGroup):
             self.custom = True
 
 def calculate_frames(props):
-    """FIXED: Proper invert logic."""
     start, end, interval, invert = props.start_frame, props.end_frame, props.interval, props.invert
     if end < start or interval < 1:
         return []
-    
     all_frames = list(range(start, end + 1))
-    interval_frames = [f for idx, f in enumerate(all_frames) if (idx % interval) == 0]
-    
+    select_frames = [f for idx, f in enumerate(all_frames) if (idx % interval) == 0]
     if invert:
-        # Invert: KEEP interval frames, delete ALL OTHERS
-        return [f for f in all_frames if f not in interval_frames]
-    else:
-        # Normal: delete interval frames, keep others
-        return interval_frames
+        return select_frames
+    return [f for f in all_frames if f not in select_frames]
 
-def get_targets(context, props):
-    """FIXED: Proper target selection for both modes."""
+def get_selected_objects_or_bones(context):
     if context.mode == 'POSE':
         arm = context.object
         if arm and arm.type == 'ARMATURE':
-            if props.only_selected:
-                return list(context.selected_pose_bones)
-            else:
-                return list(arm.pose.bones)  # ALL bones in armature
-    else:  # Object mode
-        if props.only_selected:
-            return list(context.selected_objects)
-        else:
-            return [obj for obj in context.scene.objects if obj.animation_data]  # Animated objects only
-    return []
+            return context.selected_pose_bones
+    return context.selected_objects
 
+# ------------- EXACT DELETE MATCHING BAKE COUNTS -------------
 def delete_pose_bone_exact(pbone, frames, props):
     """Delete EXACTLY like bake - count only successful deletions."""
     deleted = 0
     
     for frame in frames:
-        # Location XYZ
-        if props.pos or props.all_types:
-            for index in range(3):
+        # Location XYZ (bake does this)
+        if props.all_types or props.pos:
+            for index in range(3):  # X,Y,Z
                 try:
                     pbone.keyframe_delete(data_path="location", frame=frame, index=index)
                     deleted += 1
                 except RuntimeError:
                     pass
         
-        # Rotation (matches bake exactly)
-        if props.rot or props.all_types:
+        # Rotation (bake does euler OR quaternion based on mode)
+        if props.all_types or props.rot:
             rot_mode = getattr(pbone, 'rotation_mode', 'QUATERNION')
             if rot_mode == 'QUATERNION':
-                for index in range(4):
+                for index in range(4):  # W,X,Y,Z
                     try:
                         pbone.keyframe_delete(data_path="rotation_quaternion", frame=frame, index=index)
                         deleted += 1
                     except RuntimeError:
                         pass
-            else:
+            else:  # Euler XYZ
                 for index in range(3):
                     try:
                         pbone.keyframe_delete(data_path="rotation_euler", frame=frame, index=index)
@@ -138,25 +125,25 @@ def delete_pose_bone_exact(pbone, frames, props):
                     except RuntimeError:
                         pass
         
-        # Scale XYZ
-        if props.scl or props.all_types:
-            for index in range(3):
+        # Scale XYZ (bake does this)
+        if props.all_types or props.scl:
+            for index in range(3):  # X,Y,Z
                 try:
                     pbone.keyframe_delete(data_path="scale", frame=frame, index=index)
                     deleted += 1
                 except RuntimeError:
                     pass
     
-    print(f"✅ [POSE] '{pbone.name}': {deleted} keys ({len(frames)} frames)")
+    print(f"✅ [POSE] '{pbone.name}': {deleted} keys deleted ({len(frames)} frames)")
     return deleted
 
 def delete_object_exact(obj, frames, props):
-    """Delete EXACTLY like bake for objects."""
+    """Delete EXACTLY like bake - count only successful deletions."""
     deleted = 0
     
     for frame in frames:
         # Location XYZ
-        if props.pos or props.all_types:
+        if props.all_types or props.pos:
             for index in range(3):
                 try:
                     obj.keyframe_delete(data_path="location", frame=frame, index=index)
@@ -164,8 +151,8 @@ def delete_object_exact(obj, frames, props):
                 except RuntimeError:
                     pass
         
-        # Rotation
-        if props.rot or props.all_types:
+        # Rotation (matches bake logic exactly)
+        if props.all_types or props.rot:
             rot_mode = getattr(obj, 'rotation_mode', 'QUATERNION')
             if rot_mode == 'QUATERNION':
                 for index in range(4):
@@ -183,7 +170,7 @@ def delete_object_exact(obj, frames, props):
                         pass
         
         # Scale XYZ
-        if props.scl or props.all_types:
+        if props.all_types or props.scl:
             for index in range(3):
                 try:
                     obj.keyframe_delete(data_path="scale", frame=frame, index=index)
@@ -191,7 +178,7 @@ def delete_object_exact(obj, frames, props):
                 except RuntimeError:
                     pass
     
-    print(f"✅ [OBJECT] '{obj.name}': {deleted} keys ({len(frames)} frames)")
+    print(f"✅ [OBJECT] '{obj.name}': {deleted} keys deleted ({len(frames)} frames)")
     return deleted
 
 class DeleteKeyframeOperator(bpy.types.Operator):
@@ -202,13 +189,13 @@ class DeleteKeyframeOperator(bpy.types.Operator):
     def execute(self, context):
         props = context.scene.del_keyframe_props
         frames = calculate_frames(props)
-        targets = get_targets(context, props)
+        targets = get_selected_objects_or_bones(context) if props.only_selected else context.selected_objects
 
         if not frames:
             self.report({'WARNING'}, "No frames selected!")
             return {'CANCELLED'}
         if not targets:
-            self.report({'WARNING'}, "No targets found!")
+            self.report({'WARNING'}, "No targets selected!")
             return {'CANCELLED'}
 
         scene = context.scene
@@ -216,7 +203,7 @@ class DeleteKeyframeOperator(bpy.types.Operator):
         total_deleted = 0
 
         print(f"
-🚀 DELETE: {context.mode}, {len(targets)} targets, {len(frames)} frames, invert={props.invert}")
+🚀 DELETE: {context.mode}, {len(targets)} targets, {len(frames)} frames")
 
         for target in targets:
             try:
@@ -238,9 +225,10 @@ class DeleteKeyframeOperator(bpy.types.Operator):
 
         mode_text = "pose bones" if context.mode == 'POSE' else "objects"
         print(f"🚀 TOTAL: {total_deleted} keyframes ({len(targets)} {mode_text})")
-        self.report({'INFO'}, f"Deleted {total_deleted} keyframes ({len(frames)} frames)")
+        self.report({'INFO'}, f"Deleted {total_deleted} keyframes")
         return {'FINISHED'}
 
+# ------------- BAKE OPERATOR (UNCHANGED - REFERENCE) -------------
 class BakeKeyframeOperator(bpy.types.Operator):
     bl_idname = "object.bake_keyframe_by_interval"
     bl_label = "Bake Keyframes"
@@ -249,7 +237,7 @@ class BakeKeyframeOperator(bpy.types.Operator):
     def execute(self, context):
         props = context.scene.del_keyframe_props
         frames = calculate_frames(props)
-        targets = get_targets(context, props)
+        targets = get_selected_objects_or_bones(context) if props.only_selected else context.selected_objects
 
         scene = context.scene
         original_frame = scene.frame_current
@@ -260,10 +248,10 @@ class BakeKeyframeOperator(bpy.types.Operator):
                 scene.frame_set(f)
                 context.view_layer.update()
                 try:
-                    if props.pos or props.all_types:
+                    if props.all_types or props.pos:
                         target.keyframe_insert(data_path="location", frame=f)
-                        baked_count += 1
-                    if props.rot or props.all_types:
+                        baked_count += 1  # Counts successful inserts
+                    if props.all_types or props.rot:
                         rot_mode = getattr(target, 'rotation_mode', None)
                         if rot_mode == 'QUATERNION':
                             target.keyframe_insert(data_path="rotation_quaternion", frame=f)
@@ -271,7 +259,7 @@ class BakeKeyframeOperator(bpy.types.Operator):
                         else:
                             target.keyframe_insert(data_path="rotation_euler", frame=f)
                             baked_count += 1
-                    if props.scl or props.all_types:
+                    if props.all_types or props.scl:
                         target.keyframe_insert(data_path="scale", frame=f)
                         baked_count += 1
                 except:
@@ -282,6 +270,7 @@ class BakeKeyframeOperator(bpy.types.Operator):
         self.report({'INFO'}, f"Baked {baked_count} keyframes")
         return {'FINISHED'}
 
+# ------------- PANEL (UNCHANGED) -------------
 class DeleteBakeKeyframePanel(bpy.types.Panel):
     bl_label = "🔧 Delete/Bake Keyframe By Interval"
     bl_space_type = 'VIEW_3D'
