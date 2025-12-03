@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Delete/Bake Keyframe by Interval Extended",
     "author": "Venkatesh Sanku",
-    "version": (4, 4, 0),  # Updated version
+    "version": (4, 4, 1),  # Fixed syntax error
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Animation",
     "description": "Delete/bake keyframes by interval - FIXED INVERT & SELECTION",
@@ -70,11 +70,11 @@ def calculate_frames(props):
     interval_frames = [f for idx, f in enumerate(all_frames) if (idx % interval) == 0]
     
     if invert:
-        # INVERT ON: Delete ALL frames EXCEPT interval frames (keep interval frames)
+        # INVERT ON: Delete ALL frames EXCEPT interval frames
         result = [f for f in all_frames if f not in interval_frames]
         print(f"🔄 INVERT ON: Delete {len(result)} frames (keep {len(interval_frames)})")
     else:
-        # INVERT OFF: Delete ONLY interval frames (keep others)
+        # INVERT OFF: Delete ONLY interval frames
         result = interval_frames
         print(f"🔄 INVERT OFF: Delete {len(result)} interval frames")
     
@@ -88,59 +88,84 @@ def get_targets(context, only_selected):
         arm = context.object
         if arm and arm.type == 'ARMATURE':
             if only_selected:
-                return list(context.selected_pose_bones)  # Only selected bones
+                return list(context.selected_pose_bones)
             else:
-                return list(arm.pose.bones)  # All pose bones
+                return list(arm.pose.bones)
     
-    # Object modes (OBJECT, EDIT, etc.)
     if only_selected:
-        return list(context.selected_objects)  # Only selected objects
+        return list(context.selected_objects)
     else:
-        return list(context.scene.objects)  # All scene objects
+        return list(context.scene.objects)
 
 def delete_pose_bone_exact(pbone, frames, props):
+    """✅ FIXED: Syntax error corrected"""
     deleted = 0
     for frame in frames:
         if props.all_types or props.pos:
             for i in range(3):  # Location XYZ
-                try: pbone.keyframe_delete("location", frame=frame, index=i); deleted += 1
-                except: pass
+                try: 
+                    pbone.keyframe_delete("location", frame=frame, index=i)
+                    deleted += 1
+                except: 
+                    pass
         if props.all_types or props.rot:
             if pbone.rotation_mode == 'QUATERNION':
                 for i in range(4):  # Quat WXYZ
-                    try: pbone.keyframe_delete("rotation_quaternion", frame=frame, index=i); deleted += 1
-                    except: pass
+                    try: 
+                        pbone.keyframe_delete("rotation_quaternion", frame=frame, index=i)
+                        deleted += 1
+                    except: 
+                        pass
             else:
-                for i in frames range(3):  # Euler XYZ
-                    try: pbone.keyframe_delete("rotation_euler", frame=frame, index=i); deleted += 1
-                    except: pass
+                for i in range(3):  # FIXED: was "for i in frames range(3)"
+                    try: 
+                        pbone.keyframe_delete("rotation_euler", frame=frame, index=i)
+                        deleted += 1
+                    except: 
+                        pass
         if props.all_types or props.scl:
             for i in range(3):  # Scale XYZ
-                try: pbone.keyframe_delete("scale", frame=frame, index=i); deleted += 1
-                except: pass
+                try: 
+                    pbone.keyframe_delete("scale", frame=frame, index=i)
+                    deleted += 1
+                except: 
+                    pass
     print(f"✅ POSE '{pbone.name}': {deleted} keys")
     return deleted
 
 def delete_object_exact(obj, frames, props):
+    """✅ Clean object deletion"""
     deleted = 0
     for frame in frames:
         if props.all_types or props.pos:
             for i in range(3):
-                try: obj.keyframe_delete("location", frame=frame, index=i); deleted += 1
-                except: pass
+                try: 
+                    obj.keyframe_delete("location", frame=frame, index=i)
+                    deleted += 1
+                except: 
+                    pass
         if props.all_types or props.rot:
             if obj.rotation_mode == 'QUATERNION':
                 for i in range(4):
-                    try: obj.keyframe_delete("rotation_quaternion", frame=frame, index=i); deleted += 1
-                    except: pass
+                    try: 
+                        obj.keyframe_delete("rotation_quaternion", frame=frame, index=i)
+                        deleted += 1
+                    except: 
+                        pass
             else:
                 for i in range(3):
-                    try: obj.keyframe_delete("rotation_euler", frame=frame, index=i); deleted += 1
-                    except: pass
+                    try: 
+                        obj.keyframe_delete("rotation_euler", frame=frame, index=i)
+                        deleted += 1
+                    except: 
+                        pass
         if props.all_types or props.scl:
             for i in range(3):
-                try: obj.keyframe_delete("scale", frame=frame, index=i); deleted += 1
-                except: pass
+                try: 
+                    obj.keyframe_delete("scale", frame=frame, index=i)
+                    deleted += 1
+                except: 
+                    pass
     print(f"✅ OBJ '{obj.name}': {deleted} keys")
     return deleted
 
@@ -218,11 +243,15 @@ class BakeKeyframeOperator(bpy.types.Operator):
                 context.view_layer.update()
                 try:
                     if props.all_types or props.pos:
-                        target.keyframe_insert("location"); baked_count += 1
+                        target.keyframe_insert("location")
+                        baked_count += 1
                     if props.all_types or props.rot:
-                        target.keyframe_insert("rotation_quaternion" if target.rotation_mode == 'QUATERNION' else "rotation_euler"); baked_count += 1
+                        rot_path = "rotation_quaternion" if target.rotation_mode == 'QUATERNION' else "rotation_euler"
+                        target.keyframe_insert(rot_path)
+                        baked_count += 1
                     if props.all_types or props.scl:
-                        target.keyframe_insert("scale"); baked_count += 1
+                        target.keyframe_insert("scale")
+                        baked_count += 1
                 except:
                     pass
 
