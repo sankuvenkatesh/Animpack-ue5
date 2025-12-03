@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Delete/Bake Keyframe by Interval Extended",
     "author": "Venkatesh Sanku",
-    "version": (4, 4, 1),  # Fixed syntax error
+    "version": (4, 4, 2),  # Fixed Pose Mode Invert
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Animation",
-    "description": "Delete/bake keyframes by interval - FIXED INVERT & SELECTION",
+    "description": "Delete/bake keyframes by interval - POSE MODE INVERT FIXED",
     "category": "Animation",
 }
 
@@ -60,7 +60,7 @@ class DeleteKeyframeProperties(bpy.types.PropertyGroup):
             self.pos = self.rot = self.scl = self.custom = True
 
 def calculate_frames(props):
-    """✅ FIXED: Clear invert logic with debug info"""
+    """✅ POSE MODE FIXED: Correct frame calculation"""
     start, end, interval, invert = props.start_frame, props.end_frame, props.interval, props.invert
     
     if end < start or interval < 1:
@@ -70,18 +70,18 @@ def calculate_frames(props):
     interval_frames = [f for idx, f in enumerate(all_frames) if (idx % interval) == 0]
     
     if invert:
-        # INVERT ON: Delete ALL frames EXCEPT interval frames
+        # INVERT ON: Delete NON-interval frames (1,3,5,7...)
         result = [f for f in all_frames if f not in interval_frames]
-        print(f"🔄 INVERT ON: Delete {len(result)} frames (keep {len(interval_frames)})")
+        print(f"🔄 INVERT ON: Delete {len(result)} NON-interval frames")
     else:
-        # INVERT OFF: Delete ONLY interval frames
+        # INVERT OFF: Delete interval frames (0,2,4,6...)
         result = interval_frames
         print(f"🔄 INVERT OFF: Delete {len(result)} interval frames")
     
     return result
 
 def get_targets(context, only_selected):
-    """✅ FIXED: Proper target selection for ALL modes"""
+    """✅ Proper target selection"""
     mode = context.mode
     
     if mode == 'POSE':
@@ -98,43 +98,56 @@ def get_targets(context, only_selected):
         return list(context.scene.objects)
 
 def delete_pose_bone_exact(pbone, frames, props):
-    """✅ FIXED: Syntax error corrected"""
+    """✅ POSE MODE: Fixed keyframe deletion logic"""
     deleted = 0
+    
+    # Force armature update for pose bones
+    if pbone.id_data.animation_data:
+        pbone.id_data.update_tag()
+    
     for frame in frames:
+        bpy.context.scene.frame_set(frame)
+        
+        # Location XYZ
         if props.all_types or props.pos:
-            for i in range(3):  # Location XYZ
-                try: 
+            for i in range(3):
+                try:
                     pbone.keyframe_delete("location", frame=frame, index=i)
                     deleted += 1
-                except: 
+                except RuntimeError:
                     pass
+        
+        # Rotation - Handle both quaternion and euler correctly
         if props.all_types or props.rot:
-            if pbone.rotation_mode == 'QUATERNION':
-                for i in range(4):  # Quat WXYZ
-                    try: 
+            rot_mode = pbone.rotation_mode
+            if rot_mode == 'QUATERNION':
+                for i in range(4):
+                    try:
                         pbone.keyframe_delete("rotation_quaternion", frame=frame, index=i)
                         deleted += 1
-                    except: 
+                    except RuntimeError:
                         pass
             else:
-                for i in range(3):  # FIXED: was "for i in frames range(3)"
-                    try: 
+                for i in range(3):
+                    try:
                         pbone.keyframe_delete("rotation_euler", frame=frame, index=i)
                         deleted += 1
-                    except: 
+                    except RuntimeError:
                         pass
+        
+        # Scale XYZ
         if props.all_types or props.scl:
-            for i in range(3):  # Scale XYZ
-                try: 
+            for i in range(3):
+                try:
                     pbone.keyframe_delete("scale", frame=frame, index=i)
                     deleted += 1
-                except: 
+                except RuntimeError:
                     pass
-    print(f"✅ POSE '{pbone.name}': {deleted} keys")
+    
+    print(f"✅ POSE '{pbone.name}': {deleted} keys deleted ({len(frames)} frames targeted)")
     return deleted
 
 def delete_object_exact(obj, frames, props):
-    """✅ Clean object deletion"""
     deleted = 0
     for frame in frames:
         if props.all_types or props.pos:
@@ -142,30 +155,26 @@ def delete_object_exact(obj, frames, props):
                 try: 
                     obj.keyframe_delete("location", frame=frame, index=i)
                     deleted += 1
-                except: 
-                    pass
+                except: pass
         if props.all_types or props.rot:
             if obj.rotation_mode == 'QUATERNION':
                 for i in range(4):
                     try: 
                         obj.keyframe_delete("rotation_quaternion", frame=frame, index=i)
                         deleted += 1
-                    except: 
-                        pass
+                    except: pass
             else:
                 for i in range(3):
                     try: 
                         obj.keyframe_delete("rotation_euler", frame=frame, index=i)
                         deleted += 1
-                    except: 
-                        pass
+                    except: pass
         if props.all_types or props.scl:
             for i in range(3):
                 try: 
                     obj.keyframe_delete("scale", frame=frame, index=i)
                     deleted += 1
-                except: 
-                    pass
+                except: pass
     print(f"✅ OBJ '{obj.name}': {deleted} keys")
     return deleted
 
@@ -193,7 +202,12 @@ class DeleteKeyframeOperator(bpy.types.Operator):
         sel_text = "SELECTED" if props.only_selected else "ALL"
 
         print(f"
-🚀 DELETE: {mode_name} {sel_text} | {len(targets)} targets | {len(frames)} frames")
+🚀 DELETE MODE: {mode_name} | Targets: {sel_text} ({len(targets)}) | Frames: {len(frames)}")
+
+        # IMPORTANT: For Pose mode, set frame before processing each target
+        if context.mode == 'POSE':
+            for frame in frames:
+                scene.frame_set(frame)
 
         for target in targets:
             try:
@@ -208,11 +222,12 @@ class DeleteKeyframeOperator(bpy.types.Operator):
         scene.frame_set(original_frame)
         context.view_layer.update()
         
+        # Force refresh all animation editors
         for area in context.screen.areas:
             if area.type in {'VIEW_3D', 'GRAPH_EDITOR', 'DOPESHEET_EDITOR', 'TIMELINE'}:
                 area.tag_redraw()
 
-        self.report({'INFO'}, f"Deleted {total_deleted} keyframes ({len(targets)} {mode_name.lower()})")
+        self.report({'INFO'}, f"Deleted {total_deleted} keyframes from {len(targets)} {mode_name.lower()}")
         return {'FINISHED'}
 
 class BakeKeyframeOperator(bpy.types.Operator):
@@ -232,10 +247,9 @@ class BakeKeyframeOperator(bpy.types.Operator):
         scene = context.scene
         original_frame = scene.frame_current
         baked_count = 0
-        sel_text = "SELECTED" if props.only_selected else "ALL"
 
         print(f"
-🚀 BAKE: {len(targets)} targets | {len(frames)} frames | {sel_text}")
+🚀 BAKE: {len(targets)} targets | {len(frames)} frames")
 
         for target in targets:
             for f in frames:
@@ -299,8 +313,11 @@ class DeleteBakeKeyframePanel(bpy.types.Panel):
         # Preview
         preview_box = layout.box()
         frames = calculate_frames(props)
-        invert_text = "🟢 KEEP INTERVAL" if props.invert else "🔴 DELETE INTERVAL"
-        preview_box.label(text=f"📊 {invert_text}: {len(frames)} frames", icon='INFO')
+        if props.invert:
+            preview_text = f"🟢 KEEP INTERVAL: {len(frames)} frames to DELETE"
+        else:
+            preview_text = f"🔴 DELETE INTERVAL: {len(frames)} frames"
+        preview_box.label(text=f"📊 {preview_text}", icon='INFO')
 
         # Buttons
         row = layout.row(align=True)
