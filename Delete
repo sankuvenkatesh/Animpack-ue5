@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Delete/Bake Keyframe by Interval Extended",
     "author": "Venkatesh Sanku",
-    "version": (4, 1, 0),
+    "version": (4, 2, 0),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Animation",
-    "description": "Delete/bake keyframes by interval - SAFE POSE FIX",
+    "description": "Delete/bake keyframes by interval - ALL FRAMES FIX",
     "category": "Animation",
 }
 
@@ -91,63 +91,97 @@ def get_selected_objects_or_bones(context):
             return context.selected_pose_bones
     return context.selected_objects
 
-# ------------- SAFE POSE DELETION (NO F-CURVE ACCESS) -------------
-def delete_pose_bone_safe(pbone, frames, props):
-    """Safe PoseBone deletion using ONLY keyframe_delete API."""
+# ------------- ALL COMPONENTS, ALL FRAMES -------------
+def delete_pose_bone_complete(pbone, frames, props):
+    """Delete ALL components on ALL target frames."""
     deleted = 0
-    frames_set = set(frames)
     
-    # Standard transform channels
-    channels = []
+    # Location XYZ
     if props.all_types or props.pos:
-        channels.extend(["location"])
-    if props.all_types or props.rot:
-        channels.extend(["rotation_euler", "rotation_quaternion"])
-    if props.all_types or props.scl:
-        channels.extend(["scale"])
-    
-    # Delta channels
-    if props.all_types:
-        channels.extend(["delta_location", "delta_rotation_euler", "delta_rotation_quaternion", "delta_scale"])
-    
-    for frame in frames_set:
-        for channel in channels:
+        for i, frame in enumerate(frames):
             try:
-                # Use index=-1 to delete ALL components (X,Y,Z,W)
-                pbone.keyframe_delete(data_path=channel, frame=frame, index=-1)
-                deleted += 1
-            except RuntimeError:
-                pass  # Key doesn't exist - safe
-    
-    print(f"✅ [POSE SAFE] Bone '{pbone.name}': {deleted} keys deleted")
-    return deleted
-
-# ------------- SAFE OBJECT DELETION -------------
-def delete_object_safe(obj, frames, props):
-    """Safe Object deletion using ONLY keyframe_delete API."""
-    deleted = 0
-    frames_set = set(frames)
-    
-    channels = []
-    if props.all_types or props.pos:
-        channels.extend(["location"])
-    if props.all_types or props.rot:
-        channels.extend(["rotation_euler", "rotation_quaternion"])
-    if props.all_types or props.scl:
-        channels.extend(["scale"])
-    
-    if props.all_types:
-        channels.extend(["delta_location", "delta_rotation_euler", "delta_rotation_quaternion", "delta_scale"])
-    
-    for frame in frames_set:
-        for channel in channels:
-            try:
-                obj.keyframe_delete(data_path=channel, frame=frame, index=-1)
-                deleted += 1
+                pbone.keyframe_delete(data_path="location", frame=frame, index=0)  # X
+                pbone.keyframe_delete(data_path="location", frame=frame, index=1)  # Y  
+                pbone.keyframe_delete(data_path="location", frame=frame, index=2)  # Z
+                deleted += 3
             except RuntimeError:
                 pass
     
-    print(f"✅ [OBJECT SAFE] '{obj.name}': {deleted} keys deleted")
+    # Rotation XYZ/W
+    if props.all_types or props.rot:
+        for i, frame in enumerate(frames):
+            try:
+                # Euler XYZ
+                pbone.keyframe_delete(data_path="rotation_euler", frame=frame, index=0)
+                pbone.keyframe_delete(data_path="rotation_euler", frame=frame, index=1)
+                pbone.keyframe_delete(data_path="rotation_euler", frame=frame, index=2)
+                # Quaternion WXYZ
+                pbone.keyframe_delete(data_path="rotation_quaternion", frame=frame, index=0)
+                pbone.keyframe_delete(data_path="rotation_quaternion", frame=frame, index=1)
+                pbone.keyframe_delete(data_path="rotation_quaternion", frame=frame, index=2)
+                pbone.keyframe_delete(data_path="rotation_quaternion", frame=frame, index=3)
+                deleted += 7
+            except RuntimeError:
+                pass
+    
+    # Scale XYZ
+    if props.all_types or props.scl:
+        for i, frame in enumerate(frames):
+            try:
+                pbone.keyframe_delete(data_path="scale", frame=frame, index=0)  # X
+                pbone.keyframe_delete(data_path="scale", frame=frame, index=1)   # Y
+                pbone.keyframe_delete(data_path="scale", frame=frame, index=2)   # Z
+                deleted += 3
+            except RuntimeError:
+                pass
+    
+    print(f"✅ [POSE] '{pbone.name}': {deleted} keys deleted across {len(frames)} frames")
+    return deleted
+
+def delete_object_complete(obj, frames, props):
+    """Delete ALL components on ALL target frames."""
+    deleted = 0
+    
+    # Location XYZ
+    if props.all_types or props.pos:
+        for i, frame in enumerate(frames):
+            try:
+                obj.keyframe_delete(data_path="location", frame=frame, index=0)
+                obj.keyframe_delete(data_path="location", frame=frame, index=1)
+                obj.keyframe_delete(data_path="location", frame=frame, index=2)
+                deleted += 3
+            except RuntimeError:
+                pass
+    
+    # Rotation XYZ/W
+    if props.all_types or props.rot:
+        for i, frame in enumerate(frames):
+            try:
+                # Euler XYZ
+                obj.keyframe_delete(data_path="rotation_euler", frame=frame, index=0)
+                obj.keyframe_delete(data_path="rotation_euler", frame=frame, index=1)
+                obj.keyframe_delete(data_path="rotation_euler", frame=frame, index=2)
+                # Quaternion WXYZ
+                obj.keyframe_delete(data_path="rotation_quaternion", frame=frame, index=0)
+                obj.keyframe_delete(data_path="rotation_quaternion", frame=frame, index=1)
+                obj.keyframe_delete(data_path="rotation_quaternion", frame=frame, index=2)
+                obj.keyframe_delete(data_path="rotation_quaternion", frame=frame, index=3)
+                deleted += 7
+            except RuntimeError:
+                pass
+    
+    # Scale XYZ
+    if props.all_types or props.scl:
+        for i, frame in enumerate(frames):
+            try:
+                obj.keyframe_delete(data_path="scale", frame=frame, index=0)
+                obj.keyframe_delete(data_path="scale", frame=frame, index=1)
+                obj.keyframe_delete(data_path="scale", frame=frame, index=2)
+                deleted += 3
+            except RuntimeError:
+                pass
+    
+    print(f"✅ [OBJECT] '{obj.name}': {deleted} keys deleted across {len(frames)} frames")
     return deleted
 
 class DeleteKeyframeOperator(bpy.types.Operator):
@@ -172,20 +206,19 @@ class DeleteKeyframeOperator(bpy.types.Operator):
         total_deleted = 0
 
         print(f"
-🚀 DELETE START: {context.mode} mode, {len(targets)} targets, {len(frames)} frames")
+🚀 DELETE: {context.mode}, {len(targets)} targets, {len(frames)} frames")
 
         for target in targets:
             try:
                 if context.mode == 'POSE':
-                    deleted = delete_pose_bone_safe(target, frames, props)
+                    deleted = delete_pose_bone_complete(target, frames, props)
                 else:
-                    deleted = delete_object_safe(target, frames, props)
+                    deleted = delete_object_complete(target, frames, props)
                 total_deleted += deleted
             except Exception as e:
                 print(f"❌ ERROR {getattr(target, 'name', 'unknown')}: {e}")
                 continue
 
-        # Restore frame and refresh
         scene.frame_set(original_frame)
         context.view_layer.update()
         
@@ -194,8 +227,8 @@ class DeleteKeyframeOperator(bpy.types.Operator):
                 area.tag_redraw()
 
         mode_text = "pose bones" if context.mode == 'POSE' else "objects"
-        print(f"🚀 DELETE COMPLETE: {total_deleted} keyframes ({len(targets)} {mode_text})")
-        self.report({'INFO'}, f"Deleted {total_deleted} keyframes ({len(targets)} {mode_text})")
+        print(f"🚀 TOTAL: {total_deleted} keyframes ({len(targets)} {mode_text})")
+        self.report({'INFO'}, f"Deleted {total_deleted} keyframes")
         return {'FINISHED'}
 
 # ------------- BAKE OPERATOR (UNCHANGED) -------------
