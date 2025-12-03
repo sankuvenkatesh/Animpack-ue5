@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Delete/Bake Keyframe by Interval Extended",
     "author": "Venkatesh Sanku",
-    "version": (3, 3, 0),
+    "version": (4, 0, 0),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Animation",
-    "description": "Delete/bake keyframes by interval - WORKING FIX",
+    "description": "Delete/bake keyframes by interval - POSE OPS FIX",
     "category": "Animation",
 }
 
@@ -91,31 +91,63 @@ def get_selected_objects_or_bones(context):
             return context.selected_pose_bones
     return context.selected_objects
 
-# ------------- DIRECT API DELETION - NO F-CURVES -------------
-def delete_pose_bone_direct(pbone, frames, props):
-    """Delete using PoseBone.keyframe_delete() API directly."""
+# ------------- POSE MODE: bpy.ops.action.delete() -------------
+def delete_pose_bone_with_ops(context, bone_names, frames):
+    """Delete pose bone keyframes using native action editor operator."""
     deleted = 0
+    
+    # Get armature action
+    armature = context.object
+    if not armature or not armature.animation_data or not armature.animation_data.action:
+        print("❌ [POSE] No action found")
+        return 0
+    
+    action = armature.animation_data.action
+    print(f"
+🎯 [POSE] Action: {action.name}, Bones: {bone_names}, Frames: {len(frames)}")
+    
+    # Build bone data_path patterns
+    bone_patterns = [f'pose.bones["{bn}"]' for bn in bone_names]
+    
+    # Select relevant F-Curves
+    for fc in action.fcurves:
+        fc.select = False
+        for pattern in bone_patterns:
+            if pattern in fc.data_path:
+                fc.select = True
+                break
+    
+    # Select keyframes on target frames
     frames_set = set(frames)
-    
-    data_paths = []
-    if props.all_types or props.pos:
-        data_paths.extend(["location", "delta_location"])
-    if props.all_types or props.rot:
-        data_paths.extend(["rotation_euler", "rotation_quaternion", "delta_rotation_euler", "delta_rotation_quaternion"])
-    if props.all_types or props.scl:
-        data_paths.extend(["scale", "delta_scale"])
-    
-    for f in frames_set:
-        for path in data_paths:
-            try:
-                pbone.keyframe_delete(data_path=path, frame=f, index=-1)
+    for fc in action.fcurves:
+        if not fc.select:
+            continue
+        for kp in fc.keyframe_points:
+            kp.select_control_point = (round(kp.co[0]) in frames_set)
+            if kp.select_control_point:
                 deleted += 1
-            except RuntimeError:
-                pass
     
-    print(f"✅ [POSE] Deleted {deleted} keys from bone '{pbone.name}'")
+    # Execute deletion operator
+    if deleted > 0:
+        try:
+            # Switch to action editor temporarily
+            original_area = context.area.type
+            context.area.type = 'DOPESHEET_EDITOR'
+            context.space_data.mode = 'ACTION'
+            
+            bpy.ops.action.delete()
+            
+            # Restore area
+            context.area.type = original_area
+            
+            print(f"✅ [POSE] Deleted {deleted} keyframes using bpy.ops.action.delete()")
+        except Exception as e:
+            print(f"❌ [POSE] Operator failed: {e}")
+            deleted = 0
+    
     return deleted
 
+# ------------- OBJECT MODE: Direct API -------------
 def delete_object_direct(obj, frames, props):
     """Delete using Object.keyframe_delete() API directly."""
     deleted = 0
@@ -162,22 +194,23 @@ class DeleteKeyframeOperator(bpy.types.Operator):
         deleted_count = 0
 
         print(f"
-🚀 [DELETE] Mode: {context.mode}, Targets: {len(targets)}, Frames: {len(frames)}")
+{'='*60}")
+        print(f"🚀 [DELETE] Mode: {context.mode}, Targets: {len(targets)}, Frames: {len(frames)}")
+        print(f"{'='*60}")
 
-        for target in targets:
-            try:
-                if context.mode == 'POSE':
-                    # Direct PoseBone deletion
-                    deleted = delete_pose_bone_direct(target, frames, props)
-                else:
-                    # Direct Object deletion
+        if context.mode == 'POSE':
+            # POSE MODE: Use bpy.ops.action.delete() for ALL selected bones at once
+            bone_names = [t.name for t in targets]
+            deleted_count = delete_pose_bone_with_ops(context, bone_names, frames)
+        else:
+            # OBJECT MODE: Direct API per object
+            for target in targets:
+                try:
                     deleted = delete_object_direct(target, frames, props)
-                
-                deleted_count += deleted
-                
-            except Exception as e:
-                print(f"❌ Error on {getattr(target, 'name', 'unknown')}: {e}")
-                continue
+                    deleted_count += deleted
+                except Exception as e:
+                    print(f"❌ Error on {getattr(target, 'name', 'unknown')}: {e}")
+                    continue
 
         scene.frame_set(original_frame)
         context.view_layer.update()
@@ -187,7 +220,10 @@ class DeleteKeyframeOperator(bpy.types.Operator):
                 area.tag_redraw()
 
         mode_text = "pose bones" if context.mode == 'POSE' else "objects"
+        print(f"{'='*60}")
         print(f"🚀 [DELETE COMPLETE] Total: {deleted_count} keyframes")
+        print(f"{'='*60}
+")
         self.report({'INFO'}, f"Deleted {deleted_count} keyframes ({len(targets)} {mode_text})")
         return {'FINISHED'}
 
