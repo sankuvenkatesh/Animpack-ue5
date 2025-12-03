@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Delete/Bake Keyframe by Interval Extended",
     "author": "Venkatesh Sanku",
-    "version": (4, 2, 0),
+    "version": (4, 3, 0),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Animation",
-    "description": "Delete/bake keyframes by interval - ALL FRAMES FIX",
+    "description": "Delete/bake keyframes by interval - EXACT COUNT MATCH",
     "category": "Animation",
 }
 
@@ -91,97 +91,93 @@ def get_selected_objects_or_bones(context):
             return context.selected_pose_bones
     return context.selected_objects
 
-# ------------- ALL COMPONENTS, ALL FRAMES -------------
-def delete_pose_bone_complete(pbone, frames, props):
-    """Delete ALL components on ALL target frames."""
+# ------------- EXACT DELETE MATCHING BAKE COUNTS -------------
+def delete_pose_bone_exact(pbone, frames, props):
+    """Delete EXACTLY like bake - count only successful deletions."""
     deleted = 0
     
-    # Location XYZ
-    if props.all_types or props.pos:
-        for i, frame in enumerate(frames):
-            try:
-                pbone.keyframe_delete(data_path="location", frame=frame, index=0)  # X
-                pbone.keyframe_delete(data_path="location", frame=frame, index=1)  # Y  
-                pbone.keyframe_delete(data_path="location", frame=frame, index=2)  # Z
-                deleted += 3
-            except RuntimeError:
-                pass
+    for frame in frames:
+        # Location XYZ (bake does this)
+        if props.all_types or props.pos:
+            for index in range(3):  # X,Y,Z
+                try:
+                    pbone.keyframe_delete(data_path="location", frame=frame, index=index)
+                    deleted += 1
+                except RuntimeError:
+                    pass
+        
+        # Rotation (bake does euler OR quaternion based on mode)
+        if props.all_types or props.rot:
+            rot_mode = getattr(pbone, 'rotation_mode', 'QUATERNION')
+            if rot_mode == 'QUATERNION':
+                for index in range(4):  # W,X,Y,Z
+                    try:
+                        pbone.keyframe_delete(data_path="rotation_quaternion", frame=frame, index=index)
+                        deleted += 1
+                    except RuntimeError:
+                        pass
+            else:  # Euler XYZ
+                for index in range(3):
+                    try:
+                        pbone.keyframe_delete(data_path="rotation_euler", frame=frame, index=index)
+                        deleted += 1
+                    except RuntimeError:
+                        pass
+        
+        # Scale XYZ (bake does this)
+        if props.all_types or props.scl:
+            for index in range(3):  # X,Y,Z
+                try:
+                    pbone.keyframe_delete(data_path="scale", frame=frame, index=index)
+                    deleted += 1
+                except RuntimeError:
+                    pass
     
-    # Rotation XYZ/W
-    if props.all_types or props.rot:
-        for i, frame in enumerate(frames):
-            try:
-                # Euler XYZ
-                pbone.keyframe_delete(data_path="rotation_euler", frame=frame, index=0)
-                pbone.keyframe_delete(data_path="rotation_euler", frame=frame, index=1)
-                pbone.keyframe_delete(data_path="rotation_euler", frame=frame, index=2)
-                # Quaternion WXYZ
-                pbone.keyframe_delete(data_path="rotation_quaternion", frame=frame, index=0)
-                pbone.keyframe_delete(data_path="rotation_quaternion", frame=frame, index=1)
-                pbone.keyframe_delete(data_path="rotation_quaternion", frame=frame, index=2)
-                pbone.keyframe_delete(data_path="rotation_quaternion", frame=frame, index=3)
-                deleted += 7
-            except RuntimeError:
-                pass
-    
-    # Scale XYZ
-    if props.all_types or props.scl:
-        for i, frame in enumerate(frames):
-            try:
-                pbone.keyframe_delete(data_path="scale", frame=frame, index=0)  # X
-                pbone.keyframe_delete(data_path="scale", frame=frame, index=1)   # Y
-                pbone.keyframe_delete(data_path="scale", frame=frame, index=2)   # Z
-                deleted += 3
-            except RuntimeError:
-                pass
-    
-    print(f"✅ [POSE] '{pbone.name}': {deleted} keys deleted across {len(frames)} frames")
+    print(f"✅ [POSE] '{pbone.name}': {deleted} keys deleted ({len(frames)} frames)")
     return deleted
 
-def delete_object_complete(obj, frames, props):
-    """Delete ALL components on ALL target frames."""
+def delete_object_exact(obj, frames, props):
+    """Delete EXACTLY like bake - count only successful deletions."""
     deleted = 0
     
-    # Location XYZ
-    if props.all_types or props.pos:
-        for i, frame in enumerate(frames):
-            try:
-                obj.keyframe_delete(data_path="location", frame=frame, index=0)
-                obj.keyframe_delete(data_path="location", frame=frame, index=1)
-                obj.keyframe_delete(data_path="location", frame=frame, index=2)
-                deleted += 3
-            except RuntimeError:
-                pass
+    for frame in frames:
+        # Location XYZ
+        if props.all_types or props.pos:
+            for index in range(3):
+                try:
+                    obj.keyframe_delete(data_path="location", frame=frame, index=index)
+                    deleted += 1
+                except RuntimeError:
+                    pass
+        
+        # Rotation (matches bake logic exactly)
+        if props.all_types or props.rot:
+            rot_mode = getattr(obj, 'rotation_mode', 'QUATERNION')
+            if rot_mode == 'QUATERNION':
+                for index in range(4):
+                    try:
+                        obj.keyframe_delete(data_path="rotation_quaternion", frame=frame, index=index)
+                        deleted += 1
+                    except RuntimeError:
+                        pass
+            else:
+                for index in range(3):
+                    try:
+                        obj.keyframe_delete(data_path="rotation_euler", frame=frame, index=index)
+                        deleted += 1
+                    except RuntimeError:
+                        pass
+        
+        # Scale XYZ
+        if props.all_types or props.scl:
+            for index in range(3):
+                try:
+                    obj.keyframe_delete(data_path="scale", frame=frame, index=index)
+                    deleted += 1
+                except RuntimeError:
+                    pass
     
-    # Rotation XYZ/W
-    if props.all_types or props.rot:
-        for i, frame in enumerate(frames):
-            try:
-                # Euler XYZ
-                obj.keyframe_delete(data_path="rotation_euler", frame=frame, index=0)
-                obj.keyframe_delete(data_path="rotation_euler", frame=frame, index=1)
-                obj.keyframe_delete(data_path="rotation_euler", frame=frame, index=2)
-                # Quaternion WXYZ
-                obj.keyframe_delete(data_path="rotation_quaternion", frame=frame, index=0)
-                obj.keyframe_delete(data_path="rotation_quaternion", frame=frame, index=1)
-                obj.keyframe_delete(data_path="rotation_quaternion", frame=frame, index=2)
-                obj.keyframe_delete(data_path="rotation_quaternion", frame=frame, index=3)
-                deleted += 7
-            except RuntimeError:
-                pass
-    
-    # Scale XYZ
-    if props.all_types or props.scl:
-        for i, frame in enumerate(frames):
-            try:
-                obj.keyframe_delete(data_path="scale", frame=frame, index=0)
-                obj.keyframe_delete(data_path="scale", frame=frame, index=1)
-                obj.keyframe_delete(data_path="scale", frame=frame, index=2)
-                deleted += 3
-            except RuntimeError:
-                pass
-    
-    print(f"✅ [OBJECT] '{obj.name}': {deleted} keys deleted across {len(frames)} frames")
+    print(f"✅ [OBJECT] '{obj.name}': {deleted} keys deleted ({len(frames)} frames)")
     return deleted
 
 class DeleteKeyframeOperator(bpy.types.Operator):
@@ -211,9 +207,9 @@ class DeleteKeyframeOperator(bpy.types.Operator):
         for target in targets:
             try:
                 if context.mode == 'POSE':
-                    deleted = delete_pose_bone_complete(target, frames, props)
+                    deleted = delete_pose_bone_exact(target, frames, props)
                 else:
-                    deleted = delete_object_complete(target, frames, props)
+                    deleted = delete_object_exact(target, frames, props)
                 total_deleted += deleted
             except Exception as e:
                 print(f"❌ ERROR {getattr(target, 'name', 'unknown')}: {e}")
@@ -231,7 +227,7 @@ class DeleteKeyframeOperator(bpy.types.Operator):
         self.report({'INFO'}, f"Deleted {total_deleted} keyframes")
         return {'FINISHED'}
 
-# ------------- BAKE OPERATOR (UNCHANGED) -------------
+# ------------- BAKE OPERATOR (UNCHANGED - REFERENCE) -------------
 class BakeKeyframeOperator(bpy.types.Operator):
     bl_idname = "object.bake_keyframe_by_interval"
     bl_label = "Bake Keyframes"
@@ -253,15 +249,18 @@ class BakeKeyframeOperator(bpy.types.Operator):
                 try:
                     if props.all_types or props.pos:
                         target.keyframe_insert(data_path="location", frame=f)
+                        baked_count += 1  # Counts successful inserts
                     if props.all_types or props.rot:
                         rot_mode = getattr(target, 'rotation_mode', None)
                         if rot_mode == 'QUATERNION':
                             target.keyframe_insert(data_path="rotation_quaternion", frame=f)
+                            baked_count += 1
                         else:
                             target.keyframe_insert(data_path="rotation_euler", frame=f)
+                            baked_count += 1
                     if props.all_types or props.scl:
                         target.keyframe_insert(data_path="scale", frame=f)
-                    baked_count += 1
+                        baked_count += 1
                 except:
                     pass
 
