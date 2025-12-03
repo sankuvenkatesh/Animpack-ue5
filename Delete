@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Delete/Bake Keyframe by Interval Extended",
     "author": "Venkatesh Sanku",
-    "version": (3, 0, 0),
+    "version": (3, 1, 0),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Animation",
-    "description": "Delete/bake keyframes by interval - UNIVERSAL RIG FIX",
+    "description": "Delete/bake keyframes by interval - DEBUG + NUCLEAR FIX",
     "category": "Animation",
 }
 
@@ -49,11 +49,11 @@ class DeleteKeyframeProperties(bpy.types.PropertyGroup):
     )
     rot: bpy.props.BoolProperty(
         name="Rotation", default=True,
-        description="Affect Rotation"
+        description="Rotation"
     )
     scl: bpy.props.BoolProperty(
         name="Scale", default=True,
-        description="Affect Scale"
+        description="Scale"
     )
     custom: bpy.props.BoolProperty(
         name="Custom Properties", default=True,
@@ -91,51 +91,50 @@ def get_selected_objects_or_bones(context):
             return context.selected_pose_bones
     return context.selected_objects
 
-# ------------- UNIVERSAL DELETION FOR ALL RIG TYPES -------------
-def delete_keyframes_universal(armature_or_object, bone_names=None, frames=None, props=None):
-    """UNIVERSAL deletion: works for ANY rig by bone name substring matching."""
-    if not armature_or_object.animation_data or not armature_or_object.animation_data.action:
+# ------------- NUCLEAR UNIVERSAL DELETE WITH DEBUG -------------
+def delete_keyframes_nuclear(target, bone_names=None, frames=None, props=None):
+    """NUCLEAR OPTION: Finds and deletes ANY matching keyframes."""
+    deleted = 0
+    frames_set = set(frames)
+    
+    print(f"
+🔥 [NUCLEAR] Target: {getattr(target, 'name', 'unknown')}")
+    print(f"🔥 [NUCLEAR] Bone names: {bone_names}")
+    print(f"🔥 [NUCLEAR] Frames: {sorted(list(frames_set))}")
+    
+    if not target.animation_data or not target.animation_data.action:
+        print("🔥 [NUCLEAR] ❌ No animation_data.action")
         return 0
     
-    action = armature_or_object.animation_data.action
-    frames_set = set(frames)
-    deleted = 0
+    action = target.animation_data.action
+    print(f"🔥 [NUCLEAR] Action: {action.name}, {len(action.fcurves)} F-Curves")
     
-    print(f"[UNIVERSAL] Processing {armature_or_object.name}, bone_names: {bone_names[:3] if bone_names else 'ALL'}")
-    
+    # STRATEGY 1: Bone name substring matching (Rigify/ARP/Custom)
+    bone_hits = 0
     for fc in action.fcurves:
-        # If bone names provided, match substring in ANY F-Curve data_path
         if bone_names:
-            bone_match = any(bone_name in fc.data_path for bone_name in bone_names)
-            if not bone_match:
-                continue
-        
-        # Property filtering
-        data_path_lower = fc.data_path.lower()
-        if props and not (props.all_types or 
-                         (props.pos and 'location' in data_path_lower) or
-                         (props.rot and 'rotation' in data_path_lower) or
-                         (props.scl and 'scale' in data_path_lower) or
-                         (props.custom and ('custom' in data_path_lower or '"' in fc.data_path))):
-            continue
-        
-        # Safe deletion: collect indices first
-        to_remove = []
-        for i, kp in enumerate(fc.keyframe_points):
-            if round(kp.co[0]) in frames_set:
-                to_remove.append(i)
-        
-        for i in reversed(to_remove):
-            del fc.keyframe_points[i]
-            deleted += 1
+            if any(bone in fc.data_path for bone in bone_names):
+                bone_hits += 1
+                print(f"🔥 [STRATEGY1] HIT: {fc.data_path} -> {len(fc.keyframe_points)} keys")
+                
+                to_remove = [i for i, kp in enumerate(fc.keyframe_points) if round(kp.co[0]) in frames_set]
+                for i in reversed(to_remove):
+                    del fc.keyframe_points[i]
+                    deleted += 1
+        else:
+            # STRATEGY 2: Object-level (no bone filter)
+            to_remove = [i for i, kp in enumerate(fc.keyframe_points) if round(kp.co[0]) in frames_set]
+            for i in reversed(to_remove):
+                del fc.keyframe_points[i]
+                deleted += 1
+    
+    print(f"🔥 [NUCLEAR] Bone F-Curves matched: {bone_hits}")
+    print(f"🔥 [NUCLEAR] ✅ TOTAL DELETED: {deleted}")
     
     if deleted > 0:
         action.update()
-        print(f"[UNIVERSAL] ✅ Deleted {deleted} keyframes from {armature_or_object.name}")
     
     return deleted
-
-# ------------- OPERATORS (UNCHANGED BAKE, FIXED DELETE) -------------
 
 class DeleteKeyframeOperator(bpy.types.Operator):
     bl_idname = "object.delete_keyframe_by_interval"
@@ -147,8 +146,8 @@ class DeleteKeyframeOperator(bpy.types.Operator):
         frames = calculate_frames(props)
         targets = get_selected_objects_or_bones(context) if props.only_selected else context.selected_objects
 
-        if not frames or not targets:
-            self.report({'WARNING'}, "No frames or targets selected!")
+        if not frames:
+            self.report({'WARNING'}, "No frames selected!")
             return {'CANCELLED'}
 
         scene = context.scene
@@ -156,38 +155,28 @@ class DeleteKeyframeOperator(bpy.types.Operator):
         deleted_count = 0
 
         print(f"
-[DELETE] ========================================")
-        print(f"[DELETE] {len(frames)} frames, {len(targets)} targets")
+🚀 [DELETE START] {len(frames)} frames, {len(targets)} targets, mode: {context.mode}")
 
         for target in targets:
             try:
-                if context.mode == 'POSE' and hasattr(target, 'id_data') and target.id_data.type == 'ARMATURE':
-                    # POSE MODE: Universal F-Curve matching by bone name
+                if context.mode == 'POSE':
+                    # POSE: Nuclear bone name matching
                     armature = target.id_data
-                    bone_names = [target.name]  # Single bone name for matching
-                    deleted = delete_keyframes_universal(armature, bone_names, frames, props)
+                    bone_name = target.name
+                    deleted = delete_keyframes_nuclear(armature, [bone_name], frames, props)
                 else:
-                    # OBJECT MODE: Direct keyframe_delete fallback
-                    for f in frames:
-                        try:
-                            if props.all_types or props.pos:
-                                target.keyframe_delete(data_path="location", frame=f)
-                            if props.all_types or props.rot:
-                                target.keyframe_delete(data_path="rotation_euler", frame=f)
-                                target.keyframe_delete(data_path="rotation_quaternion", frame=f)
-                            if props.all_types or props.scl:
-                                target.keyframe_delete(data_path="scale", frame=f)
-                            deleted_count += 1
-                        except:
-                            pass
-                    continue
+                    # OBJECT: Nuclear direct deletion
+                    deleted = delete_keyframes_nuclear(target, None, frames, props)
                 
                 deleted_count += deleted
                 
             except Exception as e:
-                print(f"[DELETE] Error: {e}")
+                print(f"❌ [DELETE ERROR] {e}")
+                import traceback
+                traceback.print_exc()
                 continue
 
+        # Update everything
         scene.frame_set(original_frame)
         context.view_layer.update()
         
@@ -195,11 +184,11 @@ class DeleteKeyframeOperator(bpy.types.Operator):
             if area.type in {'VIEW_3D', 'GRAPH_EDITOR', 'DOPESHEET_EDITOR', 'TIMELINE'}:
                 area.tag_redraw()
 
-        mode_text = "pose bones" if context.mode == 'POSE' else "objects"
-        print(f"[DELETE] ✅ TOTAL DELETED: {deleted_count}")
-        self.report({'INFO'}, f"Deleted {deleted_count} keyframes ({len(targets)} {mode_text})")
+        print(f"🚀 [DELETE END] TOTAL: {deleted_count} keyframes deleted")
+        self.report({'INFO'}, f"Deleted {deleted_count} keyframes")
         return {'FINISHED'}
 
+# ------------- BAKE OPERATOR (UNCHANGED) -------------
 class BakeKeyframeOperator(bpy.types.Operator):
     bl_idname = "object.bake_keyframe_by_interval"
     bl_label = "Bake Keyframes"
@@ -238,6 +227,7 @@ class BakeKeyframeOperator(bpy.types.Operator):
         self.report({'INFO'}, f"Baked {baked_count} keyframes")
         return {'FINISHED'}
 
+# ------------- PANEL (UNCHANGED) -------------
 class DeleteBakeKeyframePanel(bpy.types.Panel):
     bl_label = "🔧 Delete/Bake Keyframe By Interval"
     bl_space_type = 'VIEW_3D'
