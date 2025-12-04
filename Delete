@@ -51,10 +51,9 @@ class DeleteKeyframeProperties(bpy.types.PropertyGroup):
         if self.all_types:
             self.pos = self.rot = self.scl = self.custom = True
 
-# [All functions unchanged - calculate_frames, get_targets, delete_pose_bone_exact, delete_object_exact, operators unchanged]
+# All functional code unchanged...
 
 def calculate_frames(props):
-    """✅ VERIFIED: Frame logic works correctly"""
     start, end, interval, invert = props.start_frame, props.end_frame, props.interval, props.invert
     
     if end < start or interval < 1:
@@ -78,13 +77,10 @@ def get_targets(context, only_selected):
     return list(context.selected_objects) if only_selected else list(context.scene.objects)
 
 def delete_pose_bone_exact(pbone, frames, props):
-    """✅ FIXED: Deletes ALL frames on pose bones - not just first frame"""
     deleted = 0
     scene = bpy.context.scene
     
-    print(f"🔍 Processing POSE bone '{pbone.name}' - {len(frames)} frames: {frames[:5]}{'...' if len(frames)>5 else ''}")
-    
-    for frame_idx, frame in enumerate(frames):
+    for frame in frames:
         scene.frame_set(frame)
         bpy.context.view_layer.update()
         
@@ -125,15 +121,10 @@ def delete_pose_bone_exact(pbone, frames, props):
                     frame_deleted += 1
                 except RuntimeError:
                     pass
-        
-        if frame_deleted > 0:
-            print(f"  Frame {frame}: {frame_deleted} keys deleted")
     
-    print(f"✅ POSE '{pbone.name}': TOTAL {deleted} keys from {len(frames)} frames")
     return deleted
 
 def delete_object_exact(obj, frames, props):
-    """✅ Object deletion (works correctly)"""
     deleted = 0
     for frame in frames:
         if props.pos or props.all_types:
@@ -190,11 +181,6 @@ class DeleteKeyframeOperator(bpy.types.Operator):
         scene = context.scene
         original_frame = scene.frame_current
         total_deleted = 0
-        
-        print(f"
-🚀 DELETE MODE: {context.mode}")
-        print(f"📊 Targets: {len(targets)} | Frames to delete: {len(frames)}")
-        print(f"🔄 Invert: {'ON' if props.invert else 'OFF'} | Frames: {frames[:10]}{'...' if len(frames)>10 else ''}")
 
         for target in targets:
             try:
@@ -258,45 +244,66 @@ class BakeKeyframeOperator(bpy.types.Operator):
         return {'FINISHED'}
 
 class DeleteBakeKeyframePanel(bpy.types.Panel):
-    bl_label = "Keyframe Tools"
+    bl_label = "🎬 Keyframe Tools"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = 'Animation'
+    bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
         layout = self.layout
         props = context.scene.del_keyframe_props
         frames = calculate_frames(props)
-
-        # Frame controls
-        layout.prop(props, "start_frame")
-        layout.prop(props, "end_frame")
+        
+        # Stylish header
+        box = layout.box()
+        box.label(text="Keyframe Interval Settings", icon='TIME')
+        
+        # Frame range and interval grouped
+        row = layout.row(align=True)
+        row.prop(props, "start_frame")
+        row.prop(props, "end_frame")
+        
         layout.prop(props, "interval")
-        layout.prop(props, "invert")
         
-        # Targets & Properties
+        # Invert toggle with icon button style
+        row = layout.row(align=True)
+        invert_btn = row.prop(props, "invert", toggle=True, icon='ARROW_LEFTRIGHT')
+        row.label(text="Toggle Invert", icon='RADIOBUT_ON' if props.invert else 'RADIOBUT_OFF')
+        
         layout.separator()
-        layout.prop(props, "only_selected")
-        layout.prop(props, "all_types")
         
-        row = layout.row()
+        # Target and property selection with subtle styling
+        col = layout.column(align=True)
+        col.label(text="Targets", icon='BONE_DATA')
+        col.prop(props, "only_selected", toggle=True)
+        
+        col.label(text="Properties", icon='DRIVER')
+        col.prop(props, "all_types", toggle=True)
+        
+        row = col.row(align=True)
         row.enabled = not props.all_types
-        row.prop(props, "pos")
-        row.prop(props, "rot")
+        row.prop(props, "pos", toggle=True, icon='ORIENTATION_GLOBAL')
+        row.prop(props, "rot", toggle=True, icon='DRIVER_ROTATIONAL_DIFFERENCE')
         
-        row = layout.row()
+        row = col.row(align=True)
         row.enabled = not props.all_types
-        row.prop(props, "scl")
-        row.prop(props, "custom")
+        row.prop(props, "scl", toggle=True, icon='FULLSCREEN_ENTER')
+        row.prop(props, "custom", toggle=True, icon='PROPERTIES')
         
-        # Preview & Buttons
         layout.separator()
-        layout.label(text=f"Frames: {len(frames)}")
         
+        # Preview with icon and highlighted count
         row = layout.row()
+        row.label(text=f"Frames to Affect: {len(frames)}", icon='INFO')
+        
+        layout.separator()
+        
+        # Action buttons with scale and clear icons
+        row = layout.row(align=True)
         row.scale_y = 1.5
-        row.operator("object.delete_keyframe_by_interval", icon='TRASH')
-        row.operator("object.bake_keyframe_by_interval", icon='KEY_HLT')
+        row.operator("object.delete_keyframe_by_interval", icon='TRASH', text="🗑️ Delete")
+        row.operator("object.bake_keyframe_by_interval", icon='KEY_HLT', text="🔥 Bake")
 
 classes = (
     DeleteKeyframeProperties,
