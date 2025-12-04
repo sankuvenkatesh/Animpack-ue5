@@ -1,0 +1,267 @@
+bl_info = {
+    "name": "Anim Lattice",
+    "author": "Your Name",
+    "version": (1, 0, 1),
+    "blender": (5, 0, 0),
+    "location": "Graph Editor > Sidebar > Anim Lattice",
+    "description": "Manipulate selected keyframes with a bounding box - proportional scaling and bulk retiming",
+    "category": "Animation",
+}
+
+import bpy
+import mathutils
+from bpy.props import FloatProperty, EnumProperty
+
+class ANIMLATTICE_OT_transform_keys(bpy.types.Operator):
+    """Transform selected keyframes proportionally within bounding box"""
+    bl_idname = "graph.anim_lattice_transform"
+    bl_label = "Transform Keyframes"
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    scale_time: FloatProperty(
+        name="Scale Time",
+        description="Scale keyframes horizontally (time)",
+        default=1.0,
+        min=0.01,
+        max=10.0
+    )
+    
+    scale_value: FloatProperty(
+        name="Scale Value",
+        description="Scale keyframes vertically (value)",
+        default=1.0,
+        min=0.01,
+        max=10.0
+    )
+    
+    offset_time: FloatProperty(
+        name="Offset Time",
+        description="Move keyframes in time",
+        default=0.0
+    )
+    
+    offset_value: FloatProperty(
+        name="Offset Value",
+        description="Move keyframe values",
+        default=0.0
+    )
+    
+    pivot_mode: EnumProperty(
+        name="Pivot",
+        description="Transformation pivot point",
+        items=[
+            ('CENTER', 'Bounding Box Center', 'Use center of selected keyframes'),
+            ('CURSOR', '2D Cursor', 'Use 2D cursor position'),
+            ('FIRST', 'First Key', 'Use first selected keyframe'),
+            ('LAST', 'Last Key', 'Use last selected keyframe'),
+        ],
+        default='CENTER'
+    )
+    
+    def get_selected_keyframes(self, context):
+        """Get all selected keyframes from visible fcurves - Blender 5.0 compatible"""
+        keyframe_data = []
+        
+        # Get animation data from context object
+        obj = context.active_object
+        if not obj or not obj.animation_data or not obj.animation_data.action:
+            return keyframe_data
+        
+        action = obj.animation_data.action
+        
+        # Iterate through fcurves in the action
+        for fcurve in action.fcurves:
+            if fcurve.lock or fcurve.hide:
+                continue
+                
+            for point in fcurve.keyframe_points:
+                if point.select_control_point:
+                    keyframe_data.append({
+                        'fcurve': fcurve,
+                        'point': point,
+                        'original_co': point.co.copy()
+                    })
+        
+        return keyframe_data
+    
+    def calculate_pivot(self, keyframe_data, context):
+        """Calculate pivot point based on mode"""
+        if not keyframe_data:
+            return mathutils.Vector((0, 0))
+        
+        if self.pivot_mode == 'CURSOR':
+            space = context.space_data
+            return mathutils.Vector((space.cursor_position_x, space.cursor_position_y))
+        
+        elif self.pivot_mode == 'FIRST':
+            first_key = min(keyframe_data, key=lambda k: k['original_co'][0])
+            return first_key['original_co'].copy()
+        
+        elif self.pivot_mode == 'LAST':
+            last_key = max(keyframe_data, key=lambda k: k['original_co'][0])
+            return last_key['original_co'].copy()
+        
+        else:  # CENTER
+            min_frame = min(k['original_co'][0] for k in keyframe_data)
+            max_frame = max(k['original_co'][0] for k in keyframe_data)
+            min_value = min(k['original_co'][1] for k in keyframe_data)
+            max_value = max(k['original_co'][1] for k in keyframe_data)
+            
+            return mathutils.Vector((
+                (min_frame + max_frame) / 2,
+                (min_value + max_value) / 2
+            ))
+    
+    def execute(self, context):
+        keyframe_data = self.get_selected_keyframes(context)
+        
+        if not keyframe_data:
+            self.report({'WARNING'}, "No keyframes selected")
+            return {'CANCELLED'}
+        
+        pivot = self.calculate_pivot(keyframe_data, context)
+        
+        # Transform each keyframe
+        for kf_data in keyframe_data:
+            point = kf_data['point']
+            original = kf_data['original_co']
+            
+            # Calculate relative position from pivot
+            relative_time = original[0] - pivot[0]
+            relative_value = original[1] - pivot[1]
+            
+            # Apply scaling
+            scaled_time = relative_time * self.scale_time
+            scaled_value = relative_value * self.scale_value
+            
+            # Apply offset and set new position
+            new_frame = pivot[0] + scaled_time + self.offset_time
+            new_value = pivot[1] + scaled_value + self.offset_value
+            
+            point.co = (new_frame, new_value)
+            
+            # Update handles proportionally
+            point.handle_left[0] = point.handle_left[0] - original[0] + new_frame
+            point.handle_right[0] = point.handle_right[0] - original[0] + new_frame
+        
+        # Update fcurves
+        for kf_data in keyframe_data:
+            kf_data['fcurve'].update()
+        
+        # Redraw graph editor
+        context.area.tag_redraw()
+        
+        return {'FINISHED'}
+
+
+class ANIMLATTICE_OT_bulk_retime(bpy.types.Operator):
+    """Retime selected keyframes by scaling time only"""
+    bl_idname = "graph.anim_lattice_retime"
+    bl_label = "Bulk Retime"
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    time_scale: FloatProperty(
+        name="Time Scale",
+        description="Speed multiplier (>1 = slower, <1 = faster)",
+        default=1.0,
+        min=0.01,
+        max=10.0
+    )
+    
+    def execute(self, context):
+        bpy.ops.graph.anim_lattice_transform(
+            scale_time=self.time_scale,
+            scale_value=1.0,
+            offset_time=0.0,
+            offset_value=0.0
+        )
+        return {'FINISHED'}
+
+
+class ANIMLATTICE_OT_bulk_scale_values(bpy.types.Operator):
+    """Scale values of selected keyframes"""
+    bl_idname = "graph.anim_lattice_scale_values"
+    bl_label = "Bulk Scale Values"
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    value_scale: FloatProperty(
+        name="Value Scale",
+        description="Multiply all selected keyframe values",
+        default=1.0,
+        min=-10.0,
+        max=10.0
+    )
+    
+    def execute(self, context):
+        bpy.ops.graph.anim_lattice_transform(
+            scale_time=1.0,
+            scale_value=self.value_scale,
+            offset_time=0.0,
+            offset_value=0.0
+        )
+        return {'FINISHED'}
+
+
+class ANIMLATTICE_PT_main_panel(bpy.types.Panel):
+    """Main panel for Anim Lattice tools"""
+    bl_label = "Anim Lattice"
+    bl_idname = "ANIMLATTICE_PT_main_panel"
+    bl_space_type = 'GRAPH_EDITOR'
+    bl_region_type = 'UI'
+    bl_category = 'Anim Lattice'
+    
+    def draw(self, context):
+        layout = self.layout
+        
+        # Check if we have a valid object with animation
+        obj = context.active_object
+        if not obj or not obj.animation_data or not obj.animation_data.action:
+            layout.label(text="No active animation", icon='INFO')
+            return
+        
+        action = obj.animation_data.action
+        
+        # Bounding Box Info
+        box = layout.box()
+        box.label(text="Selected Keyframes", icon='BORDER_RECT')
+        
+        # Count selected keyframes - Blender 5.0 compatible
+        selected_count = 0
+        for fcurve in action.fcurves:
+            if not fcurve.lock and not fcurve.hide:
+                selected_count += sum(1 for kp in fcurve.keyframe_points if kp.select_control_point)
+        
+        box.label(text=f"Keys: {selected_count}")
+        
+        # Quick Operations
+        box = layout.box()
+        box.label(text="Quick Operations", icon='MODIFIER')
+        
+        col = box.column(align=True)
+        col.operator("graph.anim_lattice_retime", text="Retime Selection", icon='TIME')
+        col.operator("graph.anim_lattice_scale_values", text="Scale Values", icon='ARROW_LEFTRIGHT')
+        
+        # Advanced Transform
+        box = layout.box()
+        box.label(text="Advanced Transform", icon='TRANSFORM_ORIGINS')
+        
+        box.operator("graph.anim_lattice_transform", text="Transform Keyframes")
+
+
+classes = (
+    ANIMLATTICE_OT_transform_keys,
+    ANIMLATTICE_OT_bulk_retime,
+    ANIMLATTICE_OT_bulk_scale_values,
+    ANIMLATTICE_PT_main_panel,
+)
+
+def register():
+    for cls in classes:
+        bpy.utils.register_class(cls)
+
+def unregister():
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)
+
+if __name__ == "__main__":
+    register()
