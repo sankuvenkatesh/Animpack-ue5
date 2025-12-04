@@ -1,10 +1,10 @@
 bl_info = {
-    "name": "Delete/Bake Keyframe by Interval Styled UI",
+    "name": "Delete/Bake Keyframe by Interval Stylish UI",
     "author": "Venkatesh Sanku",
-    "version": (4, 6, 4),
+    "version": (4, 6, 5),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Animation",
-    "description": "Delete/bake keyframes by interval with clean UI",
+    "description": "Delete/bake keyframes by interval with stylish UI and unchanged logic",
     "category": "Animation",
 }
 
@@ -233,7 +233,7 @@ class BakeKeyframeOperator(bpy.types.Operator):
         return {'FINISHED'}
 
 class DeleteBakeKeyframePanel(bpy.types.Panel):
-    bl_label = "🗑️ Delete / 🔥 Bake Keyframe Interval"
+    bl_label = "Delete / Bake Keyframe Interval"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = 'Animation'
@@ -243,21 +243,22 @@ class DeleteBakeKeyframePanel(bpy.types.Panel):
         layout = self.layout
         props = context.scene.del_keyframe_props
 
-        # Frame Range - No icon
+        # Frame Range Section with a single icon
         box = layout.box()
-        box.label(text="Frame Range")
+        row = box.row(align=True)
+        row.label(text="Frame Range", icon='TIME')
         box.prop(props, "start_frame")
         box.prop(props, "end_frame")
         box.prop(props, "interval")
         box.prop(props, "invert")
 
-        # Targets - No icon  
+        # Target Selection Section without icon
         box = layout.box()
         box.label(text="Targets")
         box.prop(props, "only_selected")
         box.prop(props, "all_types")
 
-        # Properties - OLD interface style
+        # Property Types Section using old style (no icons)
         box = layout.box()
         box.label(text="Properties")
         row1 = box.row(align=True)
@@ -269,14 +270,13 @@ class DeleteBakeKeyframePanel(bpy.types.Panel):
         row2.prop(props, "scl")
         row2.prop(props, "custom")
 
-        # Frames Affected - Shows actual frame numbers
+        # Frames Affected preview, showing up to 12 frames
         preview_box = layout.box()
         frames = calculate_frames(props)
         frame_preview = f"{frames[:12]}{'...' if len(frames) > 12 else ''}"
-        preview_text = f"Frames: {len(frames)} | {frame_preview}"
-        preview_box.label(text=preview_text, icon='INFO')
+        preview_box.label(text=f"Frames affected: {len(frames)} - {frame_preview}", icon='INFO')
 
-        # Buttons
+        # Operators row
         row = layout.row(align=True)
         row.scale_y = 1.5
         row.operator("object.delete_keyframe_by_interval", icon='TRASH', text="Delete")
