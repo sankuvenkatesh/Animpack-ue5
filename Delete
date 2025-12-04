@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Delete/Bake Keyframe by Interval Extended",
     "author": "Venkatesh Sanku",
-    "version": (4, 6, 0),  # FIXED: Pose bone deletion for ALL frames
+    "version": (4, 6, 0),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Animation",
     "description": "Delete/bake keyframes by interval - POSE BONES FIXED",
@@ -83,13 +83,11 @@ def delete_pose_bone_exact(pbone, frames, props):
     print(f"🔍 Processing POSE bone '{pbone.name}' - {len(frames)} frames: {frames[:5]}{'...' if len(frames)>5 else ''}")
     
     for frame_idx, frame in enumerate(frames):
-        # CRITICAL: Set frame BEFORE deletion for pose bones
         scene.frame_set(frame)
         bpy.context.view_layer.update()
         
         frame_deleted = 0
         
-        # Location XYZ
         if props.pos or props.all_types:
             for i in range(3):
                 try:
@@ -99,7 +97,6 @@ def delete_pose_bone_exact(pbone, frames, props):
                 except RuntimeError:
                     pass
         
-        # Rotation (handles both quaternion and euler)
         if props.rot or props.all_types:
             if pbone.rotation_mode == 'QUATERNION':
                 for i in range(4):
@@ -109,7 +106,7 @@ def delete_pose_bone_exact(pbone, frames, props):
                         frame_deleted += 1
                     except RuntimeError:
                         pass
-            else:  # Euler
+            else:
                 for i in range(3):
                     try:
                         pbone.keyframe_delete(data_path="rotation_euler", frame=frame, index=i)
@@ -118,7 +115,6 @@ def delete_pose_bone_exact(pbone, frames, props):
                     except RuntimeError:
                         pass
         
-        # Scale XYZ
         if props.scl or props.all_types:
             for i in range(3):
                 try:
@@ -208,7 +204,6 @@ class DeleteKeyframeOperator(bpy.types.Operator):
             except Exception as e:
                 print(f"❌ Error {getattr(target, 'name', 'unknown')}: {e}")
 
-        # Restore frame and refresh
         scene.frame_set(original_frame)
         context.view_layer.update()
         
@@ -261,7 +256,7 @@ class BakeKeyframeOperator(bpy.types.Operator):
         return {'FINISHED'}
 
 class DeleteBakeKeyframePanel(bpy.types.Panel):
-    bl_label = "🔧 Delete/Bake Keyframe Interval"
+    bl_label = "Keyframe Interval Tools"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = 'Animation'
@@ -270,43 +265,75 @@ class DeleteBakeKeyframePanel(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         props = context.scene.del_keyframe_props
-
-        # Frame settings
+        
+        # Header with mode indicator
+        mode_icon = 'OUTLINER_OB_ARMATURE' if context.mode == 'POSE' else 'OBJECT_DATA'
+        mode_text = "Pose Mode" if context.mode == 'POSE' else "Object Mode"
+        
+        header = layout.box()
+        header.label(text=f"Mode: {mode_text}", icon=mode_icon)
+        
+        # Frame Range Section
+        layout.label(text="Frame Range", icon='TIME')
         box = layout.box()
-        box.prop(props, "start_frame")
-        box.prop(props, "end_frame")
-        box.prop(props, "interval")
-        box.prop(props, "invert")
-
-        # Target selection
-        box = layout.box()
-        box.label(text="🎯 Targets", icon='BONE_DATA')
-        box.prop(props, "only_selected")
-        box.prop(props, "all_types")
-
-        # Property types
-        box = layout.box()
-        box.label(text="⚙️ Properties", icon='DRIVER')
-        row1 = box.row(align=True)
-        row1.enabled = not props.all_types
-        row1.prop(props, "pos")
-        row1.prop(props, "rot")
-        row2 = box.row(align=True)
-        row2.enabled = not props.all_types
-        row2.prop(props, "scl")
-        row2.prop(props, "custom")
-
-        # Preview
-        preview_box = layout.box()
+        col = box.column(align=True)
+        col.prop(props, "start_frame")
+        col.prop(props, "end_frame")
+        col.separator(factor=0.5)
+        col.prop(props, "interval")
+        
+        # Invert toggle with visual prominence
+        invert_box = layout.box()
+        row = invert_box.row(align=True)
+        row.prop(props, "invert", toggle=True, icon='ARROW_LEFTRIGHT')
+        
+        # Target Selection Section
+        layout.separator()
+        layout.label(text="Target Selection", icon='RESTRICT_SELECT_OFF')
+        target_box = layout.box()
+        target_box.prop(props, "only_selected", toggle=True)
+        
+        # Properties Section
+        layout.separator()
+        layout.label(text="Transform Properties", icon='DRIVER_TRANSFORM')
+        prop_box = layout.box()
+        prop_box.prop(props, "all_types", toggle=True, icon='CHECKBOX_HLT' if props.all_types else 'CHECKBOX_DEHLT')
+        
+        # Individual property toggles (disabled when all_types is on)
+        col = prop_box.column(align=True)
+        col.enabled = not props.all_types
+        row = col.row(align=True)
+        row.prop(props, "pos", toggle=True, icon='ORIENTATION_GLOBAL')
+        row.prop(props, "rot", toggle=True, icon='DRIVER_ROTATIONAL_DIFFERENCE')
+        row = col.row(align=True)
+        row.prop(props, "scl", toggle=True, icon='FULLSCREEN_ENTER')
+        row.prop(props, "custom", toggle=True, icon='PROPERTIES')
+        
+        # Preview Section
+        layout.separator()
         frames = calculate_frames(props)
-        invert_text = "🟢 NON-INTERVAL" if props.invert else "🔴 INTERVAL"
-        preview_box.label(text=f"📊 Delete {invert_text}: {len(frames)} frames", icon='INFO')
-
-        # Operators
-        row = layout.row(align=True)
-        row.scale_y = 1.6
-        row.operator("object.delete_keyframe_by_interval", icon='TRASH', text="🗑️ DELETE")
-        row.operator("object.bake_keyframe_by_interval", icon='KEY_HLT', text="🔥 BAKE")
+        invert_text = "Non-Interval Frames" if props.invert else "Interval Frames"
+        
+        preview_box = layout.box()
+        preview_col = preview_box.column(align=True)
+        preview_col.label(text="Preview", icon='VIEWZOOM')
+        
+        info_row = preview_col.row(align=True)
+        info_row.alignment = 'CENTER'
+        info_row.label(text=f"{invert_text}: {len(frames)} frames")
+        
+        # Action Buttons
+        layout.separator(factor=1.5)
+        col = layout.column(align=True)
+        col.scale_y = 1.4
+        
+        # Delete button (warning colors)
+        delete_row = col.row(align=True)
+        delete_op = delete_row.operator("object.delete_keyframe_by_interval", icon='TRASH', text="Delete Keyframes")
+        
+        # Bake button 
+        bake_row = col.row(align=True)
+        bake_op = bake_row.operator("object.bake_keyframe_by_interval", icon='KEYTYPE_JITTER_VEC', text="Bake Keyframes")
 
 classes = (
     DeleteKeyframeProperties,
