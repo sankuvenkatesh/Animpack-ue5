@@ -1,10 +1,10 @@
 bl_info = {
-    "name": "Delete/Bake Keyframe by Interval Simple UI",
+    "name": "Delete/Bake Keyframe by Interval Styled UI",
     "author": "Venkatesh Sanku",
-    "version": (4, 6, 1),
+    "version": (4, 6, 2),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Animation",
-    "description": "Delete/bake keyframes by interval with simple UI",
+    "description": "Delete/bake keyframes by interval with stylish UI and icons",
     "category": "Animation",
 }
 
@@ -233,7 +233,7 @@ class BakeKeyframeOperator(bpy.types.Operator):
         return {'FINISHED'}
 
 class DeleteBakeKeyframePanel(bpy.types.Panel):
-    bl_label = "Delete/Bake Keyframe Interval"
+    bl_label = "🗑️ Delete / 🔥 Bake Keyframe Interval"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = 'Animation'
@@ -243,27 +243,40 @@ class DeleteBakeKeyframePanel(bpy.types.Panel):
         layout = self.layout
         props = context.scene.del_keyframe_props
 
-        layout.prop(props, "start_frame")
-        layout.prop(props, "end_frame")
-        layout.prop(props, "interval")
-        layout.prop(props, "invert")
-        layout.prop(props, "only_selected")
-        layout.prop(props, "all_types")
+        col = layout.column(align=True)
+        col.label(text="📅 Frame Range", icon='TIME')
+        col.prop(props, "start_frame", text="Start")
+        col.prop(props, "end_frame", text="End")
+        col.prop(props, "interval", text="Interval")
+        col.prop(props, "invert", text="Invert Frames")
 
-        col = layout.column()
-        col.enabled = not props.all_types
-        row = col.row(align=True)
-        row.prop(props, "pos")
-        row.prop(props, "rot")
-        row = col.row(align=True)
-        row.prop(props, "scl")
-        row.prop(props, "custom")
+        col.separator()
 
-        layout.label(text=f"Frames affected: {props.preview_count}")
+        col.label(text="🎯 Target Selection", icon='RESTRICT_SELECT_OFF')
+        col.prop(props, "only_selected", text="Only Selected")
+        col.prop(props, "all_types", text="All Properties")
+
+        col.separator()
+
+        col.label(text="⚙️ Property Types", icon='TOOL_SETTINGS')
+        row = col.row(align=True)
+        row.enabled = not props.all_types
+        row.prop(props, "pos", icon='EMPTY_ARROWS', text="Loc")
+        row.prop(props, "rot", icon='DRIVER_ROTATIONAL_DIFFERENCE', text="Rot")
+        row = col.row(align=True)
+        row.enabled = not props.all_types
+        row.prop(props, "scl", icon='FULLSCREEN_EXIT', text="Scale")
+        row.prop(props, "custom", icon='DOT', text="Custom")
+
+        col.separator()
+
+        preview_text = f"Frames affected: {props.preview_count}"
+        col.label(text=preview_text, icon='INFO')
 
         row = layout.row(align=True)
-        row.operator("object.delete_keyframe_by_interval", icon='TRASH')
-        row.operator("object.bake_keyframe_by_interval", icon='KEY_HLT')
+        row.scale_y = 1.5
+        row.operator("object.delete_keyframe_by_interval", icon='TRASH', text="Delete")
+        row.operator("object.bake_keyframe_by_interval", icon='KEY_HLT', text="Bake")
 
 classes = (
     DeleteKeyframeProperties,
