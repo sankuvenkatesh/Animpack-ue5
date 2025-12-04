@@ -293,9 +293,16 @@ class DeleteBakeKeyframePanel(bpy.types.Panel):
 
         layout.separator()
 
-        # Preview with bold and icon
-        subrow = layout.row(align=True)
-        subrow.label(text=f"Frames selected: {len(frames)}", icon='TIME')
+        # Preview with frame list
+        preview_box = layout.box()
+        preview_row = preview_box.row(align=True)
+        preview_row.label(text=f"Frames affected: {len(frames)}", icon='TIME')
+        
+        # Show actual frames (first 10 + indicator)
+        frames_text = frames[:10]
+        if len(frames) > 10:
+            frames_text.append('...')
+        preview_box.label(text=f"[{', '.join(map(str, frames_text))}]")
 
         layout.separator(factor=1.5)
 
@@ -309,7 +316,6 @@ class DeleteBakeKeyframePanel(bpy.types.Panel):
         bake_btn_bl = layout.row()
         bake_btn_bl.alignment = 'CENTER'
         bake_btn_bl.label(text="🔥 Bake Keys", icon='SORTTIME')
-
 
 classes = (
     DeleteKeyframeProperties,
