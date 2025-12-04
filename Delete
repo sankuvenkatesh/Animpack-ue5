@@ -51,7 +51,7 @@ class DeleteKeyframeProperties(bpy.types.PropertyGroup):
         if self.all_types:
             self.pos = self.rot = self.scl = self.custom = True
 
-# All functional code unchanged...
+# Core functions and operators remain unchanged
 
 def calculate_frames(props):
     start, end, interval, invert = props.start_frame, props.end_frame, props.interval, props.invert
@@ -244,7 +244,7 @@ class BakeKeyframeOperator(bpy.types.Operator):
         return {'FINISHED'}
 
 class DeleteBakeKeyframePanel(bpy.types.Panel):
-    bl_label = "🎬 Keyframe Tools"
+    bl_label = "✨ Interval Keyframe Manager"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = 'Animation'
@@ -254,56 +254,62 @@ class DeleteBakeKeyframePanel(bpy.types.Panel):
         layout = self.layout
         props = context.scene.del_keyframe_props
         frames = calculate_frames(props)
-        
-        # Stylish header
-        box = layout.box()
-        box.label(text="Keyframe Interval Settings", icon='TIME')
-        
-        # Frame range and interval grouped
-        row = layout.row(align=True)
-        row.prop(props, "start_frame")
-        row.prop(props, "end_frame")
-        
-        layout.prop(props, "interval")
-        
-        # Invert toggle with icon button style
-        row = layout.row(align=True)
-        invert_btn = row.prop(props, "invert", toggle=True, icon='ARROW_LEFTRIGHT')
-        row.label(text="Toggle Invert", icon='RADIOBUT_ON' if props.invert else 'RADIOBUT_OFF')
+
+        # Creative banner
+        banner = layout.row()
+        banner.alignment = 'CENTER'
+        banner.label(text="🔑 Keyframe Interval Manager", icon='ANIM')
         
         layout.separator()
-        
-        # Target and property selection with subtle styling
-        col = layout.column(align=True)
-        col.label(text="Targets", icon='BONE_DATA')
-        col.prop(props, "only_selected", toggle=True)
-        
-        col.label(text="Properties", icon='DRIVER')
-        col.prop(props, "all_types", toggle=True)
-        
-        row = col.row(align=True)
-        row.enabled = not props.all_types
-        row.prop(props, "pos", toggle=True, icon='ORIENTATION_GLOBAL')
-        row.prop(props, "rot", toggle=True, icon='DRIVER_ROTATIONAL_DIFFERENCE')
-        
-        row = col.row(align=True)
-        row.enabled = not props.all_types
-        row.prop(props, "scl", toggle=True, icon='FULLSCREEN_ENTER')
-        row.prop(props, "custom", toggle=True, icon='PROPERTIES')
-        
-        layout.separator()
-        
-        # Preview with icon and highlighted count
-        row = layout.row()
-        row.label(text=f"Frames to Affect: {len(frames)}", icon='INFO')
-        
-        layout.separator()
-        
-        # Action buttons with scale and clear icons
+
+        # Frame setup with icons inline and grouped
         row = layout.row(align=True)
-        row.scale_y = 1.5
-        row.operator("object.delete_keyframe_by_interval", icon='TRASH', text="🗑️ Delete")
-        row.operator("object.bake_keyframe_by_interval", icon='KEY_HLT', text="🔥 Bake")
+        row.prop(props, "start_frame", text="From")
+        row.prop(props, "end_frame", text="To")
+        row.prop(props, "interval", text="Every")
+
+        # Invert toggle big button style and color hint
+        invert_row = layout.row(align=True)
+        invert_btn = invert_row.operator("wm.context_toggle", text="Invert Selection" if not props.invert else "Restore Interval", depress=props.invert)
+        invert_btn.data_path = "scene.del_keyframe_props.invert"
+
+        # Targets and properties in a split layout
+        split = layout.split(factor=0.38)
+        col_targets = split.column()
+        col_props = split.column()
+
+        col_targets.label(text="🎯 Targets")
+        col_targets.prop(props, "only_selected", toggle=True, icon='RESTRICT_SELECT_OFF')
+
+        col_props.label(text="⚙️ Properties")
+        col_props.prop(props, "all_types", toggle=True, icon='CHECKBOX_HLT' if props.all_types else 'CHECKBOX_DEHLT')
+
+        if not props.all_types:
+            box = col_props.box()
+            box.prop(props, "pos", toggle=True, icon='ORIENTATION_GLOBAL')
+            box.prop(props, "rot", toggle=True, icon='DRIVER_ROTATIONAL_DIFFERENCE')
+            box.prop(props, "scl", toggle=True, icon='FULLSCREEN_ENTER')
+            box.prop(props, "custom", toggle=True, icon='PROPERTIES')
+
+        layout.separator()
+
+        # Preview with bold and icon
+        subrow = layout.row(align=True)
+        subrow.label(text=f"Frames selected: {len(frames)}", icon='TIME')
+
+        layout.separator(factor=1.5)
+
+        # Buttons in stack with color accents
+        del_btn = layout.operator("object.delete_keyframe_by_interval", icon='TRASH')
+        del_btn_bl = layout.row()
+        del_btn_bl.alignment = 'CENTER'
+        del_btn_bl.label(text="🗑️ Delete Keys", icon='CANCEL')
+
+        bake_btn = layout.operator("object.bake_keyframe_by_interval", icon='KEY_HLT')
+        bake_btn_bl = layout.row()
+        bake_btn_bl.alignment = 'CENTER'
+        bake_btn_bl.label(text="🔥 Bake Keys", icon='SORTTIME')
+
 
 classes = (
     DeleteKeyframeProperties,
