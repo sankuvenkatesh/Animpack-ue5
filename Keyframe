@@ -1,10 +1,10 @@
 bl_info = {
-    "name": "Delete/Bake Keyframe by Interval Stylish UI",
+    "name": "Delete/Bake Keyframe by Interval Premium UI",
     "author": "Venkatesh Sanku",
-    "version": (4, 6, 5),
+    "version": (4, 6, 6),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Animation",
-    "description": "Delete/bake keyframes by interval with stylish UI and unchanged logic",
+    "description": "Delete/bake keyframes by interval with premium stylish UI",
     "category": "Animation",
 }
 
@@ -233,7 +233,7 @@ class BakeKeyframeOperator(bpy.types.Operator):
         return {'FINISHED'}
 
 class DeleteBakeKeyframePanel(bpy.types.Panel):
-    bl_label = "Delete / Bake Keyframe Interval"
+    bl_label = "✨ Delete / Bake Keyframe Interval ✨"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = 'Animation'
@@ -243,44 +243,50 @@ class DeleteBakeKeyframePanel(bpy.types.Panel):
         layout = self.layout
         props = context.scene.del_keyframe_props
 
-        # Frame Range Section with a single icon
-        box = layout.box()
-        row = box.row(align=True)
-        row.label(text="Frame Range", icon='TIME')
-        box.prop(props, "start_frame")
-        box.prop(props, "end_frame")
-        box.prop(props, "interval")
-        box.prop(props, "invert")
+        # Premium Header
+        header_row = layout.row(align=True)
+        header_row.scale_y = 1.3
+        header_row.label(text="🎬 Keyframe Manager", icon='ANIM')
 
-        # Target Selection Section without icon
-        box = layout.box()
-        box.label(text="Targets")
-        box.prop(props, "only_selected")
-        box.prop(props, "all_types")
+        # Frame Range - Premium styling
+        frame_box = layout.box()
+        frame_box.prop(props, "start_frame", icon='REW')
+        frame_box.prop(props, "end_frame", icon='FF')
+        frame_box.prop(props, "interval", icon='LOOP_FORWARDS')
+        frame_box.prop(props, "invert", icon='LOOP_BACK')
 
-        # Property Types Section using old style (no icons)
-        box = layout.box()
-        box.label(text="Properties")
-        row1 = box.row(align=True)
-        row1.enabled = not props.all_types
-        row1.prop(props, "pos")
-        row1.prop(props, "rot")
-        row2 = box.row(align=True)
-        row2.enabled = not props.all_types
-        row2.prop(props, "scl")
-        row2.prop(props, "custom")
+        # Target Selection - Premium styling
+        target_box = layout.box()
+        target_box.prop(props, "only_selected", icon='RESTRICT_SELECT_ON')
+        target_box.prop(props, "all_types", icon='CHECKBOX_TRI')
 
-        # Frames Affected preview, showing up to 12 frames
+        # Properties - STYLISH TOGGLE BUTTONS (no checkboxes)
+        prop_box = layout.box()
+        prop_box.scale_y = 1.1
+        prop_box.label(text="Properties", icon='MODIFIER')
+        prop_row1 = prop_box.row(align=True)
+        prop_row1.scale_x = 0.7
+        prop_row1.prop(props, "pos", toggle=True, icon='LOCATION', text="Loc")
+        prop_row1.prop(props, "rot", toggle=True, icon='ROTATE', text="Rot")
+        prop_row2 = prop_box.row(align=True)
+        prop_row2.scale_x = 0.7
+        prop_row2.prop(props, "scl", toggle=True, icon='EMPTY_PLANE', text="Scale")
+        prop_row2.prop(props, "custom", toggle=True, icon='CUSTOM_DATA', text="Custom")
+
+        # Frames Preview - Premium styling
         preview_box = layout.box()
         frames = calculate_frames(props)
-        frame_preview = f"{frames[:12]}{'...' if len(frames) > 12 else ''}"
-        preview_box.label(text=f"Frames affected: {len(frames)} - {frame_preview}", icon='INFO')
+        frame_preview = f"{frames[:10]}{'...' if len(frames) > 10 else ''}"
+        preview_row = preview_box.row()
+        preview_row.label(text=f"🎯 {len(frames)} Frames: {frame_preview}", icon='INFO')
 
-        # Operators row
-        row = layout.row(align=True)
-        row.scale_y = 1.5
-        row.operator("object.delete_keyframe_by_interval", icon='TRASH', text="Delete")
-        row.operator("object.bake_keyframe_by_interval", icon='KEY_HLT', text="Bake")
+        # Premium Buttons
+        button_row = layout.row(align=True)
+        button_row.scale_y = 1.8
+        delete_btn = button_row.operator("object.delete_keyframe_by_interval", icon='TRASH', text="")
+        delete_btn.scale_x = 1.2
+        bake_btn = button_row.operator("object.bake_keyframe_by_interval", icon='RENDER_STILL', text="")
+        bake_btn.scale_x = 1.2
 
 classes = (
     DeleteKeyframeProperties,
