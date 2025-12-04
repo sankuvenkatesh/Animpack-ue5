@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Delete/Bake Keyframe by Interval Stylish UI",
     "author": "Venkatesh Sanku",
-    "version": (4, 6, 6),
+    "version": (4, 6, 5),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Animation",
-    "description": "Delete/bake keyframes by interval with stylish modern UI",
+    "description": "Delete/bake keyframes by interval with stylish UI and unchanged logic",
     "category": "Animation",
 }
 
@@ -24,9 +24,9 @@ class DeleteKeyframeProperties(bpy.types.PropertyGroup):
         update=lambda self, context: self.update_preview()
     )
     invert: bpy.props.BoolProperty(
-        name="Invert Selection",
+        name="Invert",
         default=False,
-        description="OFF: Keep every nth frame. ON: Keep all other frames",
+        description="OFF: delete every nth frame. ON: Delete all other frames instead",
         update=lambda self, context: self.update_preview()
     )
     all_types: bpy.props.BoolProperty(
@@ -35,7 +35,7 @@ class DeleteKeyframeProperties(bpy.types.PropertyGroup):
         update=lambda self, context: self._update_all_types()
     )
     only_selected: bpy.props.BoolProperty(
-        name="Selected Only",
+        name="Only Selected",
         default=False,
         update=lambda self, context: self.update_preview()
     )
@@ -131,7 +131,7 @@ def delete_object_exact(obj, frames, props):
             if obj.rotation_mode == 'QUATERNION':
                 for i in range(4):
                     try:
-                        obj.keyframe_insert(data_path="rotation_quaternion", frame=frame, index=i)
+                        obj.keyframe_delete(data_path="rotation_quaternion", frame=frame, index=i)
                         deleted += 1
                     except RuntimeError:
                         pass
@@ -233,7 +233,7 @@ class BakeKeyframeOperator(bpy.types.Operator):
         return {'FINISHED'}
 
 class DeleteBakeKeyframePanel(bpy.types.Panel):
-    bl_label = "🎬 Keyframe Manager"
+    bl_label = "Delete / Bake Keyframe Interval"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = 'Animation'
@@ -242,54 +242,45 @@ class DeleteBakeKeyframePanel(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         props = context.scene.del_keyframe_props
-        
-        # Modern Header
-        header_box = layout.box()
-        header_row = header_box.row(align=True)
-        header_row.scale_y = 1.2
-        header_row.label(text="🎬 Frame Interval Manager", icon='ANIM')
-        
-        # Frame Range Section - Card Style
-        frame_box = layout.box()
-        frame_box.prop(props, "start_frame", slider=True, text="Start")
-        frame_row = frame_box.row(align=True)
-        frame_row.prop(props, "end_frame", slider=True, text="End")
-        frame_row.prop(props, "interval", slider=True, text="Step")
-        frame_row.prop(props, "invert", icon='ARROW_LEFTRIGHT', text="")
-        
-        # Preview Card
+
+        # Frame Range Section with a single icon
+        box = layout.box()
+        row = box.row(align=True)
+        row.label(text="Frame Range", icon='TIME')
+        box.prop(props, "start_frame")
+        box.prop(props, "end_frame")
+        box.prop(props, "interval")
+        box.prop(props, "invert")
+
+        # Target Selection Section without icon
+        box = layout.box()
+        box.label(text="Targets")
+        box.prop(props, "only_selected")
+        box.prop(props, "all_types")
+
+        # Property Types Section using old style (no icons)
+        box = layout.box()
+        box.label(text="Properties")
+        row1 = box.row(align=True)
+        row1.enabled = not props.all_types
+        row1.prop(props, "pos")
+        row1.prop(props, "rot")
+        row2 = box.row(align=True)
+        row2.enabled = not props.all_types
+        row2.prop(props, "scl")
+        row2.prop(props, "custom")
+
+        # Frames Affected preview, showing up to 12 frames
         preview_box = layout.box()
         frames = calculate_frames(props)
-        preview_text = f"🖼️ Preview: {len(frames)} frames"
-        if frames:
-            preview_text += f" [{frames[0]}...{frames[-1]}]"
-        preview_box.label(text=preview_text, icon='INFO')
-        
-        # Target Selection Section
-        target_box = layout.box()
-        target_row = target_box.row(align=True)
-        target_row.prop(props, "only_selected", icon='RESTRICT_SELECT_OFF', text="Selected")
-        target_row.prop(props, "all_types", icon='OBJECT_DATA', text="All Props")
-        
-        # Properties Section - Modern Toggle Style
-        prop_box = layout.box()
-        prop_row1 = prop_box.row(align=True)
-        prop_row1.enabled = not props.all_types
-        prop_row1.prop(props, "pos", icon='LOCATION', text="", toggle=True)
-        prop_row1.prop(props, "rot", icon='ROTATE', text="", toggle=True)
-        prop_row2 = prop_box.row(align=True)
-        prop_row2.enabled = not props.all_types
-        prop_row2.prop(props, "scl", icon='EMPTY_ARROWS', text="", toggle=True)
-        prop_row2.prop(props, "custom", icon='CUSTOM_DATA', text="", toggle=True)
-        
-        # Action Buttons - Prominent Styled
-        action_row = layout.row(align=True)
-        action_row.scale_y = 1.8
-        delete_btn = action_row.operator("object.delete_keyframe_by_interval", 
-                                       icon='TRASH', text="🗑️ Delete")
-        delete_btn.warning = True
-        action_row.operator("object.bake_keyframe_by_interval", 
-                          icon='KEY_HLT', text="✨ Bake")
+        frame_preview = f"{frames[:12]}{'...' if len(frames) > 12 else ''}"
+        preview_box.label(text=f"Frames affected: {len(frames)} - {frame_preview}", icon='INFO')
+
+        # Operators row
+        row = layout.row(align=True)
+        row.scale_y = 1.5
+        row.operator("object.delete_keyframe_by_interval", icon='TRASH', text="Delete")
+        row.operator("object.bake_keyframe_by_interval", icon='KEY_HLT', text="Bake")
 
 classes = (
     DeleteKeyframeProperties,
