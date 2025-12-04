@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Delete/Bake Keyframe by Interval Styled UI",
     "author": "Venkatesh Sanku",
-    "version": (4, 6, 3),
+    "version": (4, 6, 4),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Animation",
-    "description": "Delete/bake keyframes by interval with stylish UI and icons",
+    "description": "Delete/bake keyframes by interval with clean UI",
     "category": "Animation",
 }
 
@@ -243,40 +243,37 @@ class DeleteBakeKeyframePanel(bpy.types.Panel):
         layout = self.layout
         props = context.scene.del_keyframe_props
 
-        # Frame Range - Single icon
+        # Frame Range - No icon
         box = layout.box()
-        row = box.row(align=True)
-        row.label(text="📅 Frame Range", icon='TIME')
+        box.label(text="Frame Range")
         box.prop(props, "start_frame")
         box.prop(props, "end_frame")
         box.prop(props, "interval")
         box.prop(props, "invert")
 
-        # Target Selection - Single icon
+        # Targets - No icon  
         box = layout.box()
-        row = box.row(align=True)
-        row.label(text="🎯 Targets", icon='RESTRICT_SELECT_OFF')
+        box.label(text="Targets")
         box.prop(props, "only_selected")
         box.prop(props, "all_types")
 
-        # Property Types - Single icon
+        # Properties - OLD interface style
         box = layout.box()
-        row = box.row(align=True)
-        row.label(text="⚙️ Properties", icon='DRIVER')
+        box.label(text="Properties")
         row1 = box.row(align=True)
         row1.enabled = not props.all_types
-        row1.prop(props, "pos", text="Loc")
-        row1.prop(props, "rot", text="Rot")
+        row1.prop(props, "pos")
+        row1.prop(props, "rot")
         row2 = box.row(align=True)
         row2.enabled = not props.all_types
-        row2.prop(props, "scl", text="Scale")
-        row2.prop(props, "custom", text="Custom")
+        row2.prop(props, "scl")
+        row2.prop(props, "custom")
 
         # Frames Affected - Shows actual frame numbers
         preview_box = layout.box()
         frames = calculate_frames(props)
         frame_preview = f"{frames[:12]}{'...' if len(frames) > 12 else ''}"
-        preview_text = f"📊 Frames: {len(frames)} | {frame_preview}"
+        preview_text = f"Frames: {len(frames)} | {frame_preview}"
         preview_box.label(text=preview_text, icon='INFO')
 
         # Buttons
