@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Delete/Bake Keyframe by Interval Styled UI",
     "author": "Venkatesh Sanku",
-    "version": (4, 6, 2),
+    "version": (4, 6, 3),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Animation",
     "description": "Delete/bake keyframes by interval with stylish UI and icons",
@@ -243,36 +243,43 @@ class DeleteBakeKeyframePanel(bpy.types.Panel):
         layout = self.layout
         props = context.scene.del_keyframe_props
 
-        col = layout.column(align=True)
-        col.label(text="📅 Frame Range", icon='TIME')
-        col.prop(props, "start_frame", text="Start")
-        col.prop(props, "end_frame", text="End")
-        col.prop(props, "interval", text="Interval")
-        col.prop(props, "invert", text="Invert Frames")
+        # Frame Range - Single icon
+        box = layout.box()
+        row = box.row(align=True)
+        row.label(text="📅 Frame Range", icon='TIME')
+        box.prop(props, "start_frame")
+        box.prop(props, "end_frame")
+        box.prop(props, "interval")
+        box.prop(props, "invert")
 
-        col.separator()
+        # Target Selection - Single icon
+        box = layout.box()
+        row = box.row(align=True)
+        row.label(text="🎯 Targets", icon='RESTRICT_SELECT_OFF')
+        box.prop(props, "only_selected")
+        box.prop(props, "all_types")
 
-        col.label(text="🎯 Target Selection", icon='RESTRICT_SELECT_OFF')
-        col.prop(props, "only_selected", text="Only Selected")
-        col.prop(props, "all_types", text="All Properties")
+        # Property Types - Single icon
+        box = layout.box()
+        row = box.row(align=True)
+        row.label(text="⚙️ Properties", icon='DRIVER')
+        row1 = box.row(align=True)
+        row1.enabled = not props.all_types
+        row1.prop(props, "pos", text="Loc")
+        row1.prop(props, "rot", text="Rot")
+        row2 = box.row(align=True)
+        row2.enabled = not props.all_types
+        row2.prop(props, "scl", text="Scale")
+        row2.prop(props, "custom", text="Custom")
 
-        col.separator()
+        # Frames Affected - Shows actual frame numbers
+        preview_box = layout.box()
+        frames = calculate_frames(props)
+        frame_preview = f"{frames[:12]}{'...' if len(frames) > 12 else ''}"
+        preview_text = f"📊 Frames: {len(frames)} | {frame_preview}"
+        preview_box.label(text=preview_text, icon='INFO')
 
-        col.label(text="⚙️ Property Types", icon='TOOL_SETTINGS')
-        row = col.row(align=True)
-        row.enabled = not props.all_types
-        row.prop(props, "pos", icon='EMPTY_ARROWS', text="Loc")
-        row.prop(props, "rot", icon='DRIVER_ROTATIONAL_DIFFERENCE', text="Rot")
-        row = col.row(align=True)
-        row.enabled = not props.all_types
-        row.prop(props, "scl", icon='FULLSCREEN_EXIT', text="Scale")
-        row.prop(props, "custom", icon='DOT', text="Custom")
-
-        col.separator()
-
-        preview_text = f"Frames affected: {props.preview_count}"
-        col.label(text=preview_text, icon='INFO')
-
+        # Buttons
         row = layout.row(align=True)
         row.scale_y = 1.5
         row.operator("object.delete_keyframe_by_interval", icon='TRASH', text="Delete")
