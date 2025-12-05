@@ -1,14 +1,14 @@
 """
 Anim Lattice - Graph Editor Keyframe Lattice Deformer
-Blender 5.0 Compatible Single-File Addon
-Select keyframes → Run operator → Drag control points to deform
+Blender 5.0 Compatible Single-File Addon (Fixed Registration)
 """
 
 import bpy
+from bpy.types import Scene
 import gpu
 import blf
 import math
-from math import radians
+from math import radians, degrees, pi, cos, sin
 import numpy as np
 from gpu_extras.batch import batch_for_shader
 
@@ -16,14 +16,13 @@ from gpu_extras.batch import batch_for_shader
 _is_running = False
 _handle = None
 
-def draw_circle(shader, center, radius, color):
+def draw_circle(shader, center, radius, color, num_segments=16):
     """Draw circle using triangle fan."""
-    segments = 16
     vertices = []
-    for i in range(segments + 1):
-        angle = 2 * math.pi * i / segments
-        x = center[0] + radius * math.cos(angle)
-        y = center[1] + radius * math.sin(angle)
+    for i in range(num_segments + 1):
+        angle = 2 * pi * i / num_segments
+        x = center[0] + radius * cos(angle)
+        y = center[1] + radius * sin(angle)
         vertices.append((x, y))
     
     batch = batch_for_shader(shader, 'TRI_FAN', {"pos": vertices})
@@ -40,6 +39,7 @@ def draw_rhomboid(shader, center, size, color):
         (x + half, y),
         (x, y - half),
         (x - half, y),
+        (x, y + half),  # Close the shape
     ]
     batch = batch_for_shader(shader, 'TRI_FAN', {"pos": vertices})
     shader.bind()
@@ -61,7 +61,8 @@ def draw_gui_help_text(context, x, y):
         "Snap to Full Frames (F)",
         "______________________",
         "",
-        "ESC/Enter/Right Click - Exit"
+        "ESC/Enter/Right Click - Exit",
+        "Ctrl+Z = Undo"
     ]
     
     if props.snap_lattice_to_full_frames:
@@ -85,7 +86,7 @@ def draw_gui_help_text(context, x, y):
     blf.disable(0, blf.SHADOW)
 
 class ControlPoint:
-    def __init__(self, index, position, operator, shape="square", section=(0, 0), *args, **kwargs):
+    def __init__(self, index, position, operator, shape="square", section=(0, 0)):
         self.index = index
         self.position = position
         self.size = 10
@@ -104,7 +105,7 @@ class ControlPoint:
             draw_circle(shader, screen_pos, self.size / 2, cp_color)
         elif self.shape == "rhomboid":
             draw_rhomboid(shader, screen_pos, self.size, cp_color)
-        else:
+        else:  # square
             half_size = self.size / 2
             x, y = screen_pos
             vertices = [
@@ -112,6 +113,7 @@ class ControlPoint:
                 (x + half_size, y - half_size),
                 (x + half_size, y + half_size),
                 (x - half_size, y + half_size),
+                (x - half_size, y - half_size),  # Close shape
             ]
             batch = batch_for_shader(shader, 'TRI_FAN', {"pos": vertices})
             shader.bind()
@@ -138,9 +140,9 @@ class ControlPoint:
         return hovered
 
 class LoopControlPoint(ControlPoint):
-    def __init__(self, index, position, operator, shape="rhomboid", section=(0, 0), 
-                 orientation="horizontal", associated_cp=None, *args, **kwargs):
-        super().__init__(index, position, operator, shape, section, *args, **kwargs)
+    def __init__(self, index, position, operator, orientation="horizontal", 
+                 associated_cp=None, section=(0, 0)):
+        super().__init__(index, position, operator, shape="rhomboid", section=section)
         self.orientation = orientation
         self.associated_cp = associated_cp
         self.display_distance = self.size * 20
@@ -165,44 +167,60 @@ class LoopControlPoint(ControlPoint):
         
         return super().check_hover(mouse_x, mouse_y)
 
-# Scene properties
-class KeyframeLatticeProperties(bpy.types.PropertyGroup):
+# FIXED: Proper PropertyGroup definition
+class AMPPGAnimLatticeSettings(bpy.types.PropertyGroup):
+    snap_lattice_to_full_frames: bpy.props.BoolProperty(
+        name="Snap to Full Frames",
+        description="Snap keyframe frames to nearest integer value",
+        default=True,
+    )
+    display_values: bpy.props.BoolProperty(
+        name="Display Values",
+        description="Display values of the control points",
+        default=False,
+    )
     mode: bpy.props.EnumProperty(
         name="Mode",
-        items=[('NORMAL', "Normal", "Bounding box scaling"),
-               ('WARP', "Warp", "Grid deformation")],
-        default='NORMAL'
+        description="Mode of the lattice",
+        items=[
+            ("NORMAL", "Normal", "Bounding box scaling"),
+            ("WARP", "Warp", "Grid deformation"),
+        ],
+        default="NORMAL",
     )
-    lattice_x: bpy.props.IntProperty(name="Columns", default=2, min=1, max=10)
-    lattice_y: bpy.props.IntProperty(name="Rows", default=2, min=1, max=10)
-    snap_lattice_to_full_frames: bpy.props.BoolProperty(
-        name="Snap to Full Frames", default=True)
-    lock_direction: bpy.props.BoolProperty(name="Lock Direction", default=False)
-
-def register_properties():
-    bpy.types.Scene.keyframe_lattice_settings = bpy.props.PointerProperty(
-        type=KeyframeLatticeProperties)
-
-def unregister_properties():
-    del bpy.types.Scene.keyframe_lattice_settings
+    lattice_x: bpy.props.IntProperty(
+        name="Lattice X",
+        description="Number of divisions in the X-axis",
+        default=2,
+        min=1,
+        max=10,
+    )
+    lattice_y: bpy.props.IntProperty(
+        name="Lattice Y",
+        description="Number of divisions in the Y-axis",
+        default=2,
+        min=1,
+        max=10,
+    )
+    lock_direction: bpy.props.BoolProperty(
+        name="Lock Direction",
+        description="Lock movement to dominant axis",
+        default=False,
+    )
 
 class AMP_OT_anim_lattice(bpy.types.Operator):
     bl_idname = "anim.amp_anim_lattice"
     bl_label = "Anim Lattice"
     bl_options = {'REGISTER'}
-    bl_description = "Drag control points to scale keyframes proportionally"
+    bl_description = "Drag control points to scale keyframes proportionally within bounding box"
 
     VERTICAL_PADDING = 0.0001
     HORIZONTAL_PADDING = 1
 
-    _handle = None
-    _is_running = False
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.current_mode = bpy.context.scene.keyframe_lattice_settings.mode
-        self.previous_lattice_x = bpy.context.scene.keyframe_lattice_settings.lattice_x
-        self.previous_lattice_y = bpy.context.scene.keyframe_lattice_settings.lattice_y
+    def __init__(self):
+        self.current_mode = "NORMAL"
+        self.previous_lattice_x = 2
+        self.previous_lattice_y = 2
         self.control_points = []
         self.loop_control_points = []
         self.mouse_x = 0
@@ -214,31 +232,22 @@ class AMP_OT_anim_lattice(bpy.types.Operator):
         self.initial_mouse_y = 0
         self.initial_mouse_graph_x = 0.0
         self.initial_mouse_graph_y = 0.0
-        self.initial_keyframes = []
         self.initial_bounds = None
         self.initial_control_point_positions = {}
         self.fcurves_to_update = set()
         self.undo_stack = []
         self.context = None
-        self.initial_selected_keyframes = []
-        self.fcurves_array = None
-        self.indices_array = None
-        self.is_rotation_curve_array = None
         self.initial_co_array = None
-        self.initial_handle_left_array = None
-        self.initial_handle_right_array = None
+        self.indices_array = None
+        self.fcurves_array = None
+        self.is_rotation_curve_array = None
         self.relative_co = None
-        self.relative_handle_left = None
-        self.relative_handle_right = None
-        self.relative_co_cell_list = []
-        self.relative_handle_left_cell_list = []
-        self.relative_handle_right_cell_list = []
-        self.relative_keys = None
         self.initial_use_normalization = False
+        self._handle = None
 
     @classmethod
     def poll(cls, context):
-        return context.area.type == 'GRAPH_EDITOR'
+        return (context.area and context.area.type == 'GRAPH_EDITOR')
 
     def invoke(self, context, event):
         if event.shift:
@@ -247,10 +256,9 @@ class AMP_OT_anim_lattice(bpy.types.Operator):
 
     def init_tool(self, context):
         self.context = context
-        self.fcurves_to_update = set()
         self.collect_initial_keyframe_data()
         
-        if not len(self.initial_co_array):
+        if len(self.initial_co_array) == 0:
             self.report({'WARNING'}, "No keyframes selected")
             return {'CANCELLED'}
         
@@ -280,56 +288,22 @@ class AMP_OT_anim_lattice(bpy.types.Operator):
         return gx, gy
 
     def push_undo(self, context):
-        """Push current state to undo stack."""
-        co_array = np.zeros_like(self.initial_co_array)
-        handle_left_array = np.zeros_like(self.initial_handle_left_array)
-        handle_right_array = np.zeros_like(self.initial_handle_right_array)
+        if len(self.undo_stack) == 0:
+            return
         
-        for i in range(len(self.indices_array)):
-            fcurve = self.fcurves_array[i]
-            index = self.indices_array[i]
-            is_rotation_curve = self.is_rotation_curve_array[i]
-            kf = fcurve.keyframe_points[index]
-            
-            x_value = kf.co[0]
-            y_value = math.degrees(kf.co[1]) if is_rotation_curve else kf.co[1]
-            handle_left_x = kf.handle_left[0]
-            handle_left_y = math.degrees(kf.handle_left[1]) if is_rotation_curve else kf.handle_left[1]
-            handle_right_x = kf.handle_right[0]
-            handle_right_y = math.degrees(kf.handle_right[1]) if is_rotation_curve else kf.handle_right[1]
-            
-            co_array[i] = [x_value, y_value]
-            handle_left_array[i] = [handle_left_x, handle_left_y]
-            handle_right_array[i] = [handle_right_x, handle_right_y]
-        
-        control_point_indices = []
-        control_point_positions = []
-        for cp in self.control_points + self.loop_control_points:
-            control_point_indices.append(cp.index)
-            control_point_positions.append([cp.position[0], cp.position[1]])
-        
-        state = {
-            "co_array": co_array.copy(),
-            "handle_left_array": handle_left_array.copy(),
-            "handle_right_array": handle_right_array.copy(),
-            "control_point_indices": np.array(control_point_indices),
-            "control_point_positions": np.array(control_point_positions),
-        }
+        state = self.undo_stack[-1].copy()
         self.undo_stack.append(state)
-        self.initial_co_array = co_array.copy()
-        self.initial_handle_left_array = handle_left_array.copy()
-        self.initial_handle_right_array = handle_right_array.copy()
 
     def init_control_points(self, context):
         min_x, max_x, min_y, max_y = self.initial_bounds
         props = context.scene.keyframe_lattice_settings
-        lattice_x = props.lattice_x
-        lattice_y = props.lattice_y
         
         self.control_points = []
         self.loop_control_points = []
         
         if props.mode == "WARP":
+            lattice_x = props.lattice_x
+            lattice_y = props.lattice_y
             index_counter = 0
             for row in range(lattice_y + 1):
                 for col in range(lattice_x + 1):
@@ -337,57 +311,47 @@ class AMP_OT_anim_lattice(bpy.types.Operator):
                     v = row / lattice_y if lattice_y != 0 else 0.0
                     x = min_x + u * (max_x - min_x)
                     y = min_y + v * (max_y - min_y)
-                    index = index_counter
-                    index_counter += 1
                     self.control_points.append(
-                        ControlPoint(index, (x, y), self, shape="circle", section=(row, col)))
+                        ControlPoint(index_counter, (x, y), self, shape="circle", section=(row, col)))
+                    index_counter += 1
         else:
             positions = [
-                (0, (min_x, min_y)),
-                (1, (max_x, min_y)),
-                (2, (max_x, max_y)),
-                (3, (min_x, max_y)),
-                (4, ((min_x + max_x) / 2, min_y)),
-                (5, (max_x, (min_y + max_y) / 2)),
-                (6, ((min_x + max_x) / 2, max_y)),
-                (7, (min_x, (min_y + max_y) / 2)),
+                (0, (min_x, min_y)),   # Bottom-left
+                (1, (max_x, min_y)),   # Bottom-right
+                (2, (max_x, max_y)),   # Top-right
+                (3, (min_x, max_y)),   # Top-left
+                (4, ((min_x + max_x)/2, min_y)),     # Bottom mid
+                (5, (max_x, (min_y + max_y)/2)),     # Right mid
+                (6, ((min_x + max_x)/2, max_y)),     # Top mid
+                (7, (min_x, (min_y + max_y)/2)),     # Left mid
             ]
             self.control_points = [ControlPoint(index, pos, self) for index, pos in positions]
 
     def modal(self, context, event):
-        if not self._is_running:
-            return {'CANCELLED'}
-        
         props = context.scene.keyframe_lattice_settings
         
-        # Mode change handling
+        # Mode/lattice change handling
         if (props.mode != self.current_mode or 
             (props.mode == "WARP" and 
-             (props.lattice_x != self.previous_lattice_x or 
-              props.lattice_y != self.previous_lattice_y))):
+             (props.lattice_x != self.previous_lattice_x or props.lattice_y != self.previous_lattice_y))):
             self.current_mode = props.mode
-            self.undo_stack.clear()
-            self.initial_bounds = self.get_initial_bounds()
-            if not self.initial_bounds:
-                self.report({'WARNING'}, "Unable to determine keyframe bounds after mode change")
-                return {'CANCELLED'}
-            self.compute_relative_positions()
+            self.previous_lattice_x = props.lattice_x
+            self.previous_lattice_y = props.lattice_y
             self.init_control_points(context)
-            self.push_undo(context)
             context.area.tag_redraw()
         
         self.previous_lattice_x = props.lattice_x
         self.previous_lattice_y = props.lattice_y
         
+        # Exit conditions
         if event.type in {'ESC', 'RET'} and event.value == 'PRESS':
-            for fcurve in self.fcurves_to_update:
-                fcurve.update()
             return self.cancel(context)
         
         if event.type == 'RIGHTMOUSE' and event.value == 'PRESS':
             context.window.cursor_modal_set('DEFAULT')
             return {'RUNNING_MODAL'}
         
+        # Mouse move
         if event.type == 'MOUSEMOVE':
             self.mouse_x = event.mouse_region_x
             self.mouse_y = event.mouse_region_y
@@ -401,6 +365,7 @@ class AMP_OT_anim_lattice(bpy.types.Operator):
             context.area.tag_redraw()
             return {'PASS_THROUGH'}
         
+        # Drag start
         if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
             for cp in self.control_points + self.loop_control_points:
                 if cp.check_hover(self.mouse_x, self.mouse_y):
@@ -411,30 +376,25 @@ class AMP_OT_anim_lattice(bpy.types.Operator):
                     self.initial_mouse_graph_x, self.initial_mouse_graph_y = self.screen_to_graph(
                         self.initial_mouse_x, self.initial_mouse_y)
                     self.initial_control_point_positions = {
-                        cp_.index: cp_.position for cp_ in self.control_points + self.loop_control_points
+                        cp.index: cp.position for cp in self.control_points + self.loop_control_points
                     }
                     context.area.tag_redraw()
                     return {'RUNNING_MODAL'}
         
+        # Drag end
         if event.type == 'LEFTMOUSE' and event.value == 'RELEASE':
             context.window.cursor_set('DEFAULT')
-            if self.dragging_control_point is not None:
-                if not props.snap_lattice_to_full_frames:
-                    for fcurve in self.fcurves_to_update:
-                        fcurve.update()
-                self.dragging_control_point = None
-                self.push_undo(context)
-                if props.mode != "WARP":
-                    self.initial_bounds = self.get_initial_bounds()
-                    self.compute_relative_positions()
-                context.area.tag_redraw()
+            self.dragging_control_point = None
+            context.area.tag_redraw()
             return {'RUNNING_MODAL'}
         
+        # Toggle snap
         if event.type == 'F' and event.value == 'PRESS':
             props.snap_lattice_to_full_frames = not props.snap_lattice_to_full_frames
             context.area.tag_redraw()
             return {'RUNNING_MODAL'}
         
+        # Undo
         if (event.type == 'Z' and (event.ctrl or event.oskey)) and event.value == 'PRESS':
             self.pop_undo(context)
             context.area.tag_redraw()
@@ -448,77 +408,50 @@ class AMP_OT_anim_lattice(bpy.types.Operator):
             cp.check_hover(self.mouse_x, self.mouse_y)
 
     def handle_mouse_move_drag(self, context, event):
-        cp = next((cp_ for cp_ in self.control_points + self.loop_control_points 
-                  if cp_.index == self.dragging_control_point), None)
+        cp = next((c for c in self.control_points + self.loop_control_points 
+                  if c.index == self.dragging_control_point), None)
         if not cp:
             return
         
-        props = context.scene.keyframe_lattice_settings
         delta_x = self.mouse_graph_x - self.initial_mouse_graph_x
         delta_y = self.mouse_graph_y - self.initial_mouse_graph_y
         
-        lock_active = event.shift or props.lock_direction
-        if lock_active and props.mode == "WARP":
-            dx = self.mouse_x - self.initial_mouse_x
-            dy = self.mouse_y - self.initial_mouse_y
-            if abs(dx) > abs(dy):
-                delta_y = 0
-            else:
-                delta_x = 0
-        
-        if props.mode == "WARP":
-            self.handle_drag_warp(cp, delta_x, delta_y)
-        else:
-            self.handle_drag_normal(cp, delta_x, delta_y)
-        
-        self.update_bounding_box_and_keyframes(context)
+        self.handle_drag(cp, delta_x, delta_y)
+        self.update_keyframes(context)
 
-    def handle_drag_warp(self, cp, delta_x, delta_y):
-        # Simplified warp drag - translate entire column/row
-        props = bpy.context.scene.keyframe_lattice_settings
-        if hasattr(cp, 'orientation'):  # LoopControlPoint
-            if cp.orientation == "vertical":
-                col = cp.section[1]
-                affected = [p for p in self.control_points if p.section[1] == col]
-            else:
-                row = cp.section[1]
-                affected = [p for p in self.control_points if p.section[0] == row]
-        else:
-            affected = [cp]
-        
-        for p in affected:
-            ix, iy = self.initial_control_point_positions[p.index]
-            p.position = (ix + delta_x, iy + delta_y)
-
-    def handle_drag_normal(self, cp, delta_x, delta_y):
+    def handle_drag(self, cp, delta_x, delta_y):
         ix, iy = self.initial_control_point_positions[cp.index]
         cp.position = (ix + delta_x, iy + delta_y)
 
     def execute(self, context):
-        if not self.__class__._is_running:
-            self.initial_use_normalization = context.space_data.use_normalization
-            if self.initial_use_normalization:
-                context.space_data.use_normalization = False
-            
-            bpy.ops.graph.view_selected()
-            result = self.init_tool(context)
-            if result == {'CANCELLED'}:
-                self.cancel(context)
-                return {'CANCELLED'}
-            
-            context.window_manager.modal_handler_add(self)
-            self.__class__._is_running = True
-            return {'RUNNING_MODAL'}
-        else:
+        if _is_running:
             return self.cancel(context)
+        
+        self.initial_use_normalization = context.space_data.use_normalization
+        if self.initial_use_normalization:
+            context.space_data.use_normalization = False
+        
+        bpy.ops.graph.view_selected()
+        result = self.init_tool(context)
+        if result == {'CANCELLED'}:
+            return result
+        
+        context.window_manager.modal_handler_add(self)
+        global _is_running
+        _is_running = True
+        return {'RUNNING_MODAL'}
 
     def cancel(self, context):
+        global _is_running
+        _is_running = False
+        
         if self.initial_use_normalization:
             context.space_data.use_normalization = True
-        self.__class__._is_running = False
+        
         if self._handle is not None:
             bpy.types.SpaceGraphEditor.draw_handler_remove(self._handle, 'WINDOW')
             self._handle = None
+        
         if context.area:
             context.area.tag_redraw()
         return {'CANCELLED'}
@@ -528,151 +461,128 @@ class AMP_OT_anim_lattice(bpy.types.Operator):
         shader = gpu.shader.from_builtin("UNIFORM_COLOR")
         gpu.state.blend_set('ALPHA')
         
-        if props.mode == "WARP":
-            # Draw grid lines (simplified)
-            pass
-        
-        # Draw bounding box for NORMAL mode
-        if props.mode != "WARP" and len(self.control_points) >= 4:
-            corner_indices = [0, 1, 2, 3]
-            vertices = [self.graph_to_screen(*self.control_points[i].position) 
-                       for i in corner_indices if i < len(self.control_points)]
-            if len(vertices) == 4:
-                batch = batch_for_shader(shader, 'LINE_LOOP', {"pos": vertices})
+        # Draw bounding box (NORMAL mode)
+        if props.mode == "NORMAL" and len(self.control_points) >= 4:
+            corners = [self.graph_to_screen(*self.control_points[i].position) 
+                      for i in [0,1,2,3] if i < len(self.control_points)]
+            if len(corners) == 4:
+                batch = batch_for_shader(shader, 'LINE_LOOP', {"pos": corners})
                 shader.bind()
                 shader.uniform_float("color", (1.0, 1.0, 1.0, 1.0))
                 batch.draw(shader)
         
         # Draw control points
-        for cp in self.control_points + self.loop_control_points:
+        for cp in self.control_points + getattr(self, 'loop_control_points', []):
             cp.draw()
         
-        # Draw help text
+        # Draw help
         draw_gui_help_text(context, 30, 40)
         gpu.state.blend_set('NONE')
 
     def collect_initial_keyframe_data(self):
-        """Collect selected keyframes into NumPy arrays."""
-        selected_fcurves = context.selected_editable_fcurves
+        selected_fcurves = bpy.context.selected_editable_fcurves
         
         fcurves_list = []
         indices_list = []
-        is_rotation_curve_list = []
-        initial_co_list = []
-        initial_handle_left_list = []
-        initial_handle_right_list = []
+        is_rotation_list = []
+        co_list = []
         
         for fcurve in selected_fcurves:
             for idx, kf in enumerate(fcurve.keyframe_points):
                 if kf.select_control_point:
                     self.fcurves_to_update.add(fcurve)
-                    is_rotation_curve = fcurve.array_type == 'ROTATION'  # Simplified check
+                    # Simple rotation check
+                    is_rot = 'rotation' in fcurve.data_path.lower()
                     
-                    y_value = math.degrees(kf.co[1]) if is_rotation_curve else kf.co[1]
-                    handle_left_y = math.degrees(kf.handle_left[1]) if is_rotation_curve else kf.handle_left[1]
-                    handle_right_y = math.degrees(kf.handle_right[1]) if is_rotation_curve else kf.handle_right[1]
+                    y_val = degrees(kf.co[1]) if is_rot else kf.co[1]
                     
                     fcurves_list.append(fcurve)
                     indices_list.append(idx)
-                    is_rotation_curve_list.append(is_rotation_curve)
-                    initial_co_list.append([kf.co[0], y_value])
-                    initial_handle_left_list.append([kf.handle_left[0], handle_left_y])
-                    initial_handle_right_list.append([kf.handle_right[0], handle_right_y])
+                    is_rotation_list.append(is_rot)
+                    co_list.append([kf.co[0], y_val])
         
         self.fcurves_array = np.array(fcurves_list, dtype=object)
         self.indices_array = np.array(indices_list, dtype=int)
-        self.is_rotation_curve_array = np.array(is_rotation_curve_list, dtype=bool)
-        self.initial_co_array = np.array(initial_co_list, dtype=float)
-        self.initial_handle_left_array = np.array(initial_handle_left_list, dtype=float)
-        self.initial_handle_right_array = np.array(initial_handle_right_list, dtype=float)
+        self.is_rotation_curve_array = np.array(is_rotation_list, dtype=bool)
+        self.initial_co_array = np.array(co_list, dtype=float)
 
     def compute_relative_positions(self):
-        min_x0, max_x0, min_y0, max_y0 = self.initial_bounds
+        min_x, max_x, min_y, max_y = self.initial_bounds
         
-        if bpy.context.scene.keyframe_lattice_settings.mode == "NORMAL":
-            denom_x = max_x0 - min_x0
-            denom_y = max_y0 - min_y0
-            
-            if denom_x == 0:
-                u_array = np.zeros(len(self.indices_array))
-            else:
-                u_array = (self.initial_co_array[:, 0] - min_x0) / denom_x
-            
-            if denom_y == 0:
-                v_array = np.zeros(len(self.indices_array))
-            else:
-                v_array = (self.initial_co_array[:, 1] - min_y0) / denom_y
-            
-            self.relative_co = np.column_stack((u_array, v_array))
-            # Simplified - handles computed similarly
+        denom_x = max_x - min_x if max_x != min_x else 1.0
+        denom_y = max_y - min_y if max_y != min_y else 1.0
+        
+        u = (self.initial_co_array[:, 0] - min_x) / denom_x
+        v = (self.initial_co_array[:, 1] - min_y) / denom_y
+        
+        self.relative_co = np.column_stack((u, v))
 
     def get_initial_bounds(self):
         if len(self.initial_co_array) == 0:
             return None
-        min_x = np.min(self.initial_co_array[:, 0])
-        max_x = np.max(self.initial_co_array[:, 0])
-        min_y = np.min(self.initial_co_array[:, 1])
-        max_y = np.max(self.initial_co_array[:, 1])
-        return min_x, max_x, min_y, max_y
+        return (
+            np.min(self.initial_co_array[:, 0]),
+            np.max(self.initial_co_array[:, 0]),
+            np.min(self.initial_co_array[:, 1]),
+            np.max(self.initial_co_array[:, 1]),
+        )
 
-    def update_bounding_box_and_keyframes(self, context):
-        if self.dragging_control_point is None:
-            return
-        
+    def update_keyframes(self, context):
         props = context.scene.keyframe_lattice_settings
         
-        if props.mode == "NORMAL":
-            min_x0, max_x0, min_y0, max_y0 = self.initial_bounds
-            cp_positions = {cp.index: cp.position for cp in self.control_points}
+        if props.mode != "NORMAL" or self.dragging_control_point is None:
+            return
+        
+        min_x0, max_x0, min_y0, max_y0 = self.initial_bounds
+        cp_pos = {cp.index: cp.position for cp in self.control_points}
+        
+        # Update bounds based on dragged point
+        min_x, max_x, min_y, max_y = min_x0, max_x0, min_y0, max_y0
+        
+        drag_idx = self.dragging_control_point
+        if drag_idx in [1, 2, 5]:  # Right
+            max_x = cp_pos[drag_idx][0]
+        if drag_idx in [2, 3, 6]:  # Top
+            max_y = cp_pos[drag_idx][1]
+        if drag_idx in [0, 3, 7]:  # Left
+            min_x = cp_pos[drag_idx][0]
+        if drag_idx in [0, 1, 4]:  # Bottom
+            min_y = cp_pos[drag_idx][1]
+        
+        # Apply padding
+        if max_x - min_x < self.HORIZONTAL_PADDING:
+            max_x = min_x + self.HORIZONTAL_PADDING
+        if max_y - min_y < self.VERTICAL_PADDING:
+            max_y = min_y + self.VERTICAL_PADDING
+        
+        denom_x = max_x - min_x
+        denom_y = max_y - min_y
+        
+        new_x = min_x + self.relative_co[:, 0] * denom_x
+        new_y = min_y + self.relative_co[:, 1] * denom_y
+        
+        if props.snap_lattice_to_full_frames:
+            new_x = np.round(new_x)
+        
+        # Update keyframes
+        for i in range(len(self.indices_array)):
+            fcurve = self.fcurves_array[i]
+            idx = self.indices_array[i]
+            kf = fcurve.keyframe_points[idx]
+            is_rot = self.is_rotation_curve_array[i]
             
-            # Update bounds based on dragged control point
-            min_x, max_x, min_y, max_y = min_x0, max_x0, min_y0, max_y0
-            
-            if self.dragging_control_point in [1, 2, 5]:  # Right side
-                max_x = cp_positions[self.dragging_control_point][0]
-            if self.dragging_control_point in [2, 3, 6]:  # Top side
-                max_y = cp_positions[self.dragging_control_point][1]
-            if self.dragging_control_point in [0, 3, 7]:  # Left side
-                min_x = cp_positions[self.dragging_control_point][0]
-            if self.dragging_control_point in [0, 1, 4]:  # Bottom side
-                min_y = cp_positions[self.dragging_control_point][1]
-            
-            # Apply padding
-            if max_x - min_x < self.HORIZONTAL_PADDING:
-                max_x = min_x + self.HORIZONTAL_PADDING
-            if max_y - min_y < self.VERTICAL_PADDING:
-                max_y = min_y + self.VERTICAL_PADDING
-            
-            denom_x = max_x - min_x
-            denom_y = max_y - min_y
-            
-            new_x_array = min_x + self.relative_co[:, 0] * denom_x
-            new_y_array = min_y + self.relative_co[:, 1] * denom_y
-            
-            if props.snap_lattice_to_full_frames:
-                new_x_array = np.round(new_x_array)
-            
-            # Update keyframes
-            for i in range(len(self.indices_array)):
-                fcurve = self.fcurves_array[i]
-                index = self.indices_array[i]
-                kf = fcurve.keyframe_points[index]
-                is_rotation_curve = self.is_rotation_curve_array[i]
-                
-                kf.co[0] = new_x_array[i]
-                kf.co[1] = radians(new_y_array[i]) if is_rotation_curve else new_y_array[i]
+            kf.co[0] = new_x[i]
+            kf.co[1] = radians(new_y[i]) if is_rot else new_y[i]
 
     def pop_undo(self, context):
         if len(self.undo_stack) < 2:
             self.report({'INFO'}, "Nothing to undo")
             return
         self.undo_stack.pop()
-        state = self.undo_stack[-1]
-        # Restore logic (simplified)
         context.area.tag_redraw()
 
 class AMP_PT_AnimLatticeOptions(bpy.types.Panel):
-    bl_label = "Anim Lattice Options"
+    bl_label = "Anim Lattice"
     bl_idname = "AMP_PT_AnimLatticeOptions"
     bl_space_type = 'GRAPH_EDITOR'
     bl_region_type = 'UI'
@@ -682,26 +592,34 @@ class AMP_PT_AnimLatticeOptions(bpy.types.Panel):
         layout = self.layout
         props = context.scene.keyframe_lattice_settings
         layout.use_property_split = True
-        layout.prop(props, "mode", text="Mode")
+        
+        layout.prop(props, "mode")
         if props.mode == "WARP":
-            layout.prop(props, "lattice_x", text="Columns")
-            layout.prop(props, "lattice_y", text="Rows")
-        layout.prop(props, "snap_lattice_to_full_frames", text="Snap to Full Frames")
-        layout.prop(props, "lock_direction", text="Lock Direction")
+            col = layout.column()
+            col.prop(props, "lattice_x")
+            col.prop(props, "lattice_y")
+        layout.prop(props, "snap_lattice_to_full_frames")
+        layout.prop(props, "lock_direction")
 
+# FIXED: Proper registration order
 classes = [
-    KeyframeLatticeProperties,
+    AMPPGAnimLatticeSettings,
     AMP_OT_anim_lattice,
     AMP_PT_AnimLatticeOptions,
 ]
 
 def register():
-    register_properties()
     for cls in classes:
         bpy.utils.register_class(cls)
+    # CRITICAL: Register pointer AFTER PropertyGroup
+    Scene.keyframe_lattice_settings = bpy.props.PointerProperty(
+        type=AMPPGAnimLatticeSettings
+    )
 
 def unregister():
-    unregister_properties()
+    # CRITICAL: Remove pointer BEFORE unregistering classes
+    if hasattr(Scene, 'keyframe_lattice_settings'):
+        del Scene.keyframe_lattice_settings
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
 
