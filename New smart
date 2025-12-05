@@ -1,14 +1,10 @@
 bl_info = {
     "name": "Smart Curve Tools",
     "author": "Venkatesh Sanku (merged by AI assistant)",
-    "version": (1, 6),
+    "version": (1, 7),
     "blender": (5, 0, 0),
     "location": "Graph Editor > Sidebar > Smart Curve Tools Tab",
-    "description": (
-        "Combined toolset: Smart Euler Filter for unwrap/smooth Euler or Quaternion rotations preserving handles "
-        "and advanced smoothing of F-Curves. "
-        "Works for objects and pose bones, with preserved keyframe handles. Batch smoothing affects all keyframes."
-    ),
+    "description": "Smart Euler Filter + Advanced F-Curve Smoothing for Blender 5.0",
     "category": "Animation",
 }
 
@@ -21,32 +17,44 @@ from mathutils import Euler, Quaternion
 def clamp(value, minv, maxv):
     return min(max(value, minv), maxv)
 
-def safe_get_fcurves(obj):
-    """Safe fcurves access for Blender 5.0"""
+def get_graph_fcurves(context):
+    """Get F-Curves from Graph Editor context - Blender 5.0"""
+    fcurves = []
+    
+    # Method 1: Selected editable fcurves (Graph Editor selection)
     try:
-        if obj and obj.animation_data and obj.animation_data.action:
-            return obj.animation_data.action.fcurves
+        selected_fcurves = getattr(context, "selected_editable_fcurves", [])
+        if selected_fcurves:
+            fcurves.extend(selected_fcurves)
     except:
         pass
-    return []
+    
+    # Method 2: Graph Editor space data
+    try:
+        if context.space_data and context.space_data.type == 'GRAPH_EDITOR':
+            if context.space_data.edit_object and context.space_data.edit_object.animation_data:
+                if context.space_data.edit_object.animation_data.action:
+                    fcurves.extend(context.space_data.edit_object.animation_data.action.fcurves)
+    except:
+        pass
+    
+    # Method 3: Active object
+    try:
+        obj = context.active_object
+        if obj and obj.animation_data and obj.animation_data.action:
+            fcurves.extend(obj.animation_data.action.fcurves)
+    except:
+        pass
+    
+    return list(set(fcurves))  # Remove duplicates
 
 def auto_fix_bad_keyframes(fcurve):
     try:
         keyframes = fcurve.keyframe_points
-        n = len(keyframes)
-        for i in range(n):
-            y = keyframes[i].co[1]
-            if not math.isfinite(y):
-                left = next((keyframes[j].co[1] for j in range(i - 1, -1, -1) if math.isfinite(keyframes[j].co[1])), None)
-                right = next((keyframes[j].co[1] for j in range(i + 1, n) if math.isfinite(keyframes[j].co[1])), None)
-                if left is not None and right is not None:
-                    keyframes[i].co[1] = (left + right) / 2
-                elif left is not None:
-                    keyframes[i].co[1] = left
-                elif right is not None:
-                    keyframes[i].co[1] = right
-                else:
-                    keyframes[i].co[1] = 0.0
+        for i, kp in enumerate(keyframes):
+            if not math.isfinite(kp.co[1]):
+                # Simple fix - set to 0
+                kp.co[1] = 0.0
     except:
         pass
 
@@ -63,53 +71,42 @@ def set_bezier_and_auto_clamp_handles(fcurve):
 def smooth_keyframes(fcurve, iterations, strength, sensitivity, preserve_ends=True, all_keyframes=False):
     try:
         keyframes = fcurve.keyframe_points
-        n = len(keyframes)
-        if n < 3:
+        if len(keyframes) < 3:
             return {'moved': 0, 'max_delta': 0}
+            
         if all_keyframes:
-            indices = list(range(n))
+            indices = list(range(len(keyframes)))
         else:
             indices = [i for i, kp in enumerate(keyframes) if kp.select_control_point]
             if len(indices) < 3:
                 return {'moved': 0, 'max_delta': 0}
+                
         values = [kp.co[1] for kp in keyframes]
         stats = {'moved': 0, 'max_delta': 0}
-        strength_factor = strength ** 3
-        smooth_factor = 1.0 - sensitivity
+        
         for _ in range(iterations):
             new_values = values[:]
             for idx_pos in range(1, len(indices) - 1):
                 i = indices[idx_pos]
-                if preserve_ends and (idx_pos == 0 or idx_pos == len(indices) - 1):
-                    continue
-                left_i = indices[idx_pos-1]
-                right_i = indices[idx_pos+1]
-                left = values[left_i]
-                center = values[i]
-                right = values[right_i]
-                average = (left + center + right) / 3
-                diff = abs(center - average)
-                base = abs(center) if center != 0 else 1.0
-                weight_unclamped = strength_factor * (1 - smooth_factor + smooth_factor * (diff / base))
-                weight = clamp(weight_unclamped, 0.0, 1.0)
-                new_val = center * (1 - weight) + average * weight
-                if not math.isfinite(new_val):
-                    new_val = center
-                delta = new_val - center
+                left_i, right_i = indices[idx_pos-1], indices[idx_pos+1]
+                average = (values[left_i] + values[i] + values[right_i]) / 3
+                weight = clamp(strength, 0.0, 1.0)
+                new_val = values[i] * (1 - weight) + average * weight
+                delta = abs(new_val - values[i])
                 new_values[i] = new_val
-                if abs(delta) > 0:
+                if delta > 0:
                     stats['moved'] += 1
-                    stats['max_delta'] = max(stats['max_delta'], abs(delta))
+                    stats['max_delta'] = max(stats['max_delta'], delta)
             values = new_values
+            
         for i in indices:
             keyframes[i].co[1] = values[i]
-        auto_fix_bad_keyframes(fcurve)
         fcurve.update()
         return stats
     except:
         return {'moved': 0, 'max_delta': 0}
 
-# ----- Smart Euler Filter Functions -----
+# ----- Euler Filter -----
 
 def nearest_equivalent_euler(a1, a2):
     twopi = 2 * math.pi
@@ -119,141 +116,69 @@ def nearest_equivalent_euler(a1, a2):
         a2 += twopi
     return a2
 
-def get_selection_info(context):
-    obj = context.active_object
-    if not obj:
-        return None, None, None
+def get_rotation_curves(fcurves):
+    """Find rotation curves (Euler or Quaternion)"""
+    rotation_curves = []
     
-    # Pose bone check - Blender 5.0 safe
-    try:
-        if obj.type == 'ARMATURE' and hasattr(context, 'active_pose_bone'):
-            bone = context.active_pose_bone
-            if bone:
-                return bone, bone.rotation_mode, f'pose.bones["{bone.name}"]'
-    except:
-        pass
+    # Euler rotation
+    euler_curves = [fc for fc in fcurves if 'rotation_euler' in fc.data_path]
+    if len(euler_curves) >= 3:
+        rotation_curves = sorted(euler_curves, key=lambda fc: getattr(fc, 'array_index', 0))
     
-    return obj, getattr(obj, 'rotation_mode', 'XYZ'), ""
+    # Quaternion rotation  
+    quat_curves = [fc for fc in fcurves if 'rotation_quaternion' in fc.data_path]
+    if len(quat_curves) >= 4:
+        rotation_curves = sorted(quat_curves, key=lambda fc: getattr(fc, 'array_index', 0))
+    
+    return rotation_curves
 
-def get_rotation_fcurves(mode_code, all_fcurves, rna_path_prefix):
+def apply_euler_filter(fcurves):
+    """Apply Euler/Quaternion continuity filter"""
     try:
-        if mode_code == "EULER":
-            channel = "rotation_euler"
-            num_channels = 3
-        else:
-            channel = "rotation_quaternion"
-            num_channels = 4
-
-        if rna_path_prefix:
-            prefix = rna_path_prefix
-            found = [fc for fc in all_fcurves if fc.data_path.startswith(f'{prefix}.') and fc.data_path.endswith(channel)]
-        else:
-            found = [fc for fc in all_fcurves if fc.data_path == channel]
-
-        found = sorted(found, key=lambda fc: getattr(fc, 'array_index', 0))
-        found = found[:num_channels]
+        rotation_curves = get_rotation_curves(fcurves)
+        if not rotation_curves:
+            return False
+            
+        # Get all frames from all curves
+        frame_map = {}
+        for fc in rotation_curves:
+            for kp in fc.keyframe_points:
+                frame = int(round(kp.co[0]))
+                if frame not in frame_map:
+                    frame_map[frame] = [None] * len(rotation_curves)
+                frame_map[frame][rotation_curves.index(fc)] = kp.co[1]
         
-        if len(found) >= (3 if mode_code == "EULER" else 4):
-            return found, None
-        return None, f"No {channel} curves found"
-    except:
-        return None, "Error accessing rotation curves"
-
-def get_fcurve_keyframe_map(fcurve):
-    try:
-        return {int(round(kp.co[0])): kp for kp in fcurve.keyframe_points}
-    except:
-        return {}
-
-def collect_keyframes_with_handles_any(curves):
-    try:
-        axis_keyframes = [get_fcurve_keyframe_map(fc) for fc in curves]
-        frames = sorted({f for mapping in axis_keyframes for f in mapping})
-        if not frames:
-            return []
-        keyframe_info = []
-        for f in frames:
-            kps = [mapping.get(f) for mapping in axis_keyframes]
-            value = [kp.co[1] if kp else None for kp in kps]
-            handles = [{
-                'handle_left_type': getattr(kp, 'handle_left_type', None) if kp else None,
-                'handle_right_type': getattr(kp, 'handle_right_type', None) if kp else None,
-                'handle_left': getattr(kp, 'handle_left', None).copy() if kp and hasattr(kp, 'handle_left') else None,
-                'handle_right': getattr(kp, 'handle_right', None).copy() if kp and hasattr(kp, 'handle_right') else None,
-            } for kp in kps]
-            keyframe_info.append({
-                'frame': f,
-                'value': value,
-                'handles': handles,
-            })
-        return keyframe_info
-    except:
-        return []
-
-def unwrap_keyframe_values_euler_any(keyframes):
-    out = []
-    prev = None
-    for info in keyframes:
-        e = info['value']
-        if prev is None:
-            fixed = list(e)
-        else:
-            fixed = [nearest_equivalent_euler(prev[i], e[i]) if e[i] is not None and prev[i] is not None else e[i]
-                     for i in range(len(e))]
-        out.append({
-            'frame': info['frame'],
-            'value': fixed,
-            'handles': info['handles'],
-        })
-        prev = [fixed[i] if fixed[i] is not None else (prev[i] if prev else None) for i in range(len(fixed))]
-    return out
-
-def unwrap_keyframe_values_quaternion_any(keyframes):
-    out = []
-    prev = None
-    for info in keyframes:
-        v = info['value']
-        if len(v) == 4:
-            q = Quaternion([x if x is not None else (prev[i] if prev is not None else 0.0) for i, x in enumerate(v)])
-            if prev is not None and prev.dot(q) < 0.0:
-                q = -q
-            values = [q.w, q.x, q.y, q.z]
-            prev = Quaternion(q)
-        else:
-            values = v if prev is None else [
-                -v[i] if v[i] is not None and prev[i] is not None and abs(v[i] + prev[i]) < abs(v[i] - prev[i]) else v[i]
-                for i in range(len(v))
-            ]
-            prev = [values[i] if values[i] is not None else (prev[i] if prev else None) for i in range(len(values))]
-        out.append({
-            'frame': info['frame'],
-            'value': values,
-            'handles': info['handles'],
-        })
-    return out
-
-def preserve_and_update_fcurve_points_any(curves, keyframe_infos):
-    try:
-        for axis, fc in enumerate(curves):
-            frame_map = get_fcurve_keyframe_map(fc)
-            for info in keyframe_infos:
-                f = info['frame']
-                v = info['value'][axis]
-                kph = info['handles'][axis]
-                kp = frame_map.get(f)
-                if kp and v is not None:
-                    kp.co[1] = v
-                    if kph and kph.get('handle_left_type') is not None:
-                        kp.handle_left_type = kph['handle_left_type']
-                    if kph and kph.get('handle_right_type') is not None:
-                        kp.handle_right_type = kph['handle_right_type']
-                    if kph and kph.get('handle_left') is not None:
-                        kp.handle_left = kph['handle_left']
-                    if kph and kph.get('handle_right') is not None:
-                        kp.handle_right = kph['handle_right']
+        frames = sorted(frame_map.keys())
+        if len(frames) < 2:
+            return False
+            
+        # Unwrap Euler/Quat
+        prev_values = None
+        for frame in frames:
+            values = frame_map[frame]
+            if prev_values is None:
+                fixed = values[:]
+            else:
+                fixed = []
+                for i, val in enumerate(values):
+                    if val is not None and prev_values[i] is not None:
+                        fixed.append(nearest_equivalent_euler(prev_values[i], val))
+                    else:
+                        fixed.append(val)
+            
+            # Update keyframes
+            for i, fc in enumerate(rotation_curves):
+                kp = next((k for k in fc.keyframe_points if int(round(k.co[0])) == frame), None)
+                if kp and fixed[i] is not None:
+                    kp.co[1] = fixed[i]
+            
+            prev_values = fixed[:]
+        
+        for fc in rotation_curves:
             fc.update()
+        return True
     except:
-        pass
+        return False
 
 # ----- Operators -----
 
@@ -261,153 +186,81 @@ class ROTATION_OT_smart_euler_filter(bpy.types.Operator):
     bl_idname = "graph.smart_euler_filter"
     bl_label = "Smart Euler Filter"
     bl_options = {'REGISTER', 'UNDO'}
-
+    
     def execute(self, context):
-        obj = context.active_object
-        if not obj or not obj.animation_data or not obj.animation_data.action:
-            self.report({'ERROR'}, "Select object with animation data in Graph Editor")
+        fcurves = get_graph_fcurves(context)
+        if not fcurves:
+            self.report({'ERROR'}, "No F-Curves found. Select curves in Graph Editor.")
             return {'CANCELLED'}
-
-        all_fcurves = safe_get_fcurves(obj)
-        if not all_fcurves:
-            self.report({'ERROR'}, "No F-Curves found")
-            return {'CANCELLED'}
-
-        entity, rot_mode, rna_path_prefix = get_selection_info(context)
-        if not entity:
-            self.report({'ERROR'}, "No valid entity")
-            return {'CANCELLED'}
-
-        if rot_mode == "QUATERNION":
-            mode_code = "QUATERNION"
-        elif rot_mode in {"XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"}:
-            mode_code = "EULER"
+            
+        if apply_euler_filter(fcurves):
+            self.report({'INFO'}, f"Euler filter applied to {len(fcurves)} curves!")
+            return {'FINISHED'}
         else:
-            mode_code = "EULER"
-
-        rotation_fcurves_all, err = get_rotation_fcurves(mode_code, all_fcurves, rna_path_prefix)
-        if rotation_fcurves_all is None:
-            self.report({'WARNING'}, err)
+            self.report({'WARNING'}, "No rotation curves found")
             return {'CANCELLED'}
-
-        keyframes = collect_keyframes_with_handles_any(rotation_fcurves_all)
-        if not keyframes:
-            self.report({'ERROR'}, "No rotation keyframes found")
-            return {'CANCELLED'}
-
-        if mode_code == "EULER":
-            unwrapped = unwrap_keyframe_values_euler_any(keyframes)
-        else:
-            unwrapped = unwrap_keyframe_values_quaternion_any(keyframes)
-
-        preserve_and_update_fcurve_points_any(rotation_fcurves_all, unwrapped)
-        
-        if context.area:
-            context.area.tag_redraw()
-
-        self.report({'INFO'}, f"{mode_code} filter applied successfully!")
-        return {'FINISHED'}
 
 class CurveSmoothProperties(bpy.types.PropertyGroup):
     iterations: bpy.props.IntProperty(default=5, min=1, max=50, name="Iterations")
     strength: bpy.props.FloatProperty(default=0.5, min=0.0, max=1.0, name="Strength")
-    sensitivity: bpy.props.FloatProperty(default=0.5, min=0.0, max=1.0, name="Sensitivity")
     preserve_ends: bpy.props.BoolProperty(default=True, name="Preserve Ends")
 
-class CurveSmoothOperator(bpy.types.Operator):
-    bl_idname = "graph.smooth_selected_keyframes"
-    bl_label = "Smooth Selected Keyframes"
+class SMOOTH_OT_selected(bpy.types.Operator):
+    bl_idname = "graph.smooth_selected"
+    bl_label = "Smooth Selected"
     bl_options = {'REGISTER', 'UNDO'}
-
+    
     def execute(self, context):
-        if not hasattr(context.scene, 'curve_smooth_settings'):
-            self.report({'ERROR'}, "Settings not initialized")
-            return {'CANCELLED'}
-            
         settings = context.scene.curve_smooth_settings
         curves = getattr(context, "selected_editable_fcurves", [])
         
         if not curves:
-            self.report({'WARNING'}, "No F-Curves selected")
-            return {'CANCELLED'}
-
-        smoothed_count = 0
-        total_keys = 0
-        biggest_move = 0
-        
-        for fcurve in curves:
-            stats = smooth_keyframes(fcurve, settings.iterations, settings.strength, 
-                                   settings.sensitivity, settings.preserve_ends, False)
-            if stats['moved'] > 0:
-                set_bezier_and_auto_clamp_handles(fcurve)
-                smoothed_count += 1
-                total_keys += stats['moved']
-                biggest_move = max(biggest_move, stats['max_delta'])
-
-        if smoothed_count == 0:
-            self.report({'WARNING'}, "No keyframes smoothed")
-            return {'CANCELLED'}
-
-        self.report({'INFO'}, f"Smoothed {total_keys} keys")
-        return {'FINISHED'}
-
-class CurveSmoothAllOperator(bpy.types.Operator):
-    bl_idname = "graph.smooth_all_keyframes"
-    bl_label = "Batch Smooth All"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        if not hasattr(context.scene, 'curve_smooth_settings'):
-            self.report({'ERROR'}, "Settings not initialized")
+            self.report({'WARNING'}, "Select F-Curves first")
             return {'CANCELLED'}
             
-        settings = context.scene.curve_smooth_settings
-        obj = context.active_object
-        
-        if not obj or not obj.animation_data or not obj.animation_data.action:
-            self.report({'WARNING'}, "No animated object selected")
-            return {'CANCELLED'}
-
-        all_fcurves = safe_get_fcurves(obj)
-        if not all_fcurves:
-            self.report({'WARNING'}, "No F-Curves found")
-            return {'CANCELLED'}
-
-        smoothed_count = 0
         total_keys = 0
-        biggest_move = 0
-        
-        for fcurve in all_fcurves:
+        for fcurve in curves:
             stats = smooth_keyframes(fcurve, settings.iterations, settings.strength, 
-                                   settings.sensitivity, settings.preserve_ends, True)
-            if stats['moved'] > 0:
-                set_bezier_and_auto_clamp_handles(fcurve)
-                smoothed_count += 1
-                total_keys += stats['moved']
-                biggest_move = max(biggest_move, stats['max_delta'])
-
-        if smoothed_count == 0:
-            self.report({'WARNING'}, "No curves smoothed")
-            return {'CANCELLED'}
-
-        self.report({'INFO'}, f"Batch smoothed {total_keys} keys in {smoothed_count} curves")
+                                   0.5, settings.preserve_ends, False)
+            total_keys += stats['moved']
+            
+        self.report({'INFO'}, f"Smoothed {total_keys} keyframes")
         return {'FINISHED'}
 
-class ResetCurveSmoothValuesOperator(bpy.types.Operator):
-    bl_idname = "graph.reset_curve_smooth_values"
-    bl_label = "Reset Values"
-    bl_options = {'REGISTER'}
-
+class SMOOTH_OT_all(bpy.types.Operator):
+    bl_idname = "graph.smooth_all"
+    bl_label = "Smooth All Curves"
+    bl_options = {'REGISTER', 'UNDO'}
+    
     def execute(self, context):
-        if hasattr(context.scene, 'curve_smooth_settings'):
-            settings = context.scene.curve_smooth_settings
-            settings.iterations = 5
-            settings.strength = 0.5
-            settings.sensitivity = 0.5
-            settings.preserve_ends = True
-            self.report({'INFO'}, "Reset complete")
-            return {'FINISHED'}
-        return {'CANCELLED'}
+        settings = context.scene.curve_smooth_settings
+        fcurves = get_graph_fcurves(context)
+        
+        if not fcurves:
+            self.report({'WARNING'}, "No F-Curves found")
+            return {'CANCELLED'}
+            
+        total_keys = 0
+        for fcurve in fcurves:
+            stats = smooth_keyframes(fcurve, settings.iterations, settings.strength, 
+                                   0.5, settings.preserve_ends, True)
+            total_keys += stats['moved']
+            
+        self.report({'INFO'}, f"Smoothed {total_keys} keyframes in {len(fcurves)} curves")
+        return {'FINISHED'}
+
+class SMOOTH_OT_reset(bpy.types.Operator):
+    bl_idname = "graph.smooth_reset"
+    bl_label = "Reset"
+    bl_options = {'REGISTER'}
+    
+    def execute(self, context):
+        settings = context.scene.curve_smooth_settings
+        settings.iterations = 5
+        settings.strength = 0.5
+        settings.preserve_ends = True
+        self.report({'INFO'}, "Reset settings")
+        return {'FINISHED'}
 
 class SMARTCURVETOOLS_PT_panel(bpy.types.Panel):
     bl_label = "Smart Curve Tools"
@@ -417,51 +270,40 @@ class SMARTCURVETOOLS_PT_panel(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
-        obj = context.active_object
         
         # Status
-        if obj:
-            layout.label(text=f"Object: {obj.name}")
-            if obj.animation_data:
-                if obj.animation_data.action:
-                    layout.label(text=f"✓ Action: {obj.animation_data.action.name}")
-                else:
-                    layout.label(text="No Action", icon='ERROR')
-            else:
-                layout.label(text="No Animation Data", icon='ERROR')
-        else:
-            layout.label(text="No Object Selected", icon='ERROR')
-
+        fcurves = get_graph_fcurves(context)
+        layout.label(text=f"F-Curves: {len(fcurves)} ✓" if fcurves else "No F-Curves X")
+        
         layout.separator()
         
-        # Smart Euler Filter
-        layout.label(text="Euler Filter:")
+        # Euler Filter
         layout.operator("graph.smart_euler_filter", icon='CON_ROTLIKE')
         
         layout.separator()
         
-        # Smoothing
+        # Smoothing settings
         if hasattr(context.scene, 'curve_smooth_settings'):
             settings = context.scene.curve_smooth_settings
             layout.prop(settings, "iterations")
             layout.prop(settings, "strength")
-            layout.prop(settings, "sensitivity")
             layout.prop(settings, "preserve_ends")
             
-            layout.operator("graph.smooth_selected_keyframes", text="Smooth Selected")
-            layout.operator("graph.smooth_all_keyframes", text="Smooth All")
-            layout.operator("graph.reset_curve_smooth_values", text="Reset", icon='FILE_REFRESH')
+            col = layout.column(align=True)
+            col.operator("graph.smooth_selected", text="Smooth Selected", icon='SMOOTH')
+            col.operator("graph.smooth_all", text="Smooth All", icon='MOD_SMOOTH')
+            layout.operator("graph.smooth_reset", text="Reset", icon='FILE_REFRESH')
         else:
-            layout.label(text="Reload Addon", icon='ERROR')
+            layout.label(text="Reload addon", icon='ERROR')
 
 # ----- Register -----
 
 classes = [
     ROTATION_OT_smart_euler_filter,
     CurveSmoothProperties,
-    CurveSmoothOperator,
-    CurveSmoothAllOperator,
-    ResetCurveSmoothValuesOperator,
+    SMOOTH_OT_selected,
+    SMOOTH_OT_all,
+    SMOOTH_OT_reset,
     SMARTCURVETOOLS_PT_panel,
 ]
 
