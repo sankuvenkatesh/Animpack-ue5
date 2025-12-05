@@ -104,8 +104,8 @@ def nearest_equivalent_euler(a1, a2):
 
 def get_selection_info(context):
     obj = context.active_object
-    bone = getattr(context, "active_pose_bone", None)
-    if bone:
+    bone = getattr(context.active_pose_bone, "bone", None) if hasattr(context, 'active_pose_bone') else None
+    if bone and obj and obj.type == 'ARMATURE' and obj.mode == 'POSE':
         return bone, bone.rotation_mode, f'pose.bones["{bone.name}"]'
     elif obj:
         return obj, obj.rotation_mode, ""
@@ -320,11 +320,28 @@ class CurveSmoothOperator(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO', 'PRESET'}
 
     def execute(self, context):
+        if not hasattr(context.scene, 'curve_smooth_settings'):
+            self.report({'ERROR'}, "Curve smooth settings not found. Please reload the addon.")
+            return {'CANCELLED'}
+            
         settings = context.scene.curve_smooth_settings
         smoothed_count = 0
         total_keys = 0
         biggest_move = 0
-        curves = getattr(context, "selected_editable_fcurves", [])
+        
+        # Blender 5.0 compatible way to get selected fcurves
+        curves = []
+        if context.area and context.area.type == 'GRAPH_EDITOR':
+            for space in context.screen.areas:
+                if space.type == 'GRAPH_EDITOR':
+                    for region in space.regions:
+                        if region.type == 'WINDOW':
+                            override = context.copy()
+                            override['area'] = space
+                            override['region'] = region
+                            curves = getattr(context, "selected_editable_fcurves", [])
+                            break
+                    break
 
         if not curves:
             self.report({'WARNING'}, "No editable F-Curves selected")
@@ -362,6 +379,10 @@ class CurveSmoothAllOperator(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO', 'PRESET'}
 
     def execute(self, context):
+        if not hasattr(context.scene, 'curve_smooth_settings'):
+            self.report({'ERROR'}, "Curve smooth settings not found. Please reload the addon.")
+            return {'CANCELLED'}
+            
         settings = context.scene.curve_smooth_settings
         smoothed_count = 0
         total_keys = 0
@@ -399,6 +420,10 @@ class ResetCurveSmoothValuesOperator(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
+        if not hasattr(context.scene, 'curve_smooth_settings'):
+            self.report({'ERROR'}, "Curve smooth settings not found. Please reload the addon.")
+            return {'CANCELLED'}
+            
         settings = context.scene.curve_smooth_settings
         settings.iterations = 5
         settings.strength = 0.5
@@ -420,17 +445,20 @@ class SMARTCURVETOOLS_PT_panel(bpy.types.Panel):
         layout.operator("graph.smart_euler_filter", icon='CON_ROTLIKE')
         layout.separator()
 
-        settings = context.scene.curve_smooth_settings
-        layout.label(text="Curve Smoothing Parameters:")
-        layout.prop(settings, "iterations")
-        layout.prop(settings, "strength")
-        layout.prop(settings, "sensitivity")
-        layout.prop(settings, "preserve_ends")
+        if hasattr(context.scene, 'curve_smooth_settings'):
+            settings = context.scene.curve_smooth_settings
+            layout.label(text="Curve Smoothing Parameters:")
+            layout.prop(settings, "iterations")
+            layout.prop(settings, "strength")
+            layout.prop(settings, "sensitivity")
+            layout.prop(settings, "preserve_ends")
 
-        layout.operator("graph.smooth_selected_keyframes", text="Smooth Selected Keyframes")
-        layout.operator("graph.smooth_all_keyframes", text="Batch Smooth All F-Curves")
-        layout.separator()
-        layout.operator("graph.reset_curve_smooth_values", text="Reset Smooth Values")
+            layout.operator("graph.smooth_selected_keyframes", text="Smooth Selected Keyframes")
+            layout.operator("graph.smooth_all_keyframes", text="Batch Smooth All F-Curves")
+            layout.separator()
+            layout.operator("graph.reset_curve_smooth_values", text="Reset Smooth Values")
+        else:
+            layout.label(text="Settings not loaded. Reload addon.", icon='ERROR')
 
 # ----- Register and Unregister -----
 
@@ -451,7 +479,10 @@ def register():
 def unregister():
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
-    del bpy.types.Scene.curve_smooth_settings
+    try:
+        del bpy.types.Scene.curve_smooth_settings
+    except:
+        pass
 
 if __name__ == "__main__":
     register()
