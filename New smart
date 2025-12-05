@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Smart Curve Tools",
     "author": "Venkatesh Sanku (merged by AI assistant)",
-    "version": (1, 1),
+    "version": (1, 2),
     "blender": (5, 0, 0),
     "location": "Graph Editor > Sidebar > Smart Curve Tools Tab",
     "description": (
@@ -104,13 +104,17 @@ def nearest_equivalent_euler(a1, a2):
 
 def get_selection_info(context):
     obj = context.active_object
-    bone = getattr(context.active_pose_bone, "bone", None) if hasattr(context, 'active_pose_bone') else None
-    if bone and obj and obj.type == 'ARMATURE' and obj.mode == 'POSE':
-        return bone, bone.rotation_mode, f'pose.bones["{bone.name}"]'
-    elif obj:
-        return obj, obj.rotation_mode, ""
-    else:
+    if not obj:
         return None, None, None
+    
+    # Check for pose bone
+    if obj.type == 'ARMATURE' and obj.mode == 'POSE':
+        bone = context.active_pose_bone
+        if bone:
+            return bone, bone.rotation_mode, f'pose.bones["{bone.name}"]'
+    
+    # Return object info
+    return obj, obj.rotation_mode, ""
 
 def get_rotation_fcurves(mode_code, all_fcurves, rna_path_prefix):
     if mode_code == "EULER":
@@ -225,13 +229,21 @@ def preserve_and_update_fcurve_points_any(curves, keyframe_infos):
 
 def ensure_rotation_keyframes(context, entity, mode_code, rna_path_prefix):
     frame = context.scene.frame_current
-    if rna_path_prefix:
-        data_path = 'rotation_quaternion' if mode_code == "QUATERNION" else 'rotation_euler'
-        entity.keyframe_insert(data_path=data_path, frame=frame)
-    else:
-        obj = entity
-        data_path = 'rotation_quaternion' if mode_code == "QUATERNION" else 'rotation_euler'
-        obj.keyframe_insert(data_path=data_path, frame=frame)
+    data_path = 'rotation_quaternion' if mode_code == "QUATERNION" else 'rotation_euler'
+    entity.keyframe_insert(data_path=data_path, frame=frame)
+
+def get_all_fcurves_from_object(obj):
+    """Safely get all fcurves from an object"""
+    fcurves = []
+    
+    # Get object animation data
+    if obj.animation_data and obj.animation_data.action:
+        try:
+            fcurves.extend(list(obj.animation_data.action.fcurves))
+        except AttributeError:
+            pass
+    
+    return fcurves
 
 # ----- Blender UI and Operator Classes -----
 
@@ -246,11 +258,19 @@ class ROTATION_OT_smart_euler_filter(bpy.types.Operator):
         entity, rot_mode, rna_path_prefix = get_selection_info(context)
         obj = context.active_object
 
-        if not entity or not obj or not obj.animation_data or not obj.animation_data.action:
-            self.report({'ERROR'}, "No active object or pose bone with animation/action found.")
+        if not entity or not obj:
+            self.report({'ERROR'}, "No active object or pose bone found.")
             return {'CANCELLED'}
 
-        all_fcurves = obj.animation_data.action.fcurves
+        if not obj.animation_data or not obj.animation_data.action:
+            self.report({'ERROR'}, "No animation data or action found.")
+            return {'CANCELLED'}
+
+        try:
+            all_fcurves = list(obj.animation_data.action.fcurves)
+        except AttributeError as e:
+            self.report({'ERROR'}, f"Cannot access fcurves: {str(e)}")
+            return {'CANCELLED'}
 
         if rot_mode == "QUATERNION":
             mode_code = "QUATERNION"
@@ -263,7 +283,7 @@ class ROTATION_OT_smart_euler_filter(bpy.types.Operator):
         rotation_fcurves_all, err = get_rotation_fcurves(mode_code, all_fcurves, rna_path_prefix)
         if rotation_fcurves_all is None:
             ensure_rotation_keyframes(context, entity, mode_code, rna_path_prefix)
-            all_fcurves = obj.animation_data.action.fcurves
+            all_fcurves = list(obj.animation_data.action.fcurves)
             rotation_fcurves_all, err = get_rotation_fcurves(mode_code, all_fcurves, rna_path_prefix)
             if rotation_fcurves_all is None:
                 self.report({'ERROR'}, err)
@@ -329,19 +349,8 @@ class CurveSmoothOperator(bpy.types.Operator):
         total_keys = 0
         biggest_move = 0
         
-        # Blender 5.0 compatible way to get selected fcurves
-        curves = []
-        if context.area and context.area.type == 'GRAPH_EDITOR':
-            for space in context.screen.areas:
-                if space.type == 'GRAPH_EDITOR':
-                    for region in space.regions:
-                        if region.type == 'WINDOW':
-                            override = context.copy()
-                            override['area'] = space
-                            override['region'] = region
-                            curves = getattr(context, "selected_editable_fcurves", [])
-                            break
-                    break
+        # Get selected fcurves from context
+        curves = getattr(context, "selected_editable_fcurves", [])
 
         if not curves:
             self.report({'WARNING'}, "No editable F-Curves selected")
@@ -389,21 +398,29 @@ class CurveSmoothAllOperator(bpy.types.Operator):
         biggest_move = 0
 
         for obj in context.selected_objects:
-            if obj.animation_data and obj.animation_data.action:
-                for fcurve in obj.animation_data.action.fcurves:
-                    if len(fcurve.keyframe_points) >= 3:
-                        stats = smooth_keyframes(
-                            fcurve,
-                            settings.iterations,
-                            settings.strength,
-                            settings.sensitivity,
-                            settings.preserve_ends,
-                            all_keyframes=True  # Always process all keyframes in batch mode
-                        )
-                        set_bezier_and_auto_clamp_handles(fcurve)
-                        smoothed_count += 1
-                        total_keys += stats['moved']
-                        biggest_move = max(biggest_move, stats['max_delta'])
+            if not obj.animation_data or not obj.animation_data.action:
+                continue
+                
+            try:
+                fcurves_list = list(obj.animation_data.action.fcurves)
+            except AttributeError:
+                self.report({'WARNING'}, f"Cannot access fcurves for object '{obj.name}'")
+                continue
+                
+            for fcurve in fcurves_list:
+                if len(fcurve.keyframe_points) >= 3:
+                    stats = smooth_keyframes(
+                        fcurve,
+                        settings.iterations,
+                        settings.strength,
+                        settings.sensitivity,
+                        settings.preserve_ends,
+                        all_keyframes=True  # Always process all keyframes in batch mode
+                    )
+                    set_bezier_and_auto_clamp_handles(fcurve)
+                    smoothed_count += 1
+                    total_keys += stats['moved']
+                    biggest_move = max(biggest_move, stats['max_delta'])
 
         if smoothed_count == 0:
             self.report({'WARNING'}, "No F-Curves to smooth")
