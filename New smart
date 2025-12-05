@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Smart Curve Tools",
     "author": "Venkatesh Sanku (merged by AI assistant)",
-    "version": (1, 10),
+    "version": (2, 0),
     "blender": (5, 0, 0),
     "location": "Graph Editor > Sidebar > Smart Curve Tools Tab",
     "description": (
@@ -90,7 +90,7 @@ def smooth_keyframes(fcurve, iterations, strength, sensitivity, preserve_ends=Tr
         if n < 3:
             return {'moved': 0, 'max_delta': 0}
         if all_keyframes:
-            indices = list(range(n))  # ALL KEYFRAMES for batch mode
+            indices = list(range(n))
         else:
             indices = [i for i, kp in enumerate(keyframes) if kp.select_control_point]
             if len(indices) < 3:
@@ -172,7 +172,9 @@ def get_rotation_fcurves(mode_code, all_fcurves, rna_path_prefix):
 
         found = sorted(found, key=lambda fc: getattr(fc, 'array_index', 0))
         found = found[:num_channels]
-        if not found or (mode_code == "EULER" and len(found) < 3) or (mode_code == "QUATERNION" and len(found) < 4):
+        
+        # FIXED: Accept even single channel for partial rotations
+        if not found:
             return None, f"No {channel} f-curves found."
         return found, None
     except:
@@ -262,12 +264,12 @@ def preserve_and_update_fcurve_points_any(curves, keyframe_infos):
     except:
         pass
 
-# ----- CREATIVE UI OPERATORS -----
+# ----- OPERATORS -----
 
 class ROTATION_OT_smart_euler_filter(bpy.types.Operator):
-    """Smart Euler Filter - ALL keyframes, ALL rotation curves"""
+    """Smart Euler Filter - Works on selected rotation curves OR all rotation curves"""
     bl_idname = "graph.smart_euler_filter"
-    bl_label = "🔄 Smart Euler Filter (ALL)"
+    bl_label = "Smart Euler Filter"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
@@ -293,8 +295,11 @@ class ROTATION_OT_smart_euler_filter(bpy.types.Operator):
             self.report({'ERROR'}, err)
             return {'CANCELLED'}
 
-        # ALL rotation curves, ALL keyframes
-        keyframes = collect_keyframes_with_handles_any(rotation_fcurves_all)
+        # FIXED: If user selected specific rotation channels, use only those. Otherwise use all.
+        selected_fcurves = [fc for fc in rotation_fcurves_all if getattr(fc, 'select', False)]
+        rotation_fcurves = selected_fcurves if selected_fcurves else rotation_fcurves_all
+
+        keyframes = collect_keyframes_with_handles_any(rotation_fcurves)
         if not keyframes:
             self.report({'ERROR'}, "No rotation keyframes found")
             return {'CANCELLED'}
@@ -304,11 +309,11 @@ class ROTATION_OT_smart_euler_filter(bpy.types.Operator):
         else:
             unwrapped = unwrap_keyframe_values_quaternion_any(keyframes)
 
-        preserve_and_update_fcurve_points_any(rotation_fcurves_all, unwrapped)
+        preserve_and_update_fcurve_points_any(rotation_fcurves, unwrapped)
         if context.area:
             context.area.tag_redraw()
 
-        self.report({'INFO'}, f"🔄 {mode_code} filter applied to ALL {len(rotation_fcurves_all)} rotation curves!")
+        self.report({'INFO'}, f"{mode_code} continuity applied to {len(rotation_fcurves)} channel(s) ({'selected' if selected_fcurves else 'all'})")
         return {'FINISHED'}
 
 class CurveSmoothProperties(bpy.types.PropertyGroup):
@@ -333,10 +338,10 @@ class CurveSmoothProperties(bpy.types.PropertyGroup):
         default=True
     )
 
-class CurveSmoothSelectedOperator(bpy.types.Operator):
+class CurveSmoothOperator(bpy.types.Operator):
     """Smooth Selected Keyframes of Selected F-Curves (Advanced)"""
     bl_idname = "graph.smooth_selected_keyframes"
-    bl_label = "🎯 Smooth Selected Keyframes"
+    bl_label = "Smooth Selected Keyframes (Advanced)"
     bl_options = {'REGISTER', 'UNDO', 'PRESET'}
 
     def execute(self, context):
@@ -351,9 +356,16 @@ class CurveSmoothSelectedOperator(bpy.types.Operator):
             return {'CANCELLED'}
 
         for fcurve in curves:
-            stats = smooth_keyframes(fcurve, settings.iterations, settings.strength, 
-                                   settings.sensitivity, settings.preserve_ends, False)
-            if stats['moved'] > 0:
+            selected_keys = [kp for kp in fcurve.keyframe_points if kp.select_control_point]
+            if len(selected_keys) >= 3:
+                stats = smooth_keyframes(
+                    fcurve,
+                    settings.iterations,
+                    settings.strength,
+                    settings.sensitivity,
+                    settings.preserve_ends,
+                    all_keyframes=False
+                )
                 set_bezier_and_auto_clamp_handles(fcurve)
                 smoothed_count += 1
                 total_keys += stats['moved']
@@ -363,13 +375,14 @@ class CurveSmoothSelectedOperator(bpy.types.Operator):
             self.report({'WARNING'}, "Not enough selected keyframes to smooth")
             return {'CANCELLED'}
 
-        self.report({'INFO'}, f"🎯 Smoothed {total_keys} SELECTED keyframes in {smoothed_count} curves")
+        self.report({'INFO'},
+                    f"Smoothed {total_keys} keyframes in {smoothed_count} F-Curve(s). Largest change: {biggest_move:.2f}")
         return {'FINISHED'}
 
-class CurveSmoothAllCurvesOperator(bpy.types.Operator):
-    """Batch Smooth ALL Keyframes of ALL F-Curves"""
+class CurveSmoothAllOperator(bpy.types.Operator):
+    """Batch Smooth All F-Curves (Advanced)"""
     bl_idname = "graph.smooth_all_keyframes"
-    bl_label = "🌐 Batch Smooth ALL Curves"
+    bl_label = "Batch Smooth All F-Curves"
     bl_options = {'REGISTER', 'UNDO', 'PRESET'}
 
     def execute(self, context):
@@ -377,33 +390,39 @@ class CurveSmoothAllCurvesOperator(bpy.types.Operator):
         smoothed_count = 0
         total_keys = 0
         biggest_move = 0
-        fcurves = get_graph_fcurves(context)
 
+        fcurves = get_graph_fcurves(context)
         if not fcurves:
             self.report({'WARNING'}, "No F-Curves found")
             return {'CANCELLED'}
 
         for fcurve in fcurves:
-            # ALWAYS all_keyframes=True - processes ALL keyframes regardless of selection
-            stats = smooth_keyframes(fcurve, settings.iterations, settings.strength, 
-                                   settings.sensitivity, settings.preserve_ends, True)
-            if stats['moved'] > 0:
+            if len(fcurve.keyframe_points) >= 3:
+                stats = smooth_keyframes(
+                    fcurve,
+                    settings.iterations,
+                    settings.strength,
+                    settings.sensitivity,
+                    settings.preserve_ends,
+                    all_keyframes=True  # Always process all keyframes in batch mode
+                )
                 set_bezier_and_auto_clamp_handles(fcurve)
                 smoothed_count += 1
                 total_keys += stats['moved']
                 biggest_move = max(biggest_move, stats['max_delta'])
 
         if smoothed_count == 0:
-            self.report({'WARNING'}, "No F-Curves with enough keyframes")
+            self.report({'WARNING'}, "No F-Curves to smooth")
             return {'CANCELLED'}
 
-        self.report({'INFO'}, f"🌐 Batch smoothed {total_keys} ALL keyframes in {smoothed_count} curves")
+        self.report({'INFO'},
+                    f"Batch smoothed {total_keys} keyframes in {smoothed_count} F-Curve(s). Largest change: {biggest_move:.2f}")
         return {'FINISHED'}
 
 class ResetCurveSmoothValuesOperator(bpy.types.Operator):
     """Reset Curve Smooth Values to Defaults"""
     bl_idname = "graph.reset_curve_smooth_values"
-    bl_label = "🔄 Reset Values"
+    bl_label = "Reset Curve Smooth Values"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
@@ -412,62 +431,41 @@ class ResetCurveSmoothValuesOperator(bpy.types.Operator):
         settings.strength = 0.5
         settings.sensitivity = 0.5
         settings.preserve_ends = True
-        self.report({'INFO'}, "🔄 Reset to defaults")
+        self.report({'INFO'}, "Reset smoothing parameters to default values")
         return {'FINISHED'}
 
-# ----- CREATIVE UI PANEL -----
-
 class SMARTCURVETOOLS_PT_panel(bpy.types.Panel):
-    bl_label = "🎬 Smart Curve Tools"
+    bl_label = "Smart Curve Tools"
     bl_space_type = 'GRAPH_EDITOR'
     bl_region_type = 'UI'
     bl_category = "Smart Curve Tools"
-    bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
         layout = self.layout
-        fcurves = get_graph_fcurves(context)
-        
-        # Status Header
-        box = layout.box()
-        box.label(text=f"📊 F-Curves: {len(fcurves)}", icon='INFO')
-        
-        # Smart Euler Filter Section
-        box = layout.box()
-        box.label(text="🔄 Smart Euler Filter", icon='CON_ROTLIKE')
-        box.operator("graph.smart_euler_filter", text="Apply to ALL Rotation Curves")
-        
-        layout.separator()
-        
-        # Smoothing Parameters
-        if hasattr(context.scene, 'curve_smooth_settings'):
-            settings = context.scene.curve_smooth_settings
-            
-            box = layout.box()
-            box.label(text="⚙️ Smoothing Parameters", icon='MODIFIER')
-            col = box.column(align=True)
-            col.prop(settings, "iterations")
-            col.prop(settings, "strength")
-            col.prop(settings, "sensitivity")
-            col.prop(settings, "preserve_ends")
-            
-            # Smoothing Operators
-            box = layout.box()
-            row = box.row(align=True)
-            row.operator("graph.smooth_selected_keyframes", text="🎯 Selected Only", icon='KEY_SELECTED')
-            row.operator("graph.smooth_all_keyframes", text="🌐 ALL Curves", icon='WORLD')
-            
-            layout.operator("graph.reset_curve_smooth_values", text="🔄 Reset All", icon='LOOP_BACK')
-        else:
-            layout.label(text="Reload addon", icon='ERROR')
 
-# ----- Register -----
+        layout.label(text="Smart Euler Filter:")
+        layout.operator("graph.smart_euler_filter", icon='CON_ROTLIKE')
+        layout.separator()
+
+        settings = context.scene.curve_smooth_settings
+        layout.label(text="Curve Smoothing Parameters:")
+        layout.prop(settings, "iterations")
+        layout.prop(settings, "strength")
+        layout.prop(settings, "sensitivity")
+        layout.prop(settings, "preserve_ends")
+
+        layout.operator("graph.smooth_selected_keyframes", text="Smooth Selected Keyframes")
+        layout.operator("graph.smooth_all_keyframes", text="Batch Smooth All F-Curves")
+        layout.separator()
+        layout.operator("graph.reset_curve_smooth_values", text="Reset Smooth Values")
+
+# ----- Register and Unregister -----
 
 classes = [
     ROTATION_OT_smart_euler_filter,
     CurveSmoothProperties,
-    CurveSmoothSelectedOperator,
-    CurveSmoothAllCurvesOperator,
+    CurveSmoothOperator,
+    CurveSmoothAllOperator,
     ResetCurveSmoothValuesOperator,
     SMARTCURVETOOLS_PT_panel,
 ]
