@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Anim Lattice",
     "author": "Your Name",
-    "version": (1, 0, 1),
+    "version": (1, 1, 0),
     "blender": (5, 0, 0),
     "location": "Graph Editor > Sidebar > Anim Lattice",
     "description": "Manipulate selected keyframes with a bounding box - proportional scaling and bulk retiming",
@@ -11,6 +11,47 @@ bl_info = {
 import bpy
 import mathutils
 from bpy.props import FloatProperty, EnumProperty
+
+def get_selected_keyframes(context):
+    """Get all selected keyframes from all animated objects in the scene"""
+    keyframe_data = []
+    
+    # Get dopesheet from graph editor
+    if context.space_data.type != 'GRAPH_EDITOR':
+        return keyframe_data
+    
+    dopesheet = context.space_data.dopesheet
+    
+    # Check all objects in the scene
+    objects_to_check = []
+    
+    # If "Only Selected" is enabled in dopesheet, check only selected objects
+    if dopesheet.show_only_selected:
+        objects_to_check = context.selected_objects
+    else:
+        objects_to_check = context.scene.objects
+    
+    # Iterate through objects and their fcurves
+    for obj in objects_to_check:
+        if not obj.animation_data or not obj.animation_data.action:
+            continue
+        
+        action = obj.animation_data.action
+        
+        for fcurve in action.fcurves:
+            if fcurve.lock or fcurve.hide:
+                continue
+            
+            for point in fcurve.keyframe_points:
+                if point.select_control_point:
+                    keyframe_data.append({
+                        'fcurve': fcurve,
+                        'point': point,
+                        'original_co': point.co.copy()
+                    })
+    
+    return keyframe_data
+
 
 class ANIMLATTICE_OT_transform_keys(bpy.types.Operator):
     """Transform selected keyframes proportionally within bounding box"""
@@ -58,31 +99,9 @@ class ANIMLATTICE_OT_transform_keys(bpy.types.Operator):
         default='CENTER'
     )
     
-    def get_selected_keyframes(self, context):
-        """Get all selected keyframes from visible fcurves - Blender 5.0 compatible"""
-        keyframe_data = []
-        
-        # Get animation data from context object
-        obj = context.active_object
-        if not obj or not obj.animation_data or not obj.animation_data.action:
-            return keyframe_data
-        
-        action = obj.animation_data.action
-        
-        # Iterate through fcurves in the action
-        for fcurve in action.fcurves:
-            if fcurve.lock or fcurve.hide:
-                continue
-                
-            for point in fcurve.keyframe_points:
-                if point.select_control_point:
-                    keyframe_data.append({
-                        'fcurve': fcurve,
-                        'point': point,
-                        'original_co': point.co.copy()
-                    })
-        
-        return keyframe_data
+    @classmethod
+    def poll(cls, context):
+        return context.space_data.type == 'GRAPH_EDITOR'
     
     def calculate_pivot(self, keyframe_data, context):
         """Calculate pivot point based on mode"""
@@ -113,7 +132,7 @@ class ANIMLATTICE_OT_transform_keys(bpy.types.Operator):
             ))
     
     def execute(self, context):
-        keyframe_data = self.get_selected_keyframes(context)
+        keyframe_data = get_selected_keyframes(context)
         
         if not keyframe_data:
             self.report({'WARNING'}, "No keyframes selected")
@@ -141,16 +160,23 @@ class ANIMLATTICE_OT_transform_keys(bpy.types.Operator):
             point.co = (new_frame, new_value)
             
             # Update handles proportionally
-            point.handle_left[0] = point.handle_left[0] - original[0] + new_frame
-            point.handle_right[0] = point.handle_right[0] - original[0] + new_frame
+            handle_left_offset = point.handle_left[0] - original[0]
+            handle_right_offset = point.handle_right[0] - original[0]
+            
+            point.handle_left[0] = new_frame + handle_left_offset
+            point.handle_right[0] = new_frame + handle_right_offset
         
         # Update fcurves
+        updated_fcurves = set()
         for kf_data in keyframe_data:
-            kf_data['fcurve'].update()
+            if kf_data['fcurve'] not in updated_fcurves:
+                kf_data['fcurve'].update()
+                updated_fcurves.add(kf_data['fcurve'])
         
         # Redraw graph editor
         context.area.tag_redraw()
         
+        self.report({'INFO'}, f"Transformed {len(keyframe_data)} keyframes")
         return {'FINISHED'}
 
 
@@ -167,6 +193,10 @@ class ANIMLATTICE_OT_bulk_retime(bpy.types.Operator):
         min=0.01,
         max=10.0
     )
+    
+    @classmethod
+    def poll(cls, context):
+        return context.space_data.type == 'GRAPH_EDITOR'
     
     def execute(self, context):
         bpy.ops.graph.anim_lattice_transform(
@@ -192,6 +222,10 @@ class ANIMLATTICE_OT_bulk_scale_values(bpy.types.Operator):
         max=10.0
     )
     
+    @classmethod
+    def poll(cls, context):
+        return context.space_data.type == 'GRAPH_EDITOR'
+    
     def execute(self, context):
         bpy.ops.graph.anim_lattice_transform(
             scale_time=1.0,
@@ -213,39 +247,34 @@ class ANIMLATTICE_PT_main_panel(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         
-        # Check if we have a valid object with animation
-        obj = context.active_object
-        if not obj or not obj.animation_data or not obj.animation_data.action:
-            layout.label(text="No active animation", icon='INFO')
-            return
-        
-        action = obj.animation_data.action
+        # Count selected keyframes
+        selected_count = len(get_selected_keyframes(context))
         
         # Bounding Box Info
         box = layout.box()
         box.label(text="Selected Keyframes", icon='BORDER_RECT')
         
-        # Count selected keyframes - Blender 5.0 compatible
-        selected_count = 0
-        for fcurve in action.fcurves:
-            if not fcurve.lock and not fcurve.hide:
-                selected_count += sum(1 for kp in fcurve.keyframe_points if kp.select_control_point)
-        
-        box.label(text=f"Keys: {selected_count}")
+        if selected_count > 0:
+            box.label(text=f"Keys: {selected_count}")
+        else:
+            box.label(text="No keys selected", icon='INFO')
+            box.label(text="Select keyframes to use")
         
         # Quick Operations
         box = layout.box()
         box.label(text="Quick Operations", icon='MODIFIER')
         
         col = box.column(align=True)
+        col.enabled = selected_count > 0
         col.operator("graph.anim_lattice_retime", text="Retime Selection", icon='TIME')
         col.operator("graph.anim_lattice_scale_values", text="Scale Values", icon='ARROW_LEFTRIGHT')
         
         # Advanced Transform
         box = layout.box()
         box.label(text="Advanced Transform", icon='TRANSFORM_ORIGINS')
+        box.enabled = selected_count > 0
         
-        box.operator("graph.anim_lattice_transform", text="Transform Keyframes")
+        op = box.operator("graph.anim_lattice_transform", text="Transform Keyframes")
 
 
 classes = (
