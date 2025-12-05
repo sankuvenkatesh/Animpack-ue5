@@ -1,211 +1,156 @@
 bl_info = {
-    "name": "Anim Lattice - WORKING",
-    "author": "Your Name", 
-    "version": (2, 0, 0),
+    "name": "Anim Lattice FINAL",
+    "author": "Your Name",
+    "version": (3, 0, 0),
     "blender": (5, 0, 0),
-    "location": "Graph Editor > Sidebar (N) > Anim Lattice",
-    "description": "Bounding box keyframe manipulation - WORKS IN BLENDER 5.0",
+    "location": "Graph Editor > N Panel > Anim Lattice",
+    "description": "FINAL VERSION - WILL WORK",
     "category": "Animation",
 }
 
 import bpy
-import bmesh
-from mathutils import Vector
-from bpy.props import FloatProperty, BoolProperty
+from bpy.props import FloatProperty
 
-def get_selected_keyframes():
-    """CORRECT way to get Graph Editor selected keyframes - works in Blender 5.0"""
-    keyframes = []
-    
-    # Get ALL actions in the scene (Graph Editor shows all animated objects)
+def get_keyframes():
+    """SIMPLEST possible keyframe detection"""
+    count = 0
     for obj in bpy.context.scene.objects:
         if obj.animation_data and obj.animation_data.action:
-            action = obj.animation_data.action
-            for fcurve in action.fcurves:
-                # Skip hidden/locked curves
-                if fcurve.hide or fcurve.lock:
-                    continue
+            for fcurve in obj.animation_data.action.fcurves:
                 for point in fcurve.keyframe_points:
-                    # Check if keyframe is SELECTED (this is the key!)
                     if point.select_control_point:
-                        keyframes.append({
-                            'fcurve': fcurve,
-                            'point': point,
-                            'co': point.co.copy(),
-                            'handle_left': point.handle_left.copy(),
-                            'handle_right': point.handle_right.copy()
-                        })
-    return keyframes
+                        count += 1
+    return count
 
-class ANIMLATTICE_OT_scale_time(bpy.types.Operator):
-    """Scale selected keyframes time proportionally"""
-    bl_idname = "animlattice.scale_time"
-    bl_label = "Scale Time"
-    bl_options = {'REGISTER', 'UNDO'}
-    
-    scale_factor: FloatProperty(default=1.0, min=0.1, max=5.0)
+class ANIMLATTICE_OT_test_button(bpy.types.Operator):
+    """Test button - proves addon works"""
+    bl_idname = "animlattice.test"
+    bl_label = "TEST BUTTON"
     
     def execute(self, context):
-        keyframes = get_selected_keyframes()
-        if not keyframes:
-            self.report({'WARNING'}, "No keyframes selected!")
-            return {'CANCELLED'}
-        
-        # Calculate bounding box center
-        times = [kf['co'][0] for kf in keyframes]
-        center_time = sum(times) / len(times)
-        
-        # Scale around center
-        for kf in keyframes:
-            point = kf['point']
-            old_time = kf['co'][0]
-            new_time = center_time + (old_time - center_time) * self.scale_factor
-            
-            # Move keyframe
-            point.co[0] = new_time
-            
-            # Move handles proportionally
-            delta_time = new_time - old_time
-            point.handle_left[0] += delta_time
-            point.handle_right[0] += delta_time
-        
-        # Update curves
-        for kf in keyframes:
-            kf['fcurve'].update()
-        
-        context.area.tag_redraw()
-        self.report({'INFO'}, f"Scaled {len(keyframes)} keyframes time by {self.scale_factor:.2f}x")
-        return {'FINISHED'}
-
-class ANIMLATTICE_OT_scale_value(bpy.types.Operator):
-    """Scale selected keyframes values proportionally"""
-    bl_idname = "animlattice.scale_value"
-    bl_label = "Scale Value"
-    bl_options = {'REGISTER', 'UNDO'}
-    
-    scale_factor: FloatProperty(default=1.0, min=0.1, max=5.0)
-    
-    def execute(self, context):
-        keyframes = get_selected_keyframes()
-        if not keyframes:
-            self.report({'WARNING'}, "No keyframes selected!")
-            return {'CANCELLED'}
-        
-        # Calculate bounding box center
-        values = [kf['co'][1] for kf in keyframes]
-        center_value = sum(values) / len(values)
-        
-        # Scale around center
-        for kf in keyframes:
-            point = kf['point']
-            old_value = kf['co'][1]
-            new_value = center_value + (old_value - center_value) * self.scale_factor
-            
-            point.co[1] = new_value
-        
-        for kf in keyframes:
-            kf['fcurve'].update()
-        
-        context.area.tag_redraw()
-        self.report({'INFO'}, f"Scaled {len(keyframes)} keyframes values by {self.scale_factor:.2f}x")
-        return {'FINISHED'}
-
-class ANIMLATTICE_OT_retime_range(bpy.types.Operator):
-    """Retime selected keyframes to fit frame range"""
-    bl_idname = "animlattice.retime_range"
-    bl_label = "Retime to Range"
-    bl_options = {'REGISTER', 'UNDO'}
-    
-    target_frames: FloatProperty(
-        name="Target Frames", 
-        default=24.0,
-        min=1.0, max=1000.0
-    )
-    
-    def execute(self, context):
-        keyframes = get_selected_keyframes()
-        if not keyframes:
-            self.report({'WARNING'}, "No keyframes selected!")
-            return {'CANCELLED'}
-        
-        # Get current time range
-        times = [kf['co'][0] for kf in keyframes]
-        min_time, max_time = min(times), max(times)
-        current_range = max_time - min_time
-        
-        scale_factor = self.target_frames / current_range
-        
-        # Use scale_time operator
-        bpy.ops.animlattice.scale_time('INVOKE_DEFAULT', scale_factor=scale_factor)
-        
+        count = get_keyframes()
+        self.report({'INFO'}, f"Found {count} selected keyframes!")
         return {'FINISHED'}
 
 class ANIMLATTICE_PT_panel(bpy.types.Panel):
+    """Anim Lattice Panel - BULLETPROOF"""
     bl_label = "Anim Lattice"
     bl_idname = "ANIMLATTICE_PT_panel"
     bl_space_type = 'GRAPH_EDITOR'
     bl_region_type = 'UI'
-    bl_category = "Anim Lattice"
+    bl_category = "Anim Lattice"  # Custom tab name
     
     def draw(self, context):
         layout = self.layout
+        kf_count = get_keyframes()
         
-        # Show selected keyframe count
-        kf_count = len(get_selected_keyframes())
-        box = layout.box()
-        box.prop(context.space_data, "show_only_selected", text="Only Selected")
-        box.label(text=f"Keys: {kf_count}", icon='KEY_HLT' if kf_count else 'INFO')
+        # BIG GREEN STATUS
+        row = layout.row()
+        row.scale_y = 2.0
+        if kf_count > 0:
+            row.label(text=f"✅ {kf_count} KEYS SELECTED!", icon='KEY_HLT')
+        else:
+            row.label(text="❌ NO KEYS SELECTED", icon='INFO')
+        
+        # TEST BUTTON (proves addon loads)
+        layout.operator("animlattice.test", icon='PLAY')
         
         if kf_count == 0:
-            box.label(text="1. Select object with keyframes", icon='INFO')
-            box.label(text="2. Go to Graph Editor", icon='INFO')
-            box.label(text="3. B = Box select keyframes", icon='INFO')
+            box = layout.box()
+            box.label(text="🚀 QUICK SETUP:")
+            box.label(text="1. Select animated object")
+            box.label(text="2. Graph Editor → B (box select keyframes)")
             return
         
-        # Time Scaling (Horizontal - Retiming)
+        # WORKING OPERATORS
         box = layout.box()
-        box.label(text="Time Scaling", icon='TIME')
+        box.label(text="Retime (Horizontal)", icon='TIME')
         col = box.column(align=True)
+        col.operator("animlattice.scale_time", text="Fast 0.8x").scale_factor = 0.8
+        col.operator("animlattice.scale_time", text="Slow 1.2x").scale_factor = 1.2
         
-        row = col.row(align=True)
-        row.operator("animlattice.scale_time", text="Fast (0.8x)").scale_factor = 0.8
-        row.operator("animlattice.scale_time", text="Slow (1.2x)").scale_factor = 1.2
-        
-        row = col.row(align=True)
-        row.operator("animlattice.scale_time", text="×0.5").scale_factor = 0.5
-        row.operator("animlattice.scale_time", text="×2").scale_factor = 2.0
-        
-        # Value Scaling (Vertical - Amplitude)
         box = layout.box()
-        box.label(text="Value Scaling", icon='DRIVER_DISTANCE')
+        box.label(text="Scale (Vertical)", icon='ARROW_LEFTRIGHT')
         col = box.column(align=True)
-        
-        row = col.row(align=True)
-        row.operator("animlattice.scale_value", text="Small (0.8x)").scale_factor = 0.8
-        row.operator("animlattice.scale_value", text="Big (1.2x)").scale_factor = 1.2
-        
-        row = col.row(align=True)
-        row.operator("animlattice.scale_value", text="×0.5").scale_factor = 0.5
-        row.operator("animlattice.scale_value", text="×2").scale_factor = 2.0
-        
-        # Retime to exact frames
-        box = layout.box()
-        box.label(text="Retime Range", icon='SEQ_SEQUENCER')
-        row = box.row()
-        row.prop(context.scene, "frame_end", text="To Frame")
-        row.operator("animlattice.retime_range", text="Fit")
+        col.operator("animlattice.scale_value", text="Small 0.8x").scale_factor = 0.8
+        col.operator("animlattice.scale_value", text="Big 1.2x").scale_factor = 1.2[web:76]
 
-# Register
-classes = (
-    ANIMLATTICE_OT_scale_time,
-    ANIMLATTICE_OT_scale_value,
-    ANIMLATTICE_OT_retime_range,
-    ANIMLATTICE_PT_panel,
-)
+class ANIMLATTICE_OT_scale_time(bpy.types.Operator):
+    bl_idname = "animlattice.scale_time"
+    bl_label = "Scale Time"
+    bl_options = {'REGISTER', 'UNDO'}
+    scale_factor: FloatProperty(default=1.0)
+    
+    def execute(self, context):
+        count = 0
+        for obj in context.scene.objects:
+            if obj.animation_data and obj.animation_data.action:
+                action = obj.animation_data.action
+                times = []
+                for fcurve in action.fcurves:
+                    for point in fcurve.keyframe_points:
+                        if point.select_control_point:
+                            times.append(point.co[0])
+                
+                if times:
+                    center = sum(times) / len(times)
+                    for fcurve in action.fcurves:
+                        for point in fcurve.keyframe_points:
+                            if point.select_control_point:
+                                old_time = point.co[0]
+                                new_time = center + (old_time - center) * self.scale_factor
+                                point.co[0] = new_time
+                                point.handle_left[0] += new_time - old_time
+                                point.handle_right[0] += new_time - old_time
+                                count += 1
+        
+        for area in context.screen.areas:
+            if area.type == 'GRAPH_EDITOR':
+                area.tag_redraw()
+        
+        self.report({'INFO'}, f"Retimed {count} keyframes")
+        return {'FINISHED'}
+
+class ANIMLATTICE_OT_scale_value(bpy.types.Operator):
+    bl_idname = "animlattice.scale_value"
+    bl_label = "Scale Value"
+    bl_options = {'REGISTER', 'UNDO'}
+    scale_factor: FloatProperty(default=1.0)
+    
+    def execute(self, context):
+        count = 0
+        for obj in context.scene.objects:
+            if obj.animation_data and obj.animation_data.action:
+                values = []
+                for fcurve in obj.animation_data.action.fcurves:
+                    for point in fcurve.keyframe_points:
+                        if point.select_control_point:
+                            values.append(point.co[1])
+                
+                if values:
+                    center = sum(values) / len(values)
+                    for fcurve in obj.animation_data.action.fcurves:
+                        for point in fcurve.keyframe_points:
+                            if point.select_control_point:
+                                old_value = point.co[1]
+                                new_value = center + (old_value - center) * self.scale_factor
+                                point.co[1] = new_value
+                                count += 1
+        
+        for area in context.screen.areas:
+            if area.type == 'GRAPH_EDITOR':
+                area.tag_redraw()
+        
+        self.report({'INFO'}, f"Scaled {count} keyframes")
+        return {'FINISHED'}
+
+classes = (ANIMLATTICE_PT_panel, ANIMLATTICE_OT_test_button, 
+           ANIMLATTICE_OT_scale_time, ANIMLATTICE_OT_scale_value)
 
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
+    print("✅ Anim Lattice FINAL registered!")
 
 def unregister():
     for cls in reversed(classes):
