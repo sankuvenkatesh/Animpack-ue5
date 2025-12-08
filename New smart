@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Smart Curve Tools",
     "author": "Venkatesh Sanku (merged by AI assistant)",
-    "version": (2, 1),
+    "version": (2, 0),
     "blender": (5, 0, 0),
     "location": "Graph Editor > Sidebar > Smart Curve Tools Tab",
     "description": (
@@ -269,7 +269,7 @@ def preserve_and_update_fcurve_points_any(curves, keyframe_infos):
 class ROTATION_OT_smart_euler_filter(bpy.types.Operator):
     """Smart Euler Filter - Works on selected rotation curves OR all rotation curves"""
     bl_idname = "graph.smart_euler_filter"
-    bl_label = "🔄 Smart Euler Filter"
+    bl_label = "Smart Euler Filter"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
@@ -313,7 +313,7 @@ class ROTATION_OT_smart_euler_filter(bpy.types.Operator):
         if context.area:
             context.area.tag_redraw()
 
-        self.report({'INFO'}, f"🔄 {mode_code} continuity applied to {len(rotation_fcurves)} channel(s)")
+        self.report({'INFO'}, f"{mode_code} continuity applied to {len(rotation_fcurves)} channel(s) ({'selected' if selected_fcurves else 'all'})")
         return {'FINISHED'}
 
 class CurveSmoothProperties(bpy.types.PropertyGroup):
@@ -341,7 +341,7 @@ class CurveSmoothProperties(bpy.types.PropertyGroup):
 class CurveSmoothOperator(bpy.types.Operator):
     """Smooth Selected Keyframes of Selected F-Curves (Advanced)"""
     bl_idname = "graph.smooth_selected_keyframes"
-    bl_label = "🎯 Smooth Selected Keyframes"
+    bl_label = "Smooth Selected Keyframes (Advanced)"
     bl_options = {'REGISTER', 'UNDO', 'PRESET'}
 
     def execute(self, context):
@@ -376,13 +376,13 @@ class CurveSmoothOperator(bpy.types.Operator):
             return {'CANCELLED'}
 
         self.report({'INFO'},
-                    f"🎯 Smoothed {total_keys} keyframes in {smoothed_count} F-Curve(s)")
+                    f"Smoothed {total_keys} keyframes in {smoothed_count} F-Curve(s). Largest change: {biggest_move:.2f}")
         return {'FINISHED'}
 
 class CurveSmoothAllOperator(bpy.types.Operator):
     """Batch Smooth All F-Curves (Advanced)"""
     bl_idname = "graph.smooth_all_keyframes"
-    bl_label = "🌐 Smooth ALL Curves"
+    bl_label = "Batch Smooth All F-Curves"
     bl_options = {'REGISTER', 'UNDO', 'PRESET'}
 
     def execute(self, context):
@@ -404,7 +404,7 @@ class CurveSmoothAllOperator(bpy.types.Operator):
                     settings.strength,
                     settings.sensitivity,
                     settings.preserve_ends,
-                    all_keyframes=True
+                    all_keyframes=True  # Always process all keyframes in batch mode
                 )
                 set_bezier_and_auto_clamp_handles(fcurve)
                 smoothed_count += 1
@@ -416,13 +416,13 @@ class CurveSmoothAllOperator(bpy.types.Operator):
             return {'CANCELLED'}
 
         self.report({'INFO'},
-                    f"🌐 Batch smoothed {total_keys} keyframes in {smoothed_count} F-Curve(s)")
+                    f"Batch smoothed {total_keys} keyframes in {smoothed_count} F-Curve(s). Largest change: {biggest_move:.2f}")
         return {'FINISHED'}
 
 class ResetCurveSmoothValuesOperator(bpy.types.Operator):
     """Reset Curve Smooth Values to Defaults"""
     bl_idname = "graph.reset_curve_smooth_values"
-    bl_label = "🔄 Reset Values"
+    bl_label = "Reset Curve Smooth Values"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
@@ -431,64 +431,39 @@ class ResetCurveSmoothValuesOperator(bpy.types.Operator):
         settings.strength = 0.5
         settings.sensitivity = 0.5
         settings.preserve_ends = True
-        self.report({'INFO'}, "🔄 Reset to defaults")
+        self.report({'INFO'}, "Reset smoothing parameters to default values")
         return {'FINISHED'}
 
-# ----- CREATIVE UI PANEL -----
-
 class SMARTCURVETOOLS_PT_panel(bpy.types.Panel):
-    bl_label = "🎬 Smart Curve Tools"
+    bl_label = "Smart Curve Tools"
     bl_space_type = 'GRAPH_EDITOR'
     bl_region_type = 'UI'
     bl_category = "Smart Curve Tools"
 
     def draw(self, context):
         layout = self.layout
-        fcurves = get_graph_fcurves(context)
-        
-        # Status Header
-        box = layout.box()
-        box.prop(context.scene, "dummy_status", text=f"📊 F-Curves: {len(fcurves)}")
-        
-        # Smart Euler Filter Section
-        box = layout.box()
-        split = box.split(factor=0.2)
-        split.label(text="🔄")
-        split.operator("graph.smart_euler_filter", text="Smart Euler Filter")
-        
-        # Smoothing Parameters Section
-        if hasattr(context.scene, 'curve_smooth_settings'):
-            settings = context.scene.curve_smooth_settings
-            
-            box = layout.box()
-            box.label(text="⚙️ Parameters", icon='DRIVER_DISTANCE')
-            col = box.column(align=True)
-            col.prop(settings, "iterations")
-            col.prop(settings, "strength")
-            col.prop(settings, "sensitivity")
-            col.prop(settings, "preserve_ends")
-            
-            # Smoothing Buttons Row
-            box = layout.box()
-            row = box.row(align=True)
-            row.scale_y = 1.3
-            row.operator("graph.smooth_selected_keyframes", text="🎯 Selected", icon='KEY_SELECTED')
-            row.operator("graph.smooth_all_keyframes", text="🌐 ALL Curves", icon='WORLD_DATA')
-            
-            layout.operator("graph.reset_curve_smooth_values", text="🔄 Reset", icon='LOOP_BACK')
-        else:
-            layout.label(text="Reload addon", icon='ERROR')
 
-# Dummy property for status display
-class SceneProperties(bpy.types.PropertyGroup):
-    dummy_status: bpy.props.BoolProperty(default=False)
+        layout.label(text="Smart Euler Filter:")
+        layout.operator("graph.smart_euler_filter", icon='CON_ROTLIKE')
+        layout.separator()
+
+        settings = context.scene.curve_smooth_settings
+        layout.label(text="Curve Smoothing Parameters:")
+        layout.prop(settings, "iterations")
+        layout.prop(settings, "strength")
+        layout.prop(settings, "sensitivity")
+        layout.prop(settings, "preserve_ends")
+
+        layout.operator("graph.smooth_selected_keyframes", text="Smooth Selected Keyframes")
+        layout.operator("graph.smooth_all_keyframes", text="Batch Smooth All F-Curves")
+        layout.separator()
+        layout.operator("graph.reset_curve_smooth_values", text="Reset Smooth Values")
 
 # ----- Register and Unregister -----
 
 classes = [
     ROTATION_OT_smart_euler_filter,
     CurveSmoothProperties,
-    SceneProperties,
     CurveSmoothOperator,
     CurveSmoothAllOperator,
     ResetCurveSmoothValuesOperator,
