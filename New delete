@@ -1,0 +1,382 @@
+bl_info = {
+    "name": "Delete/Bake Keyframe by Interval Extended (Fast)",
+    "author": "Venkatesh Sanku",
+    "version": (4, 7, 0),
+    "blender": (5, 0, 0),
+    "location": "View3D > Sidebar > Animation",
+    "description": "Delete/bake keyframes by interval using F-Curves and dense bake",
+    "category": "Animation",
+}
+
+import bpy
+
+# ------------------------------------------------------------------------
+# Properties
+# ------------------------------------------------------------------------
+
+class DeleteKeyframeProperties(bpy.types.PropertyGroup):
+    start_frame: bpy.props.IntProperty(
+        name="Start Frame", default=0, min=0,
+        update=lambda self, context: self.update_preview()
+    )
+    end_frame: bpy.props.IntProperty(
+        name="End Frame", default=100, min=0,
+        update=lambda self, context: self.update_preview()
+    )
+    interval: bpy.props.IntProperty(
+        name="Interval", default=1, min=1, max=100,
+        update=lambda self, context: self.update_preview()
+    )
+    invert: bpy.props.BoolProperty(
+        name="Invert",
+        default=False,
+        description="OFF: keep every nth frame. ON: keep all other frames instead",
+        update=lambda self, context: self.update_preview()
+    )
+    all_types: bpy.props.BoolProperty(
+        name="ALL Properties", default=True,
+        update=lambda self, context: self._update_all_types()
+    )
+    only_selected: bpy.props.BoolProperty(
+        name="Only Selected", default=False,
+        update=lambda self, context: self.update_preview()
+    )
+    pos: bpy.props.BoolProperty(name="Location", default=True)
+    rot: bpy.props.BoolProperty(name="Rotation", default=True)
+    scl: bpy.props.BoolProperty(name="Scale", default=True)
+    custom: bpy.props.BoolProperty(name="Custom Props", default=True)
+    preview_count: bpy.props.IntProperty(default=0, options={'HIDDEN'})
+
+    def update_preview(self):
+        frames = calculate_frames(self)
+        self.preview_count = len(frames)
+
+    def _update_all_types(self):
+        if self.all_types:
+            self.pos = self.rot = self.scl = self.custom = True
+
+
+# ------------------------------------------------------------------------
+# Core helpers
+# ------------------------------------------------------------------------
+
+def calculate_frames(props):
+    start, end, interval, invert = props.start_frame, props.end_frame, props.interval, props.invert
+
+    if end < start or interval < 1:
+        return []
+
+    all_frames = list(range(start, end + 1))
+    interval_frames = [all_frames[i] for i in range(len(all_frames)) if i % interval == 0]
+
+    if invert:
+        result = [f for f in all_frames if f not in interval_frames]
+    else:
+        result = interval_frames
+
+    return result
+
+
+def get_targets(context, only_selected):
+    if context.mode == 'POSE':
+        arm = context.object
+        if arm and arm.type == 'ARMATURE':
+            return list(context.selected_pose_bones) if only_selected else list(arm.pose.bones)
+        return []
+    return list(context.selected_objects) if only_selected else list(context.scene.objects)
+
+
+def build_frame_set(frames):
+    return set(int(f) for f in frames)
+
+
+def delete_fcurve_keys_by_frames(fcurve, frame_set):
+    kfs = fcurve.keyframe_points
+    if not kfs:
+        return 0
+
+    deleted = 0
+    i = len(kfs) - 1
+    while i >= 0:
+        frame = int(round(kfs[i].co.x))
+        if frame in frame_set:
+            kfs.remove(kfs[i], fast=True)  # avoid per-remove recalculation [web:6]
+            deleted += 1
+        i -= 1
+
+    if deleted:
+        kfs.handles_recalc()
+    return deleted
+
+
+def delete_object_by_interval(obj, frames, props):
+    ad = obj.animation_data
+    action = ad.action if ad else None
+    if not action:
+        return 0
+
+    frame_set = build_frame_set(frames)
+    deleted = 0
+
+    allowed_paths = set()
+    if props.pos or props.all_types:
+        allowed_paths.add("location")
+    if props.rot or props.all_types:
+        if obj.rotation_mode == 'QUATERNION':
+            allowed_paths.add("rotation_quaternion")
+        else:
+            allowed_paths.add("rotation_euler")
+    if props.scl or props.all_types:
+        allowed_paths.add("scale")
+
+    for fc in action.fcurves:
+        if fc.data_path in allowed_paths:
+            deleted += delete_fcurve_keys_by_frames(fc, frame_set)
+
+    return deleted
+
+
+def delete_pose_bone_by_interval(pbone, frames, props):
+    obj = pbone.id_data  # armature object
+    ad = obj.animation_data
+    action = ad.action if ad else None
+    if not action:
+        return 0
+
+    frame_set = build_frame_set(frames)
+    deleted = 0
+
+    bone_name = pbone.name
+    base = f'pose.bones["{bone_name}"].'
+
+    allowed_paths = set()
+    if props.pos or props.all_types:
+        allowed_paths.add(base + "location")
+    if props.rot or props.all_types:
+        if pbone.rotation_mode == 'QUATERNION':
+            allowed_paths.add(base + "rotation_quaternion")
+        else:
+            allowed_paths.add(base + "rotation_euler")
+    if props.scl or props.all_types:
+        allowed_paths.add(base + "scale")
+
+    for fc in action.fcurves:
+        if fc.data_path in allowed_paths:
+            deleted += delete_fcurve_keys_by_frames(fc, frame_set)
+
+    return deleted
+
+
+# ------------------------------------------------------------------------
+# Dense bake + thin using interval
+# ------------------------------------------------------------------------
+
+def dense_bake_object(obj, frame_start, frame_end, is_pose):
+    # Ensure only the relevant object is active/selected to keep things predictable [web:21][web:29]
+    view_layer = bpy.context.view_layer
+    for o in view_layer.objects:
+        o.select_set(False)
+    obj.select_set(True)
+    view_layer.objects.active = obj
+
+    bake_types = {'POSE'} if is_pose else {'OBJECT'}
+
+    bpy.ops.nla.bake(
+        frame_start=frame_start,
+        frame_end=frame_end,
+        only_selected=True,
+        visual_keying=True,
+        clear_constraints=False,
+        clear_parents=False,
+        use_current_action=True,
+        bake_types=bake_types
+    )
+
+
+def thin_baked_keys(targets, props, keep_frames):
+    """
+    Remove all keys NOT in keep_frames for selected properties.
+    This uses the same F-Curve-based deletion as above. [web:6][web:11]
+    """
+    all_frames = list(range(props.start_frame, props.end_frame + 1))
+    keep_set = build_frame_set(keep_frames)
+    delete_set = build_frame_set(f for f in all_frames if f not in keep_set)
+
+    total_deleted = 0
+    for target in targets:
+        if isinstance(target, bpy.types.PoseBone):
+            total_deleted += delete_pose_bone_by_interval(target, delete_set, props)
+        else:
+            total_deleted += delete_object_by_interval(target, delete_set, props)
+    return total_deleted
+
+
+# ------------------------------------------------------------------------
+# Operators
+# ------------------------------------------------------------------------
+
+class DeleteKeyframeOperator(bpy.types.Operator):
+    bl_idname = "object.delete_keyframe_by_interval"
+    bl_label = "Delete Keyframes"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        props = context.scene.del_keyframe_props
+        frames = calculate_frames(props)
+        targets = get_targets(context, props.only_selected)
+
+        if not frames:
+            self.report({'WARNING'}, "No frames to delete!")
+            return {'CANCELLED'}
+        if not targets:
+            self.report({'WARNING'}, f"No targets! ({'Select bones' if context.mode=='POSE' else 'Select objects'})")
+            return {'CANCELLED'}
+
+        total_deleted = 0
+        if context.mode == 'POSE':
+            for pbone in targets:
+                total_deleted += delete_pose_bone_by_interval(pbone, frames, props)
+        else:
+            for obj in targets:
+                total_deleted += delete_object_by_interval(obj, frames, props)
+
+        for area in context.screen.areas:
+            if area.type in {'VIEW_3D', 'GRAPH_EDITOR', 'DOPESHEET_EDITOR', 'TIMELINE'}:
+                area.tag_redraw()
+
+        self.report({'INFO'}, f"Deleted {total_deleted} keyframes from {len(targets)} targets")
+        return {'FINISHED'}
+
+
+class BakeKeyframeOperator(bpy.types.Operator):
+    bl_idname = "object.bake_keyframe_by_interval"
+    bl_label = "Bake Keyframes"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        props = context.scene.del_keyframe_props
+        frames_keep = calculate_frames(props)
+        targets = get_targets(context, props.only_selected)
+
+        if not frames_keep or not targets:
+            self.report({'WARNING'}, "No frames or targets to bake!")
+            return {'CANCELLED'}
+
+        scene = context.scene
+        original_frame = scene.frame_current
+
+        # 1) Dense bake each target over full range (C-side NLA bake). [web:21][web:29][web:45]
+        for t in targets:
+            is_pose = isinstance(t, bpy.types.PoseBone)
+            obj = t.id_data if is_pose else t
+            dense_bake_object(obj, props.start_frame, props.end_frame, is_pose=is_pose)
+
+        # 2) Thin baked keys to keep only frames_keep.
+        thinned_deleted = thin_baked_keys(targets, props, frames_keep)
+
+        scene.frame_set(original_frame)
+        context.view_layer.update()
+
+        self.report({'INFO'}, f"Baked and thinned keys (removed {thinned_deleted} extra keys)")
+        return {'FINISHED'}
+
+
+# ------------------------------------------------------------------------
+# UI
+# ------------------------------------------------------------------------
+
+class DeleteBakeKeyframePanel(bpy.types.Panel):
+    bl_label = "✨ Interval Keyframe Manager"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'Animation'
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        props = context.scene.del_keyframe_props
+        frames = calculate_frames(props)
+
+        banner = layout.row()
+        banner.alignment = 'CENTER'
+        banner.label(text="🔑 Keyframe Interval Manager", icon='ANIM')
+
+        layout.separator()
+
+        row = layout.row(align=True)
+        row.prop(props, "start_frame", text="From")
+        row.prop(props, "end_frame", text="To")
+        row.prop(props, "interval", text="Every")
+
+        invert_row = layout.row(align=True)
+        invert_btn = invert_row.operator(
+            "wm.context_toggle",
+            text="Invert Selection" if not props.invert else "Restore Interval",
+            depress=props.invert
+        )
+        invert_btn.data_path = "scene.del_keyframe_props.invert"
+
+        split = layout.split(factor=0.38)
+        col_targets = split.column()
+        col_props = split.column()
+
+        col_targets.label(text="🎯 Targets")
+        col_targets.prop(props, "only_selected", toggle=True, icon='RESTRICT_SELECT_OFF')
+
+        col_props.label(text="⚙️ Properties")
+        col_props.prop(props, "all_types", toggle=True, icon='CHECKBOX_HLT' if props.all_types else 'CHECKBOX_DEHLT')
+
+        if not props.all_types:
+            box = col_props.box()
+            box.prop(props, "pos", toggle=True, icon='ORIENTATION_GLOBAL')
+            box.prop(props, "rot", toggle=True, icon='DRIVER_ROTATIONAL_DIFFERENCE')
+            box.prop(props, "scl", toggle=True, icon='FULLSCREEN_ENTER')
+            box.prop(props, "custom", toggle=True, icon='PROPERTIES')
+
+        layout.separator()
+
+        preview_box = layout.box()
+        preview_row = preview_box.row(align=True)
+        preview_row.label(text=f"Frames affected: {len(frames)}", icon='TIME')
+
+        frames_text = frames[:10]
+        if len(frames) > 10:
+            frames_text.append('...')
+        preview_box.label(text=f"[{', '.join(map(str, frames_text))}]")
+
+        layout.separator(factor=1.5)
+
+        layout.operator("object.delete_keyframe_by_interval", icon='TRASH')
+        del_lbl = layout.row()
+        del_lbl.alignment = 'CENTER'
+        del_lbl.label(text="🗑️ Delete Keys", icon='CANCEL')
+
+        layout.operator("object.bake_keyframe_by_interval", icon='KEY_HLT')
+        bake_lbl = layout.row()
+        bake_lbl.alignment = 'CENTER'
+        bake_lbl.label(text="🔥 Bake Keys", icon='SORTTIME')
+
+
+# ------------------------------------------------------------------------
+# Registration
+# ------------------------------------------------------------------------
+
+classes = (
+    DeleteKeyframeProperties,
+    DeleteKeyframeOperator,
+    BakeKeyframeOperator,
+    DeleteBakeKeyframePanel,
+)
+
+def register():
+    for cls in classes:
+        bpy.utils.register_class(cls)
+    bpy.types.Scene.del_keyframe_props = bpy.props.PointerProperty(type=DeleteKeyframeProperties)
+
+def unregister():
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)
+    del bpy.types.Scene.del_keyframe_props
+
+if __name__ == "__main__":
+    register()
