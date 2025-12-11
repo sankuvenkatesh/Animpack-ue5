@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Keyframe Tools Interval",
     "author": "Venkatesh Sanku",
-    "version": (2, 5, 9),
+    "version": (2, 6, 0),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Item",
     "description": "Delete or bake keyframes by interval - works with Auto-Rig Pro, Rigify, custom rigs",
@@ -60,12 +60,11 @@ class DelKeyProperties(PropertyGroup):
 
 
 def get_all_pose_bones(context, obj, selected_only):
-    """Get all pose bones for any rig type (Auto-Rig Pro, Rigify, custom)"""
+    """Get all pose bones for any rig type"""
     pose_bones = []
-    
     if obj.type == 'ARMATURE' and obj.pose and obj.pose.bones:
         if selected_only and context.selected_pose_bones:
-            pose_bones = list(context.selected_pose_bones)
+            pose_bones = [pb for pb in context.selected_pose_bones if pb.id_data == obj]
         else:
             pose_bones = list(obj.pose.bones)
     return pose_bones
@@ -128,17 +127,10 @@ class DeleteKeyframeOperator(Operator):
             self.report({'WARNING'}, "Start frame must be less than end frame")
             return {'CANCELLED'}
 
-        start = props.start_frame
-        end = props.end_frame
-
-        # Build exact paths based on checkbox selection
         paths = []
-        if props.pos:
-            paths.append("location")
-        if props.rot:
-            paths.extend(["rotation_euler", "rotation_quaternion"])
-        if props.scl:
-            paths.append("scale")
+        if props.pos: paths.append("location")
+        if props.rot: paths.extend(["rotation_euler", "rotation_quaternion"])
+        if props.scl: paths.append("scale")
 
         if not paths:
             self.report({'WARNING'}, "No channels selected")
@@ -152,8 +144,8 @@ class DeleteKeyframeOperator(Operator):
         else:
             objects = [o for o in context.scene.objects if o.animation_data or (o.type == 'ARMATURE' and o.pose)]
 
-        all_frames = range(start, end)
-        key_frames = set(range(start, end, props.interval + 1)) if props.interval > 0 else set()
+        all_frames = range(props.start_frame, props.end_frame)
+        key_frames = set(range(props.start_frame, props.end_frame, props.interval + 1)) if props.interval > 0 else set()
 
         deleted_frames = set()
         affected_objects = set()
@@ -178,50 +170,38 @@ class DeleteKeyframeOperator(Operator):
         bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
 
         if deleted_frames:
-            frames_sorted = sorted(deleted_frames)
-            self.report(
-                {'INFO'},
-                f"Deleted {len(affected_keyframes)} keyframes on {len(affected_objects)} object(s)"
-            )
+            self.report({'INFO'}, f"Deleted {len(affected_keyframes)} keyframes on {len(affected_objects)} objects")
             print("
 === KEYFRAME DELETION REPORT ===")
-            print(f"Deleted frames: {frames_sorted}")
+            print(f"Frames: {sorted(deleted_frames)}")
             print(f"Channels: Pos={props.pos}, Rot={props.rot}, Scale={props.scl}")
-            print(f"Affected objects: {sorted(affected_objects)}")
-            if affected_bones:
-                print(f"Affected bones: {sorted(list(affected_bones))[:20]}{'...' if len(affected_bones) > 20 else ''}")
+            print(f"Objects: {sorted(affected_objects)}")
         else:
             self.report({'INFO'}, "No keyframes deleted")
 
         return {'FINISHED'}
 
     def _frame_should_be_processed(self, frame, interval, key_frames, inverse):
-        if interval == 0:
-            return not inverse
-        if inverse:
-            return frame in key_frames
-        return frame not in key_frames
+        if interval == 0: return not inverse
+        return frame in key_frames if inverse else frame not in key_frames
 
-    def _delete_on_object(self, obj, frame, paths, context, selected_only_flag):
+    def _delete_on_object(self, obj, frame, paths, context, selected_only):
         touched = False
         touched_bones = set()
         frame_keyframes = set()
 
-        # Delete object-level fcurves (for objects with animation_data)
-        if obj.animation_data and obj.animation_data.action:
+        # Object transforms
+        if obj.animation_data:
             for path in paths:
                 try:
-                    result = obj.keyframe_delete(data_path=path, frame=frame)
-                    if result:
+                    if obj.keyframe_delete(data_path=path, frame=frame):
                         touched = True
                         frame_keyframes.add(frame)
-                except Exception:
-                    pass
+                except: pass
 
-        # Handle ALL pose bones (works with Auto-Rig Pro, Rigify, custom rigs)
+        # Pose bones
         if obj.type == 'ARMATURE' and obj.pose:
-            pose_bones = get_all_pose_bones(context, obj, selected_only_flag)
-            
+            pose_bones = get_all_pose_bones(context, obj, selected_only)
             for pbone in pose_bones:
                 bone_keyframes = self._delete_on_bone(pbone, frame, paths)
                 if bone_keyframes:
@@ -235,11 +215,9 @@ class DeleteKeyframeOperator(Operator):
         touched_keyframes = set()
         for path in paths:
             try:
-                result = pbone.keyframe_delete(data_path=path, frame=frame)
-                if result:
+                if pbone.keyframe_delete(data_path=path, frame=frame):
                     touched_keyframes.add(frame)
-            except Exception:
-                pass
+            except: pass
         return touched_keyframes
 
 
@@ -255,124 +233,110 @@ class BakeKeyframeOperator(Operator):
 
     def execute(self, context):
         props = context.scene.del_keyframe_props
+        scene = context.scene
+        original_frame = scene.frame_current
 
         if props.start_frame >= props.end_frame:
             self.report({'WARNING'}, "Start frame must be less than end frame")
             return {'CANCELLED'}
 
-        scene = context.scene
-        original_frame = scene.frame_current
-
+        # Get objects
         if props.selected_only:
-            objects = [obj for obj in context.selected_objects if obj.animation_data or (obj.type == 'ARMATURE' and obj.pose)]
+            objects = [obj for obj in context.selected_objects if obj.animation_data or (obj.type == 'ARMATURE' and getattr(obj, 'pose', None))]
             if not objects:
                 self.report({'WARNING'}, "No animated objects selected")
                 return {'CANCELLED'}
         else:
-            objects = [o for o in scene.objects if o.animation_data or (o.type == 'ARMATURE' and o.pose)]
+            objects = [o for o in context.scene.objects if o.animation_data or (o.type == 'ARMATURE' and getattr(o, 'pose', None))]
 
+        # Calculate bake frames
         all_frames = range(props.start_frame, props.end_frame)
         key_frames = set(range(props.start_frame, props.end_frame, props.interval + 1)) if props.interval > 0 else set()
-
-        bake_frames = [
-            f for f in all_frames
-            if self._frame_should_be_baked(f, props.interval, key_frames, props.inverse_interval)
-        ]
+        bake_frames = [f for f in all_frames if self._frame_should_be_baked(f, props.interval, key_frames, props.inverse_interval)]
+        
         if not bake_frames:
             self.report({'INFO'}, "No frames to bake")
             return {'CANCELLED'}
 
         baked_objects = set()
-        affected_keyframes = set()
+        baked_count = 0
+
+        # Build paths
+        paths = []
+        if props.pos: paths.append("location")
+        if props.rot: paths.extend(["rotation_euler", "rotation_quaternion"])
+        if props.scl: paths.append("scale")
 
         for obj in objects:
-            # Store original selection
-            prev_selection = [o for o in context.selected_objects]
+            prev_selected = context.selected_objects[:]
             prev_active = context.view_layer.objects.active
 
             try:
-                # Select only this object
+                # Select and activate object
                 bpy.ops.object.select_all(action='DESELECT')
                 obj.select_set(True)
                 context.view_layer.objects.active = obj
 
-                # Ensure proper mode for baking
-                if obj.type == 'ARMATURE':
-                    if obj.mode != 'POSE':
-                        bpy.ops.object.mode_set(mode='POSE')
-                else:
-                    if context.object.mode != 'OBJECT':
-                        bpy.ops.object.mode_set(mode='OBJECT')
+                # Set correct mode
+                if obj.type == 'ARMATURE' and obj.mode != 'POSE':
+                    bpy.ops.object.mode_set(mode='POSE')
+                elif obj.mode != 'OBJECT':
+                    bpy.ops.object.mode_set(mode='OBJECT')
 
-                # Bake specific channels only - works for all rig types
+                # Bake keyframes frame by frame
                 for frame in bake_frames:
                     scene.frame_set(frame)
+                    context.view_layer.update()
                     
                     if obj.type == 'ARMATURE':
-                        # For armatures - bake pose bones (Auto-Rig Pro, Rigify, custom)
+                        # Bake all pose bones
                         pose_bones = get_all_pose_bones(context, obj, props.selected_only)
                         for pbone in pose_bones:
-                            self._bake_bone_keyframes(pbone, paths=paths)
+                            for path in paths:
+                                try:
+                                    pbone.keyframe_insert(data_path=path)
+                                    baked_count += 1
+                                except:
+                                    pass
                     else:
-                        # For objects - bake object transforms
-                        self._bake_object_keyframes(obj, paths=paths)
-                    
-                    affected_keyframes.add(frame)
+                        # Bake object transforms
+                        for path in paths:
+                            try:
+                                obj.keyframe_insert(data_path=path)
+                                baked_count += 1
+                            except:
+                                pass
 
                 baked_objects.add(obj.name)
 
             except Exception as e:
-                print(f"Bake failed on {obj.name}: {e}")
-                continue
+                print(f"Bake error {obj.name}: {e}")
             finally:
-                # Restore selection safely
+                # Restore selection
                 bpy.ops.object.select_all(action='DESELECT')
-                for o in prev_selection:
-                    if o.name in [obj.name for obj in context.scene.objects]:
+                for o in prev_selected:
+                    if o in context.scene.objects:
                         o.select_set(True)
-                if prev_active and prev_active.name in [obj.name for obj in context.scene.objects]:
+                if prev_active and prev_active in context.scene.objects:
                     context.view_layer.objects.active = prev_active
 
-        # Restore original frame
         scene.frame_set(original_frame)
 
         if baked_objects:
-            self.report(
-                {'INFO'},
-                f"Baked {len(affected_keyframes)} keyframes on {len(baked_objects)} objects"
-            )
-            print("
-=== KEYFRAME BAKE REPORT ===")
-            print(f"Baked frames: {sorted(bake_frames)}")
-            print(f"Channels: Pos={props.pos}, Rot={props.rot}, Scale={props.scl}")
-            print(f"Baked objects: {sorted(baked_objects)}")
+            self.report({'INFO'}, f"Baked {baked_count} keyframes on {len(baked_objects)} objects")
+            print(f"
+=== BAKE SUCCESS ===")
+            print(f"Frames: {bake_frames[:10]}{'...' if len(bake_frames)>10 else ''}")
+            print(f"Objects: {list(baked_objects)}")
+            print(f"Total keyframes: {baked_count}")
         else:
             self.report({'INFO'}, "No objects baked")
 
         return {'FINISHED'}
 
-    def _bake_object_keyframes(self, obj, paths):
-        """Bake specific channels for objects"""
-        for path in paths:
-            try:
-                obj.keyframe_insert(data_path=path)
-            except:
-                pass
-
-    def _bake_bone_keyframes(self, pbone, paths):
-        """Bake specific channels for pose bones"""
-        for path in paths:
-            try:
-                pbone.keyframe_insert(data_path=path)
-            except:
-                pass
-
     def _frame_should_be_baked(self, frame, interval, key_frames, inverse):
-        if interval == 0:
-            return not inverse
-        if inverse:
-            return frame in key_frames
-        return frame not in key_frames
+        if interval == 0: return not inverse
+        return frame in key_frames if inverse else frame not in key_frames
 
 
 class KeyframeIntervalPanel(Panel):
@@ -381,26 +345,22 @@ class KeyframeIntervalPanel(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = 'Item'
-    bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
         layout = self.layout
         props = context.scene.del_keyframe_props
 
-        # Frame Range
         layout.label(text="Frame Range")
         row = layout.row(align=True)
         row.prop(props, "start_frame", text="")
         row.prop(props, "end_frame", text="")
         row.operator("object.update_keyframe_preview", text="", icon="VIEWZOOM")
 
-        # Interval
         layout.label(text="Interval (0 = all)")
         row = layout.row()
         row.prop(props, "interval")
         row.prop(props, "inverse_interval")
 
-        # Channels with All checkbox
         layout.label(text="Channels")
         row = layout.row()
         row.prop(props, "all_channels", toggle=True)
@@ -413,14 +373,12 @@ class KeyframeIntervalPanel(Panel):
 
         layout.prop(props, "selected_only")
 
-        # Live Preview
         layout.separator()
         preview_box = layout.box()
         preview_box.label(text="Live Preview:", icon="PREVIEW_RANGE")
         preview_box.label(text=f"Keyframes: {props.preview_keyframes}")
         preview_box.label(text=f"Total: {props.preview_count}")
 
-        # Operators
         layout.separator()
         col = layout.column(align=True)
         col.operator("object.delete_keyframe_by_interval", icon="KEY_HLT")
@@ -435,21 +393,15 @@ classes = (
     KeyframeIntervalPanel,
 )
 
-
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.Scene.del_keyframe_props = bpy.props.PointerProperty(type=DelKeyProperties)
-
 
 def unregister():
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
     del bpy.types.Scene.del_keyframe_props
 
-
 if __name__ == "__main__":
     register()
-    # Initial preview
-    if bpy.context.scene:
-        update_live_preview(bpy.context.scene, bpy.context.scene.del_keyframe_props)
