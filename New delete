@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Delete/Bake Keyframe by Interval Extended",
     "author": "Venkatesh Sanku",
-    "version": (5, 0, 0),
+    "version": (5, 0, 1),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Animation",
     "description": "Delete/bake keyframes by interval (fast F-Curve method, no custom props)",
@@ -9,7 +9,6 @@ bl_info = {
 }
 
 import bpy
-import re
 
 
 # ------------------------------------------------------------------------
@@ -73,18 +72,12 @@ def calculate_frames(props):
     return result
 
 
-def frames_set(props):
-    """Use set for faster membership tests."""
-    return set(calculate_frames(props))
-
-
 def bone_fcurves_for_target(arm_obj, pbone, props):
     """Get fcurves affecting this pose bone (location/rot/scale)."""
-    ad = arm_obj.animation_data
-    action = ad.action if ad else None
-    if not action:
+    if arm_obj is None or arm_obj.animation_data is None or arm_obj.animation_data.action is None:
         return []
 
+    action = arm_obj.animation_data.action
     name = pbone.name
     prefix = f'pose.bones["{name}"]'
     fcurves = []
@@ -94,17 +87,17 @@ def bone_fcurves_for_target(arm_obj, pbone, props):
     want_scl = props.all_types or props.scl
 
     for fc in action.fcurves:
-        if not fc.data_path.startswith(prefix):
+        dp = fc.data_path
+        if not dp.startswith(prefix + "."):
             continue
 
-        # fc.data_path: pose.bones["Bone"].location / rotation_euler / rotation_quaternion / scale
-        path_tail = fc.data_path[len(prefix) + 1:]  # skip the dot
+        tail = dp[len(prefix) + 1:]  # after 'pose.bones["Name"].'
 
-        if want_loc and path_tail == "location":
+        if want_loc and tail == "location":
             fcurves.append(fc)
-        elif want_rot and path_tail in {"rotation_euler", "rotation_quaternion"}:
+        elif want_rot and tail in {"rotation_euler", "rotation_quaternion"}:
             fcurves.append(fc)
-        elif want_scl and path_tail == "scale":
+        elif want_scl and tail == "scale":
             fcurves.append(fc)
 
     return fcurves
@@ -112,11 +105,10 @@ def bone_fcurves_for_target(arm_obj, pbone, props):
 
 def object_fcurves_for_target(obj, props):
     """Get fcurves affecting this object (location/rot/scale)."""
-    ad = obj.animation_data
-    action = ad.action if ad else None
-    if not action:
+    if obj.animation_data is None or obj.animation_data.action is None:
         return []
 
+    action = obj.animation_data.action
     fcurves = []
 
     want_loc = props.all_types or props.pos
@@ -124,13 +116,13 @@ def object_fcurves_for_target(obj, props):
     want_scl = props.all_types or props.scl
 
     for fc in action.fcurves:
-        path = fc.data_path
+        dp = fc.data_path
 
-        if want_loc and path == "location":
+        if want_loc and dp == "location":
             fcurves.append(fc)
-        elif want_rot and path in {"rotation_euler", "rotation_quaternion"}:
+        elif want_rot and dp in {"rotation_euler", "rotation_quaternion"}:
             fcurves.append(fc)
-        elif want_scl and path == "scale":
+        elif want_scl and dp == "scale":
             fcurves.append(fc)
 
     return fcurves
@@ -143,11 +135,16 @@ def delete_keyframes_fc_posebone(arm_obj, pbone, frames_s, props):
         return 0
 
     for fc in fcurves:
-        to_remove = [i for i, k in enumerate(fc.keyframe_points)
-                     if int(round(k.co[0])) in frames_s]
+        kps = fc.keyframe_points
+        to_remove = [i for i, k in enumerate(kps) if int(round(k.co[0])) in frames_s]
         for i in reversed(to_remove):
-            fc.keyframe_points.remove(fc.keyframe_points[i], fast=True)
-            deleted += 1
+            try:
+                kps.remove(kps[i], fast=True)
+                deleted += 1
+            except AttributeError:
+                # older Blender versions may not support fast kwarg
+                kps.remove(kps[i])
+                deleted += 1
     return deleted
 
 
@@ -158,11 +155,15 @@ def delete_keyframes_fc_object(obj, frames_s, props):
         return 0
 
     for fc in fcurves:
-        to_remove = [i for i, k in enumerate(fc.keyframe_points)
-                     if int(round(k.co[0])) in frames_s]
+        kps = fc.keyframe_points
+        to_remove = [i for i, k in enumerate(kps) if int(round(k.co[0])) in frames_s]
         for i in reversed(to_remove):
-            fc.keyframe_points.remove(fc.keyframe_points[i], fast=True)
-            deleted += 1
+            try:
+                kps.remove(kps[i], fast=True)
+                deleted += 1
+            except AttributeError:
+                kps.remove(kps[i])
+                deleted += 1
     return deleted
 
 
@@ -180,7 +181,11 @@ def bake_keyframes_fc_posebone(arm_obj, pbone, frames_l, props, context):
         context.view_layer.update()
         for fc in fcurves:
             val = fc.evaluate(f)
-            fc.keyframe_points.insert(f, val, options={'FAST'})
+            try:
+                fc.keyframe_points.insert(f, val, options={'FAST'})
+            except TypeError:
+                # some versions expect options as a set or no options
+                fc.keyframe_points.insert(f, val)
             baked += 1
 
     scene.frame_set(orig)
@@ -202,7 +207,10 @@ def bake_keyframes_fc_object(obj, frames_l, props, context):
         context.view_layer.update()
         for fc in fcurves:
             val = fc.evaluate(f)
-            fc.keyframe_points.insert(f, val, options={'FAST'})
+            try:
+                fc.keyframe_points.insert(f, val, options={'FAST'})
+            except TypeError:
+                fc.keyframe_points.insert(f, val)
             baked += 1
 
     scene.frame_set(orig)
@@ -211,11 +219,20 @@ def bake_keyframes_fc_object(obj, frames_l, props, context):
 
 
 def get_targets(context, only_selected):
+    # protect against weird contexts (like register/unregister)
+    if not hasattr(context, "mode"):
+        return []
+
     if context.mode == 'POSE':
         arm = context.object
         if arm and arm.type == 'ARMATURE':
             return list(context.selected_pose_bones) if only_selected else list(arm.pose.bones)
-    return list(context.selected_objects) if only_selected else list(context.scene.objects)
+        return []
+    else:
+        if only_selected:
+            return list(getattr(context, "selected_objects", []))
+        else:
+            return list(context.scene.objects)
 
 
 # ------------------------------------------------------------------------
