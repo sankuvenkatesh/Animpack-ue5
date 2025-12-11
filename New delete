@@ -1,10 +1,10 @@
 bl_info = {
-    "name": "Keyframe Interval Tools",
+    "name": "Keyframe Tools Interval",
     "author": "Venkatesh Sanku",
-    "version": (2, 7, 0),
+    "version": (2, 5, 1),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Item",
-    "description": "Delete or bake keyframes by interval for objects and bones with reporting",
+    "description": "Delete or bake keyframes by interval for objects and bones with detailed frame reporting",
     "category": "Animation",
 }
 
@@ -13,31 +13,26 @@ import bpy
 
 class DelKeyProperties(bpy.types.PropertyGroup):
     start_frame: bpy.props.IntProperty(
-        name="Start", default=1, min=1
+        name="Start Frame", default=1, min=1
     )
     end_frame: bpy.props.IntProperty(
-        name="End", default=250, min=1
+        name="End Frame", default=250, min=1
     )
     interval: bpy.props.IntProperty(
         name="Interval", default=0, min=0, max=100
     )
-    all_channels: bpy.props.BoolProperty(
-        name="All",
-        description="Enable Position, Rotation and Scale",
-        default=True,
-    )
     pos: bpy.props.BoolProperty(
-        name="Pos", default=True
+        name="Position", default=True
     )
     rot: bpy.props.BoolProperty(
-        name="Rot", default=True
+        name="Rotation", default=True
     )
     scl: bpy.props.BoolProperty(
-        name="Scl", default=True
+        name="Scale", default=True
     )
     inverse_interval: bpy.props.BoolProperty(
-        name="Inv",
-        description="Invert interval behavior (act only on kept frames)",
+        name="Inverse Interval",
+        description="Invert interval behavior (delete/bake only kept frames)",
         default=False
     )
     selected_only: bpy.props.BoolProperty(
@@ -45,13 +40,6 @@ class DelKeyProperties(bpy.types.PropertyGroup):
         description="Affect only selected objects / selected pose bones",
         default=True
     )
-
-
-def sync_all_channels(props: DelKeyProperties):
-    if props.all_channels:
-        props.pos = True
-        props.rot = True
-        props.scl = True
 
 
 class DeleteKeyframeOperator(bpy.types.Operator):
@@ -66,7 +54,6 @@ class DeleteKeyframeOperator(bpy.types.Operator):
 
     def execute(self, context):
         props = context.scene.del_keyframe_props
-        sync_all_channels(props)
 
         if props.start_frame >= props.end_frame:
             self.report({'WARNING'}, "Start frame must be less than end frame")
@@ -101,12 +88,14 @@ class DeleteKeyframeOperator(bpy.types.Operator):
         deleted_frames = set()
         affected_objects = set()
         affected_bones = set()
+        frame_details = {}  # Track which objects/bones affected each frame
 
         for frame in all_frames:
             if not self._frame_should_be_processed(frame, props.interval, key_frames, props.inverse_interval):
                 continue
 
             touched_any = False
+            frame_affected = set()  # Objects and bones affected on this frame
 
             for obj in objects:
                 touched_obj, bones = self._delete_on_object(
@@ -115,28 +104,43 @@ class DeleteKeyframeOperator(bpy.types.Operator):
                 if touched_obj:
                     touched_any = True
                     affected_objects.add(obj.name)
+                    frame_affected.add(obj.name)
                     for b in bones:
                         affected_bones.add(f"{obj.name}:{b}")
+                        frame_affected.add(f"{obj.name}:{b}")
 
             if touched_any:
                 deleted_frames.add(frame)
+                frame_details[frame] = sorted(frame_affected)
 
         bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
 
         if deleted_frames:
             frames_sorted = sorted(deleted_frames)
-            frames_str = ", ".join(str(f) for f in frames_sorted[:200])
-            if len(frames_sorted) > 200:
-                frames_str += ", ..."
-            self.report(
-                {'INFO'},
-                f"Deleted on {len(affected_objects)} object(s), "
-                f"{len(affected_bones)} bone(s), {len(frames_sorted)} frame(s)"
-            )
-            print("Deleted frames:", frames_str)
-            print("Affected objects:", sorted(affected_objects))
+            
+            # Build detailed report
+            report_msg = f"Deleted keyframes on {len(affected_objects)} object(s), {len(affected_bones)} bone(s)"
+            if len(frames_sorted) <= 10:
+                report_msg += f", frames: {', '.join(map(str, frames_sorted))}"
+            else:
+                report_msg += f", frames: {frames_sorted[0]}-{frames_sorted[-1]} ({len(frames_sorted)} total)"
+            
+            self.report({'INFO'}, report_msg)
+            
+            # Detailed console output
+            print("
+=== KEYFRAME DELETION REPORT ===")
+            print(f"Deleted frames: {frames_sorted}")
+            print(f"Affected objects: {sorted(affected_objects)}")
             if affected_bones:
-                print("Affected bones:", sorted(affected_bones))
+                print(f"Affected bones: {sorted(affected_bones)}")
+            
+            print("
+Frame-by-frame details:")
+            for frame in frames_sorted:
+                affected = frame_details[frame]
+                print(f"  Frame {frame}: {', '.join(affected)}")
+            
         else:
             self.report({'INFO'}, "No keyframes deleted in range")
 
@@ -199,7 +203,6 @@ class BakeKeyframeOperator(bpy.types.Operator):
 
     def execute(self, context):
         props = context.scene.del_keyframe_props
-        sync_all_channels(props)
 
         if props.start_frame >= props.end_frame:
             self.report({'WARNING'}, "Start frame must be less than end frame")
@@ -230,8 +233,9 @@ class BakeKeyframeOperator(bpy.types.Operator):
             self.report({'INFO'}, "No frames to bake from interval settings")
             return {'CANCELLED'}
 
-        baked_objects = []
+        baked_objects = set()
         baked_bones = set()
+        frame_details = {}  # Track which objects/bones baked on each frame
 
         for obj in objects:
             prev_selection = [o for o in context.selected_objects]
@@ -242,20 +246,38 @@ class BakeKeyframeOperator(bpy.types.Operator):
             obj.select_set(True)
             context.view_layer.objects.active = obj
 
+            bake_types = set()
+            if obj.type == 'ARMATURE':
+                bake_types.add('POSE')
+            else:
+                bake_types.add('OBJECT')
+
+            obj_baked = False
+            obj_bones_baked = set()
+
             try:
                 for frame in bake_frames:
                     scene.frame_set(frame)
-                    bpy.ops.anim.keyframe_insert_menu(type='LocRotScale')
+                    bpy.ops.anim.keyframe_insert_menu(
+                        type='LocRotScale' if (props.pos or props.rot or props.scl) else 'BUILTIN_KSI_VisualLocRotScale'
+                    )
+                    frame_details.setdefault(frame, set()).add(obj.name)
 
-                baked_objects.append(obj.name)
+                obj_baked = True
+                baked_objects.add(obj.name)
 
                 if obj.type == 'ARMATURE' and obj.pose:
                     if obj.mode == 'POSE' and props.selected_only and context.selected_pose_bones:
                         for p in context.selected_pose_bones:
-                            baked_bones.add(f"{obj.name}:{p.name}")
+                            obj_bones_baked.add(f"{obj.name}:{p.name}")
+                            for frame in bake_frames:
+                                frame_details.setdefault(frame, set()).add(f"{obj.name}:{p.name}")
                     else:
                         for p in obj.pose.bones:
-                            baked_bones.add(f"{obj.name}:{p.name}")
+                            obj_bones_baked.add(f"{obj.name}:{p.name}")
+                            for frame in bake_frames:
+                                frame_details.setdefault(frame, set()).add(f"{obj.name}:{p.name}")
+                    baked_bones.update(obj_bones_baked)
 
             except Exception as e:
                 print(f"Bake failed on {obj.name}: {e}")
@@ -269,17 +291,30 @@ class BakeKeyframeOperator(bpy.types.Operator):
         scene.frame_current = original_frame
 
         if baked_objects:
-            frames_str = ", ".join(str(f) for f in bake_frames[:200])
-            if len(bake_frames) > 200:
-                frames_str += ", ..."
-            self.report(
-                {'INFO'},
-                f"Baked {len(baked_objects)} object(s) on {len(bake_frames)} frame(s)"
-            )
-            print("Baked objects:", baked_objects)
+            frames_sorted = sorted(bake_frames)
+            
+            # Build detailed report
+            report_msg = f"Baked {len(baked_objects)} object(s) on {len(bake_frames)} frame(s)"
+            if len(frames_sorted) <= 10:
+                report_msg += f": {', '.join(map(str, frames_sorted))}"
+            else:
+                report_msg += f": {frames_sorted[0]}-{frames_sorted[-1]} ({len(frames_sorted)} total)"
+            
+            self.report({'INFO'}, report_msg)
+            
+            # Detailed console output
+            print("
+=== KEYFRAME BAKE REPORT ===")
+            print(f"Baked frames: {frames_sorted}")
+            print(f"Baked objects: {sorted(baked_objects)}")
             if baked_bones:
-                print("Baked bones:", sorted(baked_bones))
-            print("Baked frames:", frames_str)
+                print(f"Baked bones: {sorted(baked_bones)}")
+            
+            print("
+Frame-by-frame details:")
+            for frame in frames_sorted:
+                affected = sorted(frame_details.get(frame, set()))
+                print(f"  Frame {frame}: {', '.join(affected)}")
         else:
             self.report({'INFO'}, "No objects baked")
 
@@ -305,32 +340,28 @@ class KeyframeIntervalPanel(bpy.types.Panel):
         layout = self.layout
         props = context.scene.del_keyframe_props
 
-        box = layout.box()
-        row = box.row()
-        row.label(text="Frame Range", icon="PREVIEW_RANGE")
-        row = box.row(align=True)
+        layout.label(text="Frame Range")
+        row = layout.row(align=True)
         row.prop(props, "start_frame")
         row.prop(props, "end_frame")
 
-        row = box.row(align=True)
-        row.label(text="Interval", icon="IPO_CONSTANT")
+        layout.label(text="Interval (0 = all)")
+        row = layout.row()
         row.prop(props, "interval")
-        row.prop(props, "inverse_interval", toggle=True)
+        row.prop(props, "inverse_interval")
 
+        layout.label(text="Channels")
         row = layout.row(align=True)
-        row.label(text="Channels", icon="CHANNELS")
-        row.prop(props, "all_channels", toggle=True)
-        row = layout.row(align=True)
-        row.prop(props, "pos", toggle=True)
-        row.prop(props, "rot", toggle=True)
-        row.prop(props, "scl", toggle=True)
+        row.prop(props, "pos")
+        row.prop(props, "rot")
+        row.prop(props, "scl")
 
-        layout.prop(props, "selected_only", icon="RESTRICT_SELECT_OFF")
+        layout.prop(props, "selected_only")
 
         layout.separator()
-        row_ops = layout.row(align=True)
-        row_ops.operator("object.delete_keyframe_by_interval", icon="KEY_HLT")
-        row_ops.operator("object.bake_keyframe_by_interval", icon="REC")
+        col = layout.column(align=True)
+        col.operator("object.delete_keyframe_by_interval", icon="KEY_HLT")
+        col.operator("object.bake_keyframe_by_interval", icon="REC")
 
 
 classes = (
