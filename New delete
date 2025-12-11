@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Keyframe Tools Interval",
     "author": "Venkatesh Sanku",
-    "version": (2, 2, 0),
+    "version": (2, 3, 0),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Item",
-    "description": "Delete or bake keyframes by interval with reporting",
+    "description": "Delete or bake keyframes by interval for objects and bones with reporting",
     "category": "Animation",
 }
 
@@ -94,7 +94,9 @@ class DeleteKeyframeOperator(bpy.types.Operator):
             touched_any = False
 
             for obj in objects:
-                touched_obj, bones = self._delete_on_object(obj, frame, paths, context, props.selected_only)
+                touched_obj, bones = self._delete_on_object(
+                    obj, frame, paths, context, props.selected_only
+                )
                 if touched_obj:
                     touched_any = True
                     affected_objects.add(obj.name)
@@ -108,10 +110,11 @@ class DeleteKeyframeOperator(bpy.types.Operator):
 
         if deleted_frames:
             frames_sorted = sorted(deleted_frames)
-            info_msg = f"Deleted keyframes on {len(affected_objects)} object(s)"
-            if affected_bones:
-                info_msg += f" and {len(affected_bones)} bone(s)"
-            self.report({'INFO'}, info_msg)
+            self.report(
+                {'INFO'},
+                f"Deleted keyframes on {len(affected_objects)} object(s), "
+                f"{len(affected_bones)} bone(s), frames: {len(frames_sorted)}"
+            )
             print("Deleted frames:", frames_sorted)
             print("Affected objects:", sorted(affected_objects))
             if affected_bones:
@@ -133,17 +136,17 @@ class DeleteKeyframeOperator(bpy.types.Operator):
             except Exception:
                 pass
 
-        if obj.type == 'ARMATURE':
-            pose_bones = []
+        if obj.type == 'ARMATURE' and obj.animation_data:
             if obj.mode == 'POSE':
                 if selected_only_flag and context.selected_pose_bones:
                     pose_bones = list(context.selected_pose_bones)
                 else:
                     pose_bones = list(obj.pose.bones)
-            for pbone in pose_bones:
-                if self._delete_on_id(pbone, frame, paths):
-                    touched = True
-                    touched_bones.add(pbone.name)
+
+                for pbone in pose_bones:
+                    if self._delete_on_id(pbone, frame, paths):
+                        touched = True
+                        touched_bones.add(pbone.name)
 
         return touched, touched_bones
 
@@ -162,7 +165,7 @@ class DeleteKeyframeOperator(bpy.types.Operator):
 class BakeKeyframeOperator(bpy.types.Operator):
     bl_idname = "object.bake_keyframe_by_interval"
     bl_label = "Bake Keyframes"
-    bl_description = "Bake keyframes in range on objects"
+    bl_description = "Bake keyframes in frame range on objects and bones"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -191,6 +194,7 @@ class BakeKeyframeOperator(bpy.types.Operator):
             objects = [o for o in scene.objects]
 
         baked_objects = []
+        baked_bones = set()
 
         for obj in objects:
             prev_selection = [o for o in context.selected_objects]
@@ -201,6 +205,12 @@ class BakeKeyframeOperator(bpy.types.Operator):
             obj.select_set(True)
             context.view_layer.objects.active = obj
 
+            bake_types = set()
+            if obj.type == 'ARMATURE':
+                bake_types.add('POSE')
+            else:
+                bake_types.add('OBJECT')
+
             try:
                 bpy.ops.nla.bake(
                     frame_start=start,
@@ -210,9 +220,18 @@ class BakeKeyframeOperator(bpy.types.Operator):
                     clear_constraints=False,
                     clear_parents=False,
                     use_current_action=True,
-                    bake_types={'OBJECT'},
+                    bake_types=bake_types,
                 )
                 baked_objects.append(obj.name)
+
+                if obj.type == 'ARMATURE':
+                    if obj.mode == 'POSE' and props.selected_only and context.selected_pose_bones:
+                        for p in context.selected_pose_bones:
+                            baked_bones.add(f"{obj.name}:{p.name}")
+                    else:
+                        for p in obj.pose.bones:
+                            baked_bones.add(f"{obj.name}:{p.name}")
+
             except Exception as e:
                 print(f"Bake failed on {obj.name}: {e}")
 
@@ -225,9 +244,14 @@ class BakeKeyframeOperator(bpy.types.Operator):
         scene.frame_current = original_frame
 
         if baked_objects:
-            self.report({'INFO'}, f"Baked {len(baked_objects)} object(s) from {start} to {end - 1}")
+            self.report(
+                {'INFO'},
+                f"Baked {len(baked_objects)} object(s) from {start} to {end - 1}"
+            )
             print("Baked objects:", baked_objects)
-            print(f"Baked frames: {list(range(start, end))}")
+            if baked_bones:
+                print("Baked bones:", sorted(baked_bones))
+            print("Baked frames:", list(range(start, end)))
         else:
             self.report({'INFO'}, "No objects baked")
 
