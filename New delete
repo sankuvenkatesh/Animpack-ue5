@@ -1,6 +1,226 @@
 bl_info = {
     "name": "Delete/Bake Keyframe by Interval Extended",
-    "author": "Venkatesh Sanku",
+ # ##### BEGIN GPL LICENSE BLOCK #####
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software Foundation,
+# Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
+#
+# ##### END GPL LICENSE BLOCK #####
+
+bl_info = {
+    "name": "Delete/Bake Keyframe by Interval",
+    "author": "CaptainHansode, updated for 5.0",
+    "version": (2, 0, 0),
+    "blender": (5, 0, 0),
+    "location": "View3D > Sidebar > Item",
+    "description": "Delete keyframes by interval and optionally bake on kept frames for selected objects/bones",
+    "category": "Animation",
+}
+
+import bpy
+
+
+class SJDelKeyProperties(bpy.types.PropertyGroup):
+    start_frame: bpy.props.IntProperty(
+        name="Start Frame", default=1, min=1
+    )
+    end_frame: bpy.props.IntProperty(
+        name="End Frame", default=250, min=1
+    )
+    interval: bpy.props.IntProperty(
+        name="Interval", default=1, min=1, max=100
+    )
+    pos: bpy.props.BoolProperty(
+        name="Position", default=True
+    )
+    rot: bpy.props.BoolProperty(
+        name="Rotation", default=True
+    )
+    scl: bpy.props.BoolProperty(
+        name="Scale", default=True
+    )
+    bake: bpy.props.BoolProperty(
+        name="Bake Keyframes (kept frames)",
+        description="Bake selected transforms on kept frames in range",
+        default=False
+    )
+
+
+class SJDeleteKeyframeFunction(bpy.types.Operator):
+    bl_idname = "object.sj_delete_keyframe_by_interval"
+    bl_label = "Delete/Bake Keyframes"
+    bl_description = "Delete keyframes by interval on selected objects/bones, optionally bake on kept frames"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.active_object is not None
+
+    def execute(self, context):
+        props = context.scene.sj_del_keyframe_props
+
+        if props.start_frame >= props.end_frame or props.interval < 1:
+            self.report({'WARNING'}, "Invalid frame range or interval")
+            return {'CANCELLED'}
+
+        start = props.start_frame
+        end = props.end_frame
+
+        # Frames to KEEP
+        keep_frames = set(range(start, end, props.interval + 1))
+
+        # Channels to operate on
+        paths = []
+        if props.pos:
+            paths.append("location")
+        if props.rot:
+            paths.extend(["rotation_euler", "rotation_quaternion"])
+        if props.scl:
+            paths.append("scale")
+
+        if not paths:
+            self.report({'WARNING'}, "No channels selected")
+            return {'CANCELLED'}
+
+        # First optionally bake, then delete
+        if props.bake:
+            self._bake_kept_frames(context, start, end, paths, keep_frames)
+
+        # Delete on selected objects
+        for obj in context.selected_objects:
+            self._delete_keys_on_id(obj, start, end, paths, keep_frames)
+
+        # Delete on selected pose bones if in pose mode
+        ob = context.object
+        if ob and ob.mode == 'POSE':
+            for pbone in context.selected_pose_bones:
+                self._delete_keys_on_id(pbone, start, end, paths, keep_frames)
+
+        bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
+        self.report({'INFO'}, "Processed keyframes by interval")
+        return {'FINISHED'}
+
+    def _delete_keys_on_id(self, id_data, start, end, paths, keep_frames):
+        for frame in range(start, end):
+            if frame in keep_frames:
+                continue
+            for path in paths:
+                try:
+                    id_data.keyframe_delete(data_path=path, frame=frame)
+                except Exception:
+                    pass
+
+    def _bake_kept_frames(self, context, start, end, paths, keep_frames):
+        scene = context.scene
+        original_frame = scene.frame_current
+
+        # Determine flags for bake from paths
+        bake_loc = "location" in paths
+        bake_rot = ("rotation_euler" in paths) or ("rotation_quaternion" in paths)
+        bake_scale = "scale" in paths
+
+        # Restrict bake to kept frames only using frame step
+        # Step is 1 but we only keep frames in keep_frames; to avoid complex
+        # custom stepping, we will iterate objects and call bake per object with full range,
+        # then rely on delete step to clean unwanted frames outside keep_frames.
+        for obj in list(context.selected_objects):
+            # Ensure only this object is selected for the bake operator
+            prev_selection = [o for o in context.selected_objects]
+            prev_active = context.view_layer.objects.active
+
+            for o in context.view_layer.objects:
+                o.select_set(False)
+            obj.select_set(True)
+            context.view_layer.objects.active = obj
+
+            bpy.ops.nla.bake(
+                frame_start=start,
+                frame_end=end - 1,
+                only_selected=True,
+                visual_keying=True,
+                clear_constraints=False,
+                clear_parents=False,
+                use_current_action=True,
+                bake_types={
+                    'OBJECT'  # object transform; pose will be covered via bones if in pose mode
+                },
+            )
+
+            # Restore selection
+            for o in prev_selection:
+                o.select_set(True)
+            context.view_layer.objects.active = prev_active
+
+        scene.frame_current = original_frame
+
+
+class SJDeleteKeyframeByInterval(bpy.types.Panel):
+    bl_label = "SJ Delete/Bake Keyframe Interval"
+    bl_idname = "VIEW3D_PT_sj_delete_keyframe_interval"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'Item'
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        props = context.scene.sj_del_keyframe_props
+
+        layout.label(text="Frame Range")
+        row = layout.row(align=True)
+        row.prop(props, "start_frame")
+        row.prop(props, "end_frame")
+
+        layout.label(text="Interval (keep every Nth)")
+        row = layout.row()
+        row.prop(props, "interval")
+
+        layout.label(text="Channels")
+        row = layout.row(align=True)
+        row.prop(props, "pos")
+        row.prop(props, "rot")
+        row.prop(props, "scl")
+
+        layout.prop(props, "bake")
+
+        layout.separator()
+        row = layout.row()
+        row.scale_y = 1.6
+        row.operator("object.sj_delete_keyframe_by_interval")
+
+
+classes = (
+    SJDelKeyProperties,
+    SJDeleteKeyframeFunction,
+    SJDeleteKeyframeByInterval,
+)
+
+
+def register():
+    for cls in classes:
+        bpy.utils.register_class(cls)
+    bpy.types.Scene.sj_del_keyframe_props = bpy.props.PointerProperty(type=SJDelKeyProperties)
+
+
+def unregister():
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)
+    del bpy.types.Scene.sj_del_keyframe_props
+
+
+if __name__ == "__main__":
+    register()   "author": "Venkatesh Sanku",
     "version": (5, 0, 1),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Animation",
