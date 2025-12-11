@@ -1,7 +1,8 @@
+
 bl_info = {
     "name": "Keyframe Tools Interval",
     "author": "Venkatesh Sanku",
-    "version": (2, 5, 1),
+    "version": (2, 5, 2),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Item",
     "description": "Delete or bake keyframes by interval for objects and bones with detailed frame reporting",
@@ -89,6 +90,7 @@ class DeleteKeyframeOperator(bpy.types.Operator):
         affected_objects = set()
         affected_bones = set()
         frame_details = {}  # Track which objects/bones affected each frame
+        affected_keyframes = set()  # Track ALL individual keyframes deleted
 
         for frame in all_frames:
             if not self._frame_should_be_processed(frame, props.interval, key_frames, props.inverse_interval):
@@ -98,13 +100,14 @@ class DeleteKeyframeOperator(bpy.types.Operator):
             frame_affected = set()  # Objects and bones affected on this frame
 
             for obj in objects:
-                touched_obj, bones = self._delete_on_object(
+                touched_obj, bones, frame_keyframes = self._delete_on_object(
                     obj, frame, paths, context, props.selected_only
                 )
                 if touched_obj:
                     touched_any = True
                     affected_objects.add(obj.name)
                     frame_affected.add(obj.name)
+                    affected_keyframes.update(frame_keyframes)
                     for b in bones:
                         affected_bones.add(f"{obj.name}:{b}")
                         frame_affected.add(f"{obj.name}:{b}")
@@ -117,6 +120,7 @@ class DeleteKeyframeOperator(bpy.types.Operator):
 
         if deleted_frames:
             frames_sorted = sorted(deleted_frames)
+            keyframes_sorted = sorted(affected_keyframes)
             
             # Build detailed report
             report_msg = f"Deleted keyframes on {len(affected_objects)} object(s), {len(affected_bones)} bone(s)"
@@ -130,7 +134,8 @@ class DeleteKeyframeOperator(bpy.types.Operator):
             # Detailed console output
             print("
 === KEYFRAME DELETION REPORT ===")
-            print(f"Deleted frames: {frames_sorted}")
+            print(f"Processed frames: {frames_sorted}")
+            print(f"Affected keyframes: {', '.join(map(str, keyframes_sorted))}")
             print(f"Affected objects: {sorted(affected_objects)}")
             if affected_bones:
                 print(f"Affected bones: {sorted(affected_bones)}")
@@ -156,12 +161,14 @@ Frame-by-frame details:")
     def _delete_on_object(self, obj, frame, paths, context, selected_only_flag):
         touched = False
         touched_bones = set()
+        frame_keyframes = set()  # Track keyframes deleted on this frame for this object
 
         for path in paths:
             try:
                 result = obj.keyframe_delete(data_path=path, frame=frame)
                 if result:
                     touched = True
+                    frame_keyframes.add(f"{obj.name}:{path}:{frame}")
             except Exception:
                 pass
 
@@ -173,22 +180,24 @@ Frame-by-frame details:")
                     pose_bones = list(obj.pose.bones)
 
                 for pbone in pose_bones:
-                    if self._delete_on_bone(pbone, frame, paths):
+                    bone_keyframes = self._delete_on_bone(pbone, frame, paths)
+                    if bone_keyframes:
                         touched = True
                         touched_bones.add(pbone.name)
+                        frame_keyframes.update(bone_keyframes)
 
-        return touched, touched_bones
+        return touched, touched_bones, frame_keyframes
 
     def _delete_on_bone(self, pbone, frame, paths):
-        touched = False
+        touched_keyframes = set()
         for path in paths:
             try:
                 result = pbone.keyframe_delete(data_path=path, frame=frame)
                 if result:
-                    touched = True
+                    touched_keyframes.add(f"{pbone.id_data.name}:{pbone.name}:{path}:{frame}")
             except Exception:
                 pass
-        return touched
+        return touched_keyframes
 
 
 class BakeKeyframeOperator(bpy.types.Operator):
@@ -235,7 +244,8 @@ class BakeKeyframeOperator(bpy.types.Operator):
 
         baked_objects = set()
         baked_bones = set()
-        frame_details = {}  # Track which objects/bones baked on each frame
+        frame_details = {}
+        affected_keyframes = set()
 
         for obj in objects:
             prev_selection = [o for o in context.selected_objects]
@@ -256,12 +266,21 @@ class BakeKeyframeOperator(bpy.types.Operator):
             obj_bones_baked = set()
 
             try:
+                paths = []
+                if props.pos: paths.append("location")
+                if props.rot: paths.extend(["rotation_euler", "rotation_quaternion"])
+                if props.scl: paths.append("scale")
+
                 for frame in bake_frames:
                     scene.frame_set(frame)
                     bpy.ops.anim.keyframe_insert_menu(
                         type='LocRotScale' if (props.pos or props.rot or props.scl) else 'BUILTIN_KSI_VisualLocRotScale'
                     )
                     frame_details.setdefault(frame, set()).add(obj.name)
+                    
+                    # Track baked keyframes
+                    for path in paths:
+                        affected_keyframes.add(f"{obj.name}:{path}:{frame}")
 
                 obj_baked = True
                 baked_objects.add(obj.name)
@@ -271,11 +290,15 @@ class BakeKeyframeOperator(bpy.types.Operator):
                         for p in context.selected_pose_bones:
                             obj_bones_baked.add(f"{obj.name}:{p.name}")
                             for frame in bake_frames:
+                                for path in paths:
+                                    affected_keyframes.add(f"{obj.name}:{p.name}:{path}:{frame}")
                                 frame_details.setdefault(frame, set()).add(f"{obj.name}:{p.name}")
                     else:
                         for p in obj.pose.bones:
                             obj_bones_baked.add(f"{obj.name}:{p.name}")
                             for frame in bake_frames:
+                                for path in paths:
+                                    affected_keyframes.add(f"{obj.name}:{p.name}:{path}:{frame}")
                                 frame_details.setdefault(frame, set()).add(f"{obj.name}:{p.name}")
                     baked_bones.update(obj_bones_baked)
 
@@ -292,6 +315,7 @@ class BakeKeyframeOperator(bpy.types.Operator):
 
         if baked_objects:
             frames_sorted = sorted(bake_frames)
+            keyframes_sorted = sorted(list(affected_keyframes))[:50]  # Limit display for readability
             
             # Build detailed report
             report_msg = f"Baked {len(baked_objects)} object(s) on {len(bake_frames)} frame(s)"
@@ -305,7 +329,8 @@ class BakeKeyframeOperator(bpy.types.Operator):
             # Detailed console output
             print("
 === KEYFRAME BAKE REPORT ===")
-            print(f"Baked frames: {frames_sorted}")
+            print(f"Processed frames: {frames_sorted}")
+            print(f"Affected keyframes: {', '.join(map(str, keyframes_sorted))}{'...' if len(affected_keyframes) > 50 else ''}")
             print(f"Baked objects: {sorted(baked_objects)}")
             if baked_bones:
                 print(f"Baked bones: {sorted(baked_bones)}")
