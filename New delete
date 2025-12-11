@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Keyframe Interval Tools",
     "author": "Venkatesh Sanku",
-    "version": (2, 6, 0),
+    "version": (2, 7, 0),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Item",
     "description": "Delete or bake keyframes by interval for objects and bones with reporting",
@@ -22,22 +22,21 @@ class DelKeyProperties(bpy.types.PropertyGroup):
         name="Interval", default=0, min=0, max=100
     )
     all_channels: bpy.props.BoolProperty(
-        name="All Channels",
+        name="All",
         description="Enable Position, Rotation and Scale",
         default=True,
-        update=lambda self, context: self._update_all_channels(context)
     )
     pos: bpy.props.BoolProperty(
-        name="Position", default=True
+        name="Pos", default=True
     )
     rot: bpy.props.BoolProperty(
-        name="Rotation", default=True
+        name="Rot", default=True
     )
     scl: bpy.props.BoolProperty(
-        name="Scale", default=True
+        name="Scl", default=True
     )
     inverse_interval: bpy.props.BoolProperty(
-        name="Inverse",
+        name="Inv",
         description="Invert interval behavior (act only on kept frames)",
         default=False
     )
@@ -47,11 +46,12 @@ class DelKeyProperties(bpy.types.PropertyGroup):
         default=True
     )
 
-    def _update_all_channels(self, context):
-        if self.all_channels:
-            self.pos = True
-            self.rot = True
-            self.scl = True
+
+def sync_all_channels(props: DelKeyProperties):
+    if props.all_channels:
+        props.pos = True
+        props.rot = True
+        props.scl = True
 
 
 class DeleteKeyframeOperator(bpy.types.Operator):
@@ -66,6 +66,7 @@ class DeleteKeyframeOperator(bpy.types.Operator):
 
     def execute(self, context):
         props = context.scene.del_keyframe_props
+        sync_all_channels(props)
 
         if props.start_frame >= props.end_frame:
             self.report({'WARNING'}, "Start frame must be less than end frame")
@@ -198,6 +199,7 @@ class BakeKeyframeOperator(bpy.types.Operator):
 
     def execute(self, context):
         props = context.scene.del_keyframe_props
+        sync_all_channels(props)
 
         if props.start_frame >= props.end_frame:
             self.report({'WARNING'}, "Start frame must be less than end frame")
@@ -243,9 +245,7 @@ class BakeKeyframeOperator(bpy.types.Operator):
             try:
                 for frame in bake_frames:
                     scene.frame_set(frame)
-                    bpy.ops.anim.keyframe_insert_menu(
-                        type='LocRotScale'
-                    )
+                    bpy.ops.anim.keyframe_insert_menu(type='LocRotScale')
 
                 baked_objects.append(obj.name)
 
@@ -312,31 +312,25 @@ class KeyframeIntervalPanel(bpy.types.Panel):
         row.prop(props, "start_frame")
         row.prop(props, "end_frame")
 
-        box_int = layout.box()
-        row = box_int.row()
+        row = box.row(align=True)
         row.label(text="Interval", icon="IPO_CONSTANT")
-        row = box_int.row(align=True)
         row.prop(props, "interval")
         row.prop(props, "inverse_interval", toggle=True)
 
-        box_ch = layout.box()
-        header = box_ch.row()
-        header.label(text="Channels", icon="CHANNELS")
-        header.prop(props, "all_channels", toggle=True)
-        row = box_ch.row(align=True)
-        row.prop(props, "pos", toggle=True, icon="ORIENTATION_GLOBAL")
-        row.prop(props, "rot", toggle=True, icon="DRIVER_ROTATIONAL_DIFFERENCE")
-        row.prop(props, "scl", toggle=True, icon="FULLSCREEN_ENTER")
+        row = layout.row(align=True)
+        row.label(text="Channels", icon="CHANNELS")
+        row.prop(props, "all_channels", toggle=True)
+        row = layout.row(align=True)
+        row.prop(props, "pos", toggle=True)
+        row.prop(props, "rot", toggle=True)
+        row.prop(props, "scl", toggle=True)
 
         layout.prop(props, "selected_only", icon="RESTRICT_SELECT_OFF")
 
         layout.separator()
         row_ops = layout.row(align=True)
-        col_left = row_ops.column(align=True)
-        col_right = row_ops.column(align=True)
-
-        col_left.operator("object.delete_keyframe_by_interval", icon="KEY_HLT")
-        col_right.operator("object.bake_keyframe_by_interval", icon="REC")
+        row_ops.operator("object.delete_keyframe_by_interval", icon="KEY_HLT")
+        row_ops.operator("object.bake_keyframe_by_interval", icon="REC")
 
 
 classes = (
