@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Keyframe Tools Interval",
     "author": "Venkatesh Sanku",
-    "version": (2, 1, 0),
+    "version": (2, 2, 0),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Item",
-    "description": "Delete or bake keyframes by interval for selected objects/bones",
+    "description": "Delete or bake keyframes by interval with reporting",
     "category": "Animation",
 }
 
@@ -30,17 +30,22 @@ class DelKeyProperties(bpy.types.PropertyGroup):
     scl: bpy.props.BoolProperty(
         name="Scale", default=True
     )
+    selected_only: bpy.props.BoolProperty(
+        name="Selected Only",
+        description="Affect only selected objects / selected pose bones",
+        default=True
+    )
 
 
 class DeleteKeyframeOperator(bpy.types.Operator):
     bl_idname = "object.delete_keyframe_by_interval"
     bl_label = "Delete Keyframes"
-    bl_description = "Delete keyframes by interval on selected objects/bones"
+    bl_description = "Delete keyframes by interval on objects/bones"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
     def poll(cls, context):
-        return context.active_object is not None
+        return context.scene is not None
 
     def execute(self, context):
         props = context.scene.del_keyframe_props
@@ -64,18 +69,23 @@ class DeleteKeyframeOperator(bpy.types.Operator):
             self.report({'WARNING'}, "No channels selected")
             return {'CANCELLED'}
 
-        deleted_frames = set()
-        all_frames = range(start, end)
+        if props.selected_only:
+            objects = list(context.selected_objects)
+            if not objects:
+                self.report({'WARNING'}, "No objects selected")
+                return {'CANCELLED'}
+        else:
+            objects = [o for o in context.scene.objects]
 
+        all_frames = range(start, end)
         if props.interval > 0:
             keep_frames = set(range(start, end, props.interval + 1))
         else:
             keep_frames = set()
 
-        selected_objects = list(context.selected_objects)
-        if not selected_objects:
-            self.report({'WARNING'}, "No objects selected")
-            return {'CANCELLED'}
+        deleted_frames = set()
+        affected_objects = set()
+        affected_bones = set()
 
         for frame in all_frames:
             if props.interval > 0 and frame in keep_frames:
@@ -83,9 +93,13 @@ class DeleteKeyframeOperator(bpy.types.Operator):
 
             touched_any = False
 
-            for obj in selected_objects:
-                if self._delete_on_object(obj, frame, paths, context):
+            for obj in objects:
+                touched_obj, bones = self._delete_on_object(obj, frame, paths, context, props.selected_only)
+                if touched_obj:
                     touched_any = True
+                    affected_objects.add(obj.name)
+                    for b in bones:
+                        affected_bones.add(f"{obj.name}:{b}")
 
             if touched_any:
                 deleted_frames.add(frame)
@@ -94,15 +108,22 @@ class DeleteKeyframeOperator(bpy.types.Operator):
 
         if deleted_frames:
             frames_sorted = sorted(deleted_frames)
-            self.report({'INFO'}, f"Deleted {len(frames_sorted)} frames")
+            info_msg = f"Deleted keyframes on {len(affected_objects)} object(s)"
+            if affected_bones:
+                info_msg += f" and {len(affected_bones)} bone(s)"
+            self.report({'INFO'}, info_msg)
             print("Deleted frames:", frames_sorted)
+            print("Affected objects:", sorted(affected_objects))
+            if affected_bones:
+                print("Affected bones:", sorted(affected_bones))
         else:
             self.report({'INFO'}, "No keyframes deleted in range")
 
         return {'FINISHED'}
 
-    def _delete_on_object(self, obj, frame, paths, context):
+    def _delete_on_object(self, obj, frame, paths, context, selected_only_flag):
         touched = False
+        touched_bones = set()
 
         for path in paths:
             try:
@@ -113,18 +134,18 @@ class DeleteKeyframeOperator(bpy.types.Operator):
                 pass
 
         if obj.type == 'ARMATURE':
+            pose_bones = []
             if obj.mode == 'POSE':
-                pose_bones = []
-                if context.selected_pose_bones:
+                if selected_only_flag and context.selected_pose_bones:
                     pose_bones = list(context.selected_pose_bones)
                 else:
                     pose_bones = list(obj.pose.bones)
+            for pbone in pose_bones:
+                if self._delete_on_id(pbone, frame, paths):
+                    touched = True
+                    touched_bones.add(pbone.name)
 
-                for pbone in pose_bones:
-                    if self._delete_on_id(pbone, frame, paths):
-                        touched = True
-
-        return touched
+        return touched, touched_bones
 
     def _delete_on_id(self, id_data, frame, paths):
         touched = False
@@ -141,12 +162,12 @@ class DeleteKeyframeOperator(bpy.types.Operator):
 class BakeKeyframeOperator(bpy.types.Operator):
     bl_idname = "object.bake_keyframe_by_interval"
     bl_label = "Bake Keyframes"
-    bl_description = "Bake keyframes in range on selected objects"
+    bl_description = "Bake keyframes in range on objects"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
     def poll(cls, context):
-        return context.active_object is not None
+        return context.scene is not None
 
     def execute(self, context):
         props = context.scene.del_keyframe_props
@@ -161,12 +182,17 @@ class BakeKeyframeOperator(bpy.types.Operator):
         scene = context.scene
         original_frame = scene.frame_current
 
-        selected_objects = list(context.selected_objects)
-        if not selected_objects:
-            self.report({'WARNING'}, "No objects selected")
-            return {'CANCELLED'}
+        if props.selected_only:
+            objects = list(context.selected_objects)
+            if not objects:
+                self.report({'WARNING'}, "No objects selected")
+                return {'CANCELLED'}
+        else:
+            objects = [o for o in scene.objects]
 
-        for obj in selected_objects:
+        baked_objects = []
+
+        for obj in objects:
             prev_selection = [o for o in context.selected_objects]
             prev_active = context.view_layer.objects.active
 
@@ -186,6 +212,7 @@ class BakeKeyframeOperator(bpy.types.Operator):
                     use_current_action=True,
                     bake_types={'OBJECT'},
                 )
+                baked_objects.append(obj.name)
             except Exception as e:
                 print(f"Bake failed on {obj.name}: {e}")
 
@@ -197,8 +224,13 @@ class BakeKeyframeOperator(bpy.types.Operator):
 
         scene.frame_current = original_frame
 
-        self.report({'INFO'}, f"Baked keyframes from {start} to {end - 1} on {len(selected_objects)} object(s)")
-        print(f"Baked frames: {list(range(start, end))}")
+        if baked_objects:
+            self.report({'INFO'}, f"Baked {len(baked_objects)} object(s) from {start} to {end - 1}")
+            print("Baked objects:", baked_objects)
+            print(f"Baked frames: {list(range(start, end))}")
+        else:
+            self.report({'INFO'}, "No objects baked")
+
         return {'FINISHED'}
 
 
@@ -228,6 +260,8 @@ class KeyframeIntervalPanel(bpy.types.Panel):
         row.prop(props, "pos")
         row.prop(props, "rot")
         row.prop(props, "scl")
+
+        layout.prop(props, "selected_only")
 
         layout.separator()
         col = layout.column(align=True)
