@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Delete/Bake Keyframe by Interval Extended",
     "author": "Venkatesh Sanku",
-    "version": (4, 8, 0),
+    "version": (4, 9, 0),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Animation",
-    "description": "Delete/bake keyframes by interval - FIXED F-Curve method",
+    "description": "Delete/bake keyframes by interval - FAST & FIXED",
     "category": "Animation",
 }
 
@@ -70,7 +70,7 @@ def get_bone_name_from_path(data_path):
             return match.group(1)
     return None
 
-def get_relevant_fcurves(target_name, action, props):
+def get_relevant_fcurves(target_name, action, props, mode):
     """Get F-Curves for specific bone/object matching transform types"""
     if not action:
         return []
@@ -79,31 +79,37 @@ def get_relevant_fcurves(target_name, action, props):
     paths = []
     
     if props.pos or props.all_types:
-        paths.extend(["location", "pose/location"])
+        paths.append("location")
     if props.rot or props.all_types:
-        paths.extend(["rotation_quaternion", "rotation_euler", "pose/rotation_quaternion", "pose/rotation_euler"])
+        paths.extend(["rotation_quaternion", "rotation_euler"])
     if props.scl or props.all_types:
-        paths.extend(["scale", "pose/scale"])
+        paths.append("scale")
     
     for fcurve in action.fcurves:
         # For pose bones: check bone name matches AND path type matches
-        if context.mode == 'POSE' and target_name:
+        if mode == 'POSE' and target_name:
             bone_name = get_bone_name_from_path(fcurve.data_path)
-            if bone_name == target_name and any(path in fcurve.data_path for path in paths):
-                fcurves.append(fcurve)
+            if bone_name == target_name:
+                for path in paths:
+                    if path in fcurve.data_path:
+                        fcurves.append(fcurve)
+                        break
         # For objects: just check path type
-        elif context.mode != 'POSE' and any(path in fcurve.data_path for path in paths):
-            fcurves.append(fcurve)
+        elif mode != 'POSE':
+            for path in paths:
+                if fcurve.data_path == path:
+                    fcurves.append(fcurve)
+                    break
     
     return fcurves
 
-def delete_keyframes_fc(target, frames, props):
+def delete_keyframes_fc(target, frames, props, ctx):
     """Delete keyframes from F-Curves - FIXED VERSION"""
     deleted = 0
     
     # Get action from armature/object
-    if context.mode == 'POSE':
-        action = context.object.animation_data.action if context.object.animation_data else None
+    if ctx.mode == 'POSE':
+        action = ctx.object.animation_data.action if ctx.object.animation_data else None
         target_name = target.name
     else:
         action = target.animation_data.action if target.animation_data else None
@@ -112,12 +118,12 @@ def delete_keyframes_fc(target, frames, props):
     if not action:
         return 0
     
-    fcurves = get_relevant_fcurves(target_name, action, props)
+    fcurves = get_relevant_fcurves(target_name, action, props, ctx.mode)
     
     for fcurve in fcurves:
         points_to_remove = []
         for kf in fcurve.keyframe_points:
-            if int(kf.co[0]) in frames:  # Use int() for exact frame match
+            if int(kf.co[0]) in frames:
                 points_to_remove.append(kf)
         
         # Remove in reverse order
@@ -127,28 +133,28 @@ def delete_keyframes_fc(target, frames, props):
     
     return deleted
 
-def bake_keyframes_fc(target, frames, props):
+def bake_keyframes_fc(target, frames, props, ctx):
     """Bake keyframes - FIXED VERSION"""
     baked = 0
     
-    scene = bpy.context.scene
+    scene = ctx.scene
     original_frame = scene.frame_current
     
-    if context.mode == 'POSE':
-        action = context.object.animation_data.action
+    if ctx.mode == 'POSE':
+        action = ctx.object.animation_data.action if ctx.object.animation_data else None
         target_name = target.name
     else:
-        action = target.animation_data.action
+        action = target.animation_data.action if target.animation_data else None
         target_name = None
     
     if not action:
         return 0
     
-    fcurves = get_relevant_fcurves(target_name, action, props)
+    fcurves = get_relevant_fcurves(target_name, action, props, ctx.mode)
     
     for frame in frames:
         scene.frame_set(frame)
-        bpy.context.view_layer.update()
+        ctx.view_layer.update()
         
         for fcurve in fcurves:
             try:
@@ -159,7 +165,7 @@ def bake_keyframes_fc(target, frames, props):
                 pass
     
     scene.frame_set(original_frame)
-    bpy.context.view_layer.update()
+    ctx.view_layer.update()
     return baked
 
 def get_targets(context, only_selected):
@@ -175,7 +181,6 @@ class DeleteKeyframeOperator(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-        global context  # Make context available in functions
         props = context.scene.del_keyframe_props
         frames = calculate_frames(props)
         targets = get_targets(context, props.only_selected)
@@ -192,7 +197,7 @@ class DeleteKeyframeOperator(bpy.types.Operator):
         
         for target in targets:
             try:
-                deleted = delete_keyframes_fc(target, frames, props)
+                deleted = delete_keyframes_fc(target, frames, props, context)
                 total_deleted += deleted
                 if deleted > 0:
                     action_count += 1
@@ -215,7 +220,6 @@ class BakeKeyframeOperator(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-        global context
         props = context.scene.del_keyframe_props
         frames = calculate_frames(props)
         targets = get_targets(context, props.only_selected)
@@ -229,14 +233,16 @@ class BakeKeyframeOperator(bpy.types.Operator):
         
         for target in targets:
             try:
-                baked = bake_keyframes_fc(target, frames, props)
+                baked = bake_keyframes_fc(target, frames, props, context)
                 total_baked += baked
                 if baked > 0:
                     action_count += 1
             except Exception as e:
                 print(f"❌ Error baking {getattr(target, 'name', 'unknown')}: {e}")
 
-        self.report({'INFO'}, f"✅ Baked {total_baked} keyframes on {action_count}/{len(targets)} targets")
+        msg = f"✅ Baked {total_baked} keyframes on {action_count}/{len(targets)} targets"
+        self.report({'INFO'}, msg)
+        print(msg)
         return {'FINISHED'}
 
 class DeleteBakeKeyframePanel(bpy.types.Panel):
