@@ -1,14 +1,15 @@
 bl_info = {
     "name": "Delete/Bake Keyframe by Interval Extended",
     "author": "Venkatesh Sanku",
-    "version": (4, 7, 0),
+    "version": (4, 8, 0),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Animation",
-    "description": "Delete/bake keyframes by interval - FAST F-Curve method",
+    "description": "Delete/bake keyframes by interval - FIXED F-Curve method",
     "category": "Animation",
 }
 
 import bpy
+import re
 
 class DeleteKeyframeProperties(bpy.types.PropertyGroup):
     start_frame: bpy.props.IntProperty(
@@ -45,10 +46,6 @@ class DeleteKeyframeProperties(bpy.types.PropertyGroup):
         frames = calculate_frames(self)
         self.preview_count = len(frames)
 
-    def _update_all_types(self):
-        if self.all_types:
-            self.pos = self.rot = self.scl = True
-
 def calculate_frames(props):
     start, end, interval, invert = props.start_frame, props.end_frame, props.interval, props.invert
     
@@ -65,69 +62,103 @@ def calculate_frames(props):
     
     return result
 
-def get_fcurves(target, props):
-    """Get relevant F-Curves for target (pose bone or object)"""
-    fcurves = []
-    action = target.id_data if hasattr(target, 'id_data') else target.animation_data.action
-    
+def get_bone_name_from_path(data_path):
+    """Extract bone name from pose.bones["BoneName"].property path"""
+    if 'pose.bones' in data_path:
+        match = re.search(r'pose.bones["([^"]+)"]', data_path)
+        if match:
+            return match.group(1)
+    return None
+
+def get_relevant_fcurves(target_name, action, props):
+    """Get F-Curves for specific bone/object matching transform types"""
     if not action:
-        return fcurves
+        return []
     
+    fcurves = []
     paths = []
+    
     if props.pos or props.all_types:
         paths.extend(["location", "pose/location"])
     if props.rot or props.all_types:
-        if target.rotation_mode == 'QUATERNION':
-            paths.extend(["rotation_quaternion", "pose/rotation_quaternion"])
-        else:
-            paths.extend(["rotation_euler", "pose/rotation_euler"])
+        paths.extend(["rotation_quaternion", "rotation_euler", "pose/rotation_quaternion", "pose/rotation_euler"])
     if props.scl or props.all_types:
         paths.extend(["scale", "pose/scale"])
     
     for fcurve in action.fcurves:
-        if any(path in fcurve.data_path for path in paths):
+        # For pose bones: check bone name matches AND path type matches
+        if context.mode == 'POSE' and target_name:
+            bone_name = get_bone_name_from_path(fcurve.data_path)
+            if bone_name == target_name and any(path in fcurve.data_path for path in paths):
+                fcurves.append(fcurve)
+        # For objects: just check path type
+        elif context.mode != 'POSE' and any(path in fcurve.data_path for path in paths):
             fcurves.append(fcurve)
     
     return fcurves
 
 def delete_keyframes_fc(target, frames, props):
-    """Delete keyframes from F-Curves directly - SUPER FAST"""
+    """Delete keyframes from F-Curves - FIXED VERSION"""
     deleted = 0
-    fcurves = get_fcurves(target, props)
+    
+    # Get action from armature/object
+    if context.mode == 'POSE':
+        action = context.object.animation_data.action if context.object.animation_data else None
+        target_name = target.name
+    else:
+        action = target.animation_data.action if target.animation_data else None
+        target_name = None
+    
+    if not action:
+        return 0
+    
+    fcurves = get_relevant_fcurves(target_name, action, props)
     
     for fcurve in fcurves:
         points_to_remove = []
         for kf in fcurve.keyframe_points:
-            if kf.co[0] in frames:
+            if int(kf.co[0]) in frames:  # Use int() for exact frame match
                 points_to_remove.append(kf)
         
-        # Remove in reverse order to avoid index shifting
+        # Remove in reverse order
         for kf in reversed(points_to_remove):
-            fcurve.keyframe_points.remove(kf)
+            fcurve.keyframe_points.remove(kf, fast=True)
             deleted += 1
     
     return deleted
 
 def bake_keyframes_fc(target, frames, props):
-    """Bake keyframes using F-Curve direct insertion - FAST"""
+    """Bake keyframes - FIXED VERSION"""
     baked = 0
-    original_frame = bpy.context.scene.frame_current
     
-    fcurves = get_fcurves(target, props)
+    scene = bpy.context.scene
+    original_frame = scene.frame_current
+    
+    if context.mode == 'POSE':
+        action = context.object.animation_data.action
+        target_name = target.name
+    else:
+        action = target.animation_data.action
+        target_name = None
+    
+    if not action:
+        return 0
+    
+    fcurves = get_relevant_fcurves(target_name, action, props)
     
     for frame in frames:
-        bpy.context.scene.frame_set(frame)
+        scene.frame_set(frame)
         bpy.context.view_layer.update()
         
         for fcurve in fcurves:
-            # Insert keyframe at current frame for this curve
             try:
-                fcurve.keyframe_points.insert(frame, fcurve.evaluate(frame))
+                value = fcurve.evaluate(frame)
+                fcurve.keyframe_points.insert(frame, value)
                 baked += 1
             except:
                 pass
     
-    bpy.context.scene.frame_set(original_frame)
+    scene.frame_set(original_frame)
     bpy.context.view_layer.update()
     return baked
 
@@ -144,31 +175,38 @@ class DeleteKeyframeOperator(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
+        global context  # Make context available in functions
         props = context.scene.del_keyframe_props
         frames = calculate_frames(props)
         targets = get_targets(context, props.only_selected)
 
         if not frames:
-            self.report({'WARNING'}, "No frames to delete!")
+            self.report({'WARNING'}, "No frames to process!")
             return {'CANCELLED'}
         if not targets:
             self.report({'WARNING'}, f"No targets! ({'Select bones' if context.mode=='POSE' else 'Select objects'})")
             return {'CANCELLED'}
 
         total_deleted = 0
+        action_count = 0
+        
         for target in targets:
             try:
                 deleted = delete_keyframes_fc(target, frames, props)
                 total_deleted += deleted
+                if deleted > 0:
+                    action_count += 1
             except Exception as e:
                 print(f"❌ Error {getattr(target, 'name', 'unknown')}: {e}")
 
-        # Refresh editors
+        # Force UI refresh
         for area in context.screen.areas:
             if area.type in {'VIEW_3D', 'GRAPH_EDITOR', 'DOPESHEET_EDITOR', 'TIMELINE'}:
                 area.tag_redraw()
 
-        self.report({'INFO'}, f"⚡ Deleted {total_deleted} keyframes from {len(targets)} targets (F-Curve method)")
+        msg = f"✅ Deleted {total_deleted} keyframes from {action_count}/{len(targets)} targets"
+        self.report({'INFO'}, msg)
+        print(msg)
         return {'FINISHED'}
 
 class BakeKeyframeOperator(bpy.types.Operator):
@@ -177,27 +215,32 @@ class BakeKeyframeOperator(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
+        global context
         props = context.scene.del_keyframe_props
         frames = calculate_frames(props)
         targets = get_targets(context, props.only_selected)
 
         if not frames or not targets:
-            self.report({'WARNING'}, "No frames or targets to bake!")
+            self.report({'WARNING'}, "No frames or targets!")
             return {'CANCELLED'}
 
         total_baked = 0
+        action_count = 0
+        
         for target in targets:
             try:
                 baked = bake_keyframes_fc(target, frames, props)
                 total_baked += baked
+                if baked > 0:
+                    action_count += 1
             except Exception as e:
                 print(f"❌ Error baking {getattr(target, 'name', 'unknown')}: {e}")
 
-        self.report({'INFO'}, f"⚡ Baked {total_baked} keyframes (F-Curve method)")
+        self.report({'INFO'}, f"✅ Baked {total_baked} keyframes on {action_count}/{len(targets)} targets")
         return {'FINISHED'}
 
 class DeleteBakeKeyframePanel(bpy.types.Panel):
-    bl_label = "✨ Fast Interval Keyframe Manager"
+    bl_label = "✨ Fast Keyframe Manager"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = 'Animation'
@@ -208,63 +251,56 @@ class DeleteBakeKeyframePanel(bpy.types.Panel):
         props = context.scene.del_keyframe_props
         frames = calculate_frames(props)
 
-        # Banner
         banner = layout.row()
         banner.alignment = 'CENTER'
-        banner.label(text="🚀 SUPER FAST Keyframe Manager", icon='ANIM')
+        banner.label(text="🚀 F-Curve Keyframe Manager", icon='ANIM')
         
         layout.separator()
 
-        # Frame setup
         row = layout.row(align=True)
         row.prop(props, "start_frame", text="From")
         row.prop(props, "end_frame", text="To")
         row.prop(props, "interval", text="Every")
 
-        # Invert toggle
-        invert_row = layout.row(align=True)
-        invert_btn = invert_row.operator("wm.context_toggle", text="Invert Selection" if not props.invert else "Restore Interval", depress=props.invert)
+        invert_row = layout.row()
+        invert_btn = invert_row.operator("wm.context_toggle", text="Invert" if not props.invert else "Interval", depress=props.invert)
         invert_btn.data_path = "scene.del_keyframe_props.invert"
 
-        # Targets and properties
-        split = layout.split(factor=0.38)
-        col_targets = split.column()
-        col_props = split.column()
-
-        col_targets.label(text="🎯 Targets")
-        col_targets.prop(props, "only_selected", toggle=True, icon='RESTRICT_SELECT_OFF')
-
-        col_props.label(text="⚙️ Properties")
-        col_props.prop(props, "all_types", toggle=True, icon='CHECKBOX_HLT' if props.all_types else 'CHECKBOX_DEHLT')
+        split = layout.split(factor=0.4)
+        col1 = split.column()
+        col2 = split.column()
+        
+        col1.label(text="🎯 Targets")
+        col1.prop(props, "only_selected", toggle=True, icon='RESTRICT_SELECT_OFF')
+        
+        col2.label(text="⚙️ Properties")
+        col2.prop(props, "all_types", toggle=True)
 
         if not props.all_types:
-            box = col_props.box()
-            box.prop(props, "pos", toggle=True, icon='ORIENTATION_GLOBAL')
-            box.prop(props, "rot", toggle=True, icon='DRIVER_ROTATIONAL_DIFFERENCE')
-            box.prop(props, "scl", toggle=True, icon='FULLSCREEN_ENTER')
+            box = col2.box()
+            box.prop(props, "pos", toggle=True)
+            box.prop(props, "rot", toggle=True)
+            box.prop(props, "scl", toggle=True)
 
         layout.separator()
-
-        # Preview
-        preview_box = layout.box()
-        preview_row = preview_box.row(align=True)
-        preview_row.label(text=f"Frames: {len(frames)}", icon='TIME')
         
-        frames_text = frames[:10]
-        if len(frames) > 10:
+        preview_box = layout.box()
+        preview_row = preview_box.row()
+        preview_row.label(text=f"Frames: {len(frames)}", icon='TIME')
+        frames_text = frames[:8]
+        if len(frames) > 8:
             frames_text.append('...')
         preview_box.label(text=f"[{', '.join(map(str, frames_text))}]")
 
         layout.separator(factor=2)
 
-        # Big action buttons
         row = layout.row()
-        row.scale_y = 1.5
-        row.operator("object.delete_keyframe_by_interval", text="🗑️ DELETE KEYS", icon='TRASH', emboss=True)
+        row.scale_y = 1.4
+        row.operator("object.delete_keyframe_by_interval", text="🗑️ DELETE", icon='TRASH')
         
         row = layout.row()
-        row.scale_y = 1.5
-        row.operator("object.bake_keyframe_by_interval", text="🔥 BAKE KEYS", icon='KEY_HLT', emboss=True)
+        row.scale_y = 1.4
+        row.operator("object.bake_keyframe_by_interval", text="🔥 BAKE", icon='KEY_HLT')
 
 classes = (
     DeleteKeyframeProperties,
