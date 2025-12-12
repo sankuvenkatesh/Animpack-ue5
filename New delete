@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Keyframe Tools Interval",
     "author": "Venkatesh Sanku",
-    "version": (2, 7, 0),
+    "version": (2, 6, 9),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Item",
     "description": "Delete or bake keyframes by interval with live preview & all checkbox",
@@ -35,12 +35,6 @@ class DelKeyProperties(PropertyGroup):
     )
     scl: bpy.props.BoolProperty(
         name="Scale", default=True,
-        update=lambda self, context: self._update_preview(context)
-    )
-    custom: bpy.props.BoolProperty(
-        name="Custom Props",
-        description="Affect custom properties on objects / bones",
-        default=False,
         update=lambda self, context: self._update_preview(context)
     )
     all_channels: bpy.props.BoolProperty(
@@ -113,20 +107,13 @@ class LivePreviewUpdateOperator(Operator):
 
 
 def get_selected_pose_bones_for_armature(context, obj):
+    """Return only pose bones selected on this armature (no fallback)."""
     if obj.type != 'ARMATURE' or not obj.pose:
         return []
     sel = getattr(context, "selected_pose_bones", None)
     if not sel:
         return []
     return [pb for pb in sel if pb.id_data == obj]
-
-
-def _iter_custom_prop_paths(id_block):
-    # Iterate custom property names and yield data_path strings
-    for k in id_block.keys():
-        if k.startswith("_"):
-            continue
-        yield f'["{k}"]'
 
 
 class DeleteKeyframeOperator(Operator):
@@ -154,7 +141,7 @@ class DeleteKeyframeOperator(Operator):
         if props.scl:
             paths.append("scale")
 
-        if not (paths or props.custom):
+        if not paths:
             self.report({'WARNING'}, "No channels selected")
             return {'CANCELLED'}
 
@@ -179,7 +166,7 @@ class DeleteKeyframeOperator(Operator):
 
             for obj in objects:
                 touched_obj, bones, frame_keyframes = self._delete_on_object(
-                    context, obj, frame, paths, props.custom
+                    context, obj, frame, paths
                 )
                 if touched_obj:
                     touched_any = True
@@ -216,7 +203,7 @@ class DeleteKeyframeOperator(Operator):
             return frame in key_frames
         return frame not in key_frames
 
-    def _delete_on_object(self, context, obj, frame, paths, custom_flag):
+    def _delete_on_object(self, context, obj, frame, paths):
         touched = False
         touched_bones = set()
         frame_keyframes = set()
@@ -230,17 +217,6 @@ class DeleteKeyframeOperator(Operator):
                     frame_keyframes.add(frame)
             except Exception:
                 pass
-
-        # Object custom props
-        if custom_flag:
-            for cpath in _iter_custom_prop_paths(obj):
-                try:
-                    result = obj.keyframe_delete(data_path=cpath, frame=frame)
-                    if result:
-                        touched = True
-                        frame_keyframes.add(frame)
-                except Exception:
-                    pass
 
         # Pose bones – strictly selected bones only
         if obj.type == 'ARMATURE' and obj.animation_data and obj.pose:
@@ -259,26 +235,241 @@ class DeleteKeyframeOperator(Operator):
                     print(f"[Keyframe Tools] Delete: No selected pose bones on {obj.name}, bones skipped")
                 else:
                     for pbone in pose_bones:
-                        # bone transforms
-                        for path in paths:
-                            try:
-                                result = pbone.keyframe_delete(data_path=path, frame=frame)
-                                if result:
-                                    touched = True
-                                    touched_bones.add(pbone.name)
-                                    frame_keyframes.add(frame)
-                            except Exception:
-                                pass
-                        # bone custom props
-                        if custom_flag:
-                            for cpath in _iter_custom_prop_paths(pbone):
+                        bone_keyframes = self._delete_on_bone(pbone, frame, paths)
+                        if bone_keyframes:
+                            touched = True
+                            touched_bones.add(pbone.name)
+                            frame_keyframes.update(bone_keyframes)
+
+            except Exception:
+                pass
+            finally:
+                if armature_active:
+                    try:
+                        bpy.ops.object.mode_set(mode=original_mode)
+                    except:
+                        pass
+
+        return touched, touched_bones, frame_keyframes
+
+    def _delete_on_bone(self, pbone, frame, paths):
+        touched_keyframes = set()
+        for path in paths:
+            try:
+                result = pbone.keyframe_delete(data_path=path, frame=frame)
+                if result:
+                    touched_keyframes.add(frame)
+            except Exception:
+                pass
+        return touched_keyframes
+
+
+class BakeKeyframeOperator(Operator):
+    bl_idname = "object.bake_keyframe_by_interval"
+    bl_label = "Bake Keyframes"
+    bl_description = "Bake keyframes on interval frames for selected bones only"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.scene is not None
+
+    def execute(self, context):
+        props = context.scene.del_keyframe_props
+
+        if props.start_frame >= props.end_frame:
+            self.report({'WARNING'}, "Start frame must be less than end frame")
+            return {'CANCELLED'}
+
+        scene = context.scene
+        original_frame = scene.frame_current
+        original_active = context.view_layer.objects.active
+
+        objects = list(context.selected_objects)
+        if not objects:
+            self.report({'WARNING'}, "No objects selected")
+            return {'CANCELLED'}
+
+        all_frames = range(props.start_frame, props.end_frame)
+        key_frames = set(range(props.start_frame, props.end_frame, props.interval + 1)) if props.interval > 0 else set()
+
+        bake_frames = [
+            f for f in all_frames
+            if self._frame_should_be_baked(f, props.interval, key_frames, props.inverse_interval)
+        ]
+        if not bake_frames:
+            self.report({'INFO'}, "No frames to bake")
+            return {'CANCELLED'}
+
+        baked_objects = set()
+        baked_bones = set()
+        affected_keyframes = set()
+
+        for obj in objects:
+            if obj.type != 'ARMATURE' or not obj.animation_data or not obj.pose:
+                continue
+
+            original_mode = obj.mode if hasattr(obj, 'mode') else 'OBJECT'
+            armature_active = False
+            baked_this_obj = False
+
+            try:
+                context.view_layer.objects.active = obj
+                if obj.mode != 'POSE':
+                    bpy.ops.object.mode_set(mode='POSE')
+                    armature_active = True
+
+                for frame in bake_frames:
+                    scene.frame_set(frame)
+                    frame_baked = False
+
+                    # Bones only – no object keyframes
+                    pose_bones = get_selected_pose_bones_for_armature(context, obj)
+
+                    if not pose_bones:
+                        print(f"[Keyframe Tools] Bake: No selected pose bones on {obj.name}, bones bake skipped")
+                    else:
+                        for pbone in pose_bones:
+                            bone_frame_baked = False
+                            if props.pos:
                                 try:
-                                    result = pbone.keyframe_delete(data_path=cpath, frame=frame)
-                                    if result:
-                                        touched = True
-                                        touched_bones.add(pbone.name)
-                                        frame_keyframes.add(frame)
-                                except Exception:
+                                    pbone.keyframe_insert(data_path="location")
+                                    bone_frame_baked = True
+                                except:
+                                    pass
+                            if props.rot:
+                                try:
+                                    pbone.keyframe_insert(data_path="rotation_euler")
+                                    bone_frame_baked = True
+                                except:
+                                    pass
+                                try:
+                                    pbone.keyframe_insert(data_path="rotation_quaternion")
+                                    bone_frame_baked = True
+                                except:
+                                    pass
+                            if props.scl:
+                                try:
+                                    pbone.keyframe_insert(data_path="scale")
+                                    bone_frame_baked = True
+                                except:
+                                    pass
+
+                            if bone_frame_baked:
+                                baked_bones.add(f"{obj.name}:{pbone.name}")
+                                frame_baked = True
+
+                    if frame_baked:
+                        affected_keyframes.add(frame)
+                        baked_this_obj = True
+
+                if baked_this_obj:
+                    baked_objects.add(obj.name)
+
+            except Exception as e:
+                print(f"Bake failed on {obj.name}: {e}")
+            finally:
+                try:
+                    if armature_active and obj.mode != original_mode:
+                        bpy.ops.object.mode_set(mode=original_mode)
+                except:
+                    pass
+
+        scene.frame_set(original_frame)
+        context.view_layer.objects.active = original_active
+
+        if baked_objects:
+            self.report(
+                {'INFO'},
+                f"Baked {len(affected_keyframes)} keyframes on bones of {len(baked_objects)} armature(s)"
+            )
+            print("
+=== KEYFRAME BAKE REPORT ===")
+            print(f"Baked frames: {sorted(bake_frames)}")
+            print(f"Baked armatures: {sorted(baked_objects)}")
+            if baked_bones:
+                print(f"Baked bones: {sorted(list(baked_bones))}")
+        else:
+            self.report({'INFO'}, "No bones baked")
+
+        return {'FINISHED'}
+
+    def _frame_should_be_baked(self, frame, interval, key_frames, inverse):
+        if interval == 0:
+            return not inverse
+        if inverse:
+            return frame in key_frames
+        return frame not in key_frames
+
+
+class KeyframeIntervalPanel(Panel):
+    bl_label = "Keyframe Interval Tools"
+    bl_idname = "VIEW3D_PT_keyframe_interval_tools"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'Item'
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        props = context.scene.del_keyframe_props
+
+        layout.label(text="Frame Range")
+        row = layout.row(align=True)
+        row.prop(props, "start_frame", text="")
+        row.prop(props, "end_frame", text="")
+        row.operator("object.update_keyframe_preview", text="", icon="VIEWZOOM")
+
+        layout.label(text="Interval (0 = all)")
+        row = layout.row(align=True)
+        row.prop(props, "interval")
+        row.prop(props, "inverse_interval")
+
+        layout.label(text="Channels")
+        row = layout.row()
+        row.prop(props, "all_channels", toggle=True)
+
+        sub = layout.row(align=True)
+        sub.enabled = not props.all_channels
+        sub.prop(props, "pos")
+        sub.prop(props, "rot")
+        sub.prop(props, "scl")
+
+        layout.separator()
+        box = layout.box()
+        box.label(text="Live Preview:", icon="PREVIEW_RANGE")
+        box.label(text=f"Keyframes: {props.preview_keyframes}")
+        box.label(text=f"Total: {props.preview_count}")
+
+        layout.separator()
+        col = layout.column(align=True)
+        col.operator("object.delete_keyframe_by_interval", icon="KEY_HLT")
+        col.operator("object.bake_keyframe_by_interval", icon="REC")
+
+
+classes = (
+    DelKeyProperties,
+    LivePreviewUpdateOperator,
+    DeleteKeyframeOperator,
+    BakeKeyframeOperator,
+    KeyframeIntervalPanel,
+)
+
+
+def register():
+    for cls in classes:
+        bpy.utils.register_class(cls)
+    bpy.types.Scene.del_keyframe_props = bpy.props.PointerProperty(type=DelKeyProperties)
+
+
+def unregister():
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)
+    del bpy.types.Scene.del_keyframe_props
+
+
+if __name__ == "__main__":
+    register()                            except Exception:
                                     pass
 
             except Exception:
