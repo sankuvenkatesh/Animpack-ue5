@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Keyframe Tools Interval",
     "author": "Venkatesh Sanku",
-    "version": (2, 6, 5),
+    "version": (2, 6, 6),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Item",
     "description": "Delete or bake keyframes by interval with live preview & all checkbox",
@@ -50,23 +50,23 @@ class DelKeyProperties(PropertyGroup):
         update=lambda self, context: self._update_preview(context)
     )
     
-    # Live preview properties
     preview_keyframes: bpy.props.StringProperty(name="Preview Keyframes", default="")
     preview_count: bpy.props.IntProperty(name="Preview Count", default=0)
 
     def _all_channels_update(self, context):
-        """Update individual checkboxes when All Channels toggles"""
         self.pos = self.all_channels
         self.rot = self.all_channels
         self.scl = self.all_channels
+        self._update_preview(context)
 
     def _update_preview(self, context):
-        """Auto-update live preview on property changes"""
-        bpy.app.timers.register(lambda: update_live_preview(context.scene, self), first_interval=0.1)
+        bpy.app.timers.register(
+            lambda: update_live_preview(context.scene, self),
+            first_interval=0.05
+        )
 
 
 def update_live_preview(scene, props):
-    """Live preview of affected frames/keyframes"""
     if props.start_frame >= props.end_frame:
         props.preview_keyframes = "Invalid range"
         props.preview_count = 0
@@ -75,12 +75,12 @@ def update_live_preview(scene, props):
     start = props.start_frame
     end = props.end_frame
     interval = props.interval
-    
+
     all_frames = range(start, end)
     key_frames = set(range(start, end, interval + 1)) if interval > 0 else set()
-    
+
     preview_keyframes = set()
-    
+
     for frame in all_frames:
         should_process = (
             (interval == 0 and not props.inverse_interval) or
@@ -89,8 +89,10 @@ def update_live_preview(scene, props):
         )
         if should_process:
             preview_keyframes.add(frame)
-    
-    props.preview_keyframes = ', '.join(map(str, sorted(preview_keyframes)[:15])) + ('...' if len(preview_keyframes) > 15 else '')
+
+    props.preview_keyframes = ', '.join(
+        map(str, sorted(preview_keyframes)[:15])
+    ) + ('...' if len(preview_keyframes) > 15 else '')
     props.preview_count = len(preview_keyframes)
 
 
@@ -98,7 +100,7 @@ class LivePreviewUpdateOperator(Operator):
     bl_idname = "object.update_keyframe_preview"
     bl_label = "Update Preview"
     bl_description = "Update live preview of affected keyframes"
-    
+
     def execute(self, context):
         props = context.scene.del_keyframe_props
         update_live_preview(context.scene, props)
@@ -123,9 +125,12 @@ class DeleteKeyframeOperator(Operator):
             return {'CANCELLED'}
 
         paths = []
-        if props.pos: paths.append("location")
-        if props.rot: paths.extend(["rotation_euler", "rotation_quaternion"])
-        if props.scl: paths.append("scale")
+        if props.pos:
+            paths.append("location")
+        if props.rot:
+            paths.extend(["rotation_euler", "rotation_quaternion"])
+        if props.scl:
+            paths.append("scale")
 
         if not paths:
             self.report({'WARNING'}, "No channels selected")
@@ -167,14 +172,13 @@ class DeleteKeyframeOperator(Operator):
         bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
 
         if deleted_frames:
-            frames_sorted = sorted(deleted_frames)
             self.report(
                 {'INFO'},
                 f"Deleted {len(affected_keyframes)} keyframes on {len(affected_objects)} object(s)"
             )
             print("
 === KEYFRAME DELETION REPORT ===")
-            print(f"Deleted frames: {frames_sorted}")
+            print(f"Deleted frames: {sorted(deleted_frames)}")
             print(f"Affected objects: {sorted(affected_objects)}")
             if affected_bones:
                 print(f"Affected bones: {sorted(affected_bones)}")
@@ -205,23 +209,24 @@ class DeleteKeyframeOperator(Operator):
             except Exception:
                 pass
 
-        # Pose bones - SELECTED BONES ONLY
+        # Pose bones – STRICTLY selected bones only
         if obj.type == 'ARMATURE' and obj.animation_data and obj.pose:
             original_mode = obj.mode
             armature_active = False
-            
+
             try:
                 if original_mode != 'POSE':
                     context.view_layer.objects.active = obj
                     bpy.ops.object.mode_set(mode='POSE')
                     armature_active = True
-                
-                # SELECTED POSE BONES ONLY - NO FALLBACK
-                pose_bones = [pb for pb in context.selected_pose_bones if pb.id_data == obj]
-                
-                # REQUIRE selected bones - warn if none
+
+                pose_bones = [
+                    pb for pb in (context.selected_pose_bones or [])
+                    if pb.id_data == obj
+                ]
+
                 if not pose_bones:
-                    print(f"No pose bones selected for armature {obj.name}")
+                    print(f"[Keyframe Tools] No selected pose bones on {obj.name}, bones delete skipped")
                 else:
                     for pbone in pose_bones:
                         bone_keyframes = self._delete_on_bone(pbone, frame, paths)
@@ -229,7 +234,7 @@ class DeleteKeyframeOperator(Operator):
                             touched = True
                             touched_bones.add(pbone.name)
                             frame_keyframes.update(bone_keyframes)
-                        
+
             except Exception:
                 pass
             finally:
@@ -298,27 +303,27 @@ class BakeKeyframeOperator(Operator):
             if not obj.animation_data:
                 continue
 
-            original_mode = obj.mode
+            original_mode = obj.mode if hasattr(obj, 'mode') else 'OBJECT'
             armature_active = False
             baked_this_obj = False
 
             try:
-                # Set active object
                 context.view_layer.objects.active = obj
 
-                # Enter POSE mode for armatures
                 if obj.type == 'ARMATURE':
                     if obj.mode != 'POSE':
                         bpy.ops.object.mode_set(mode='POSE')
                         armature_active = True
+                else:
+                    if obj.mode != 'OBJECT':
+                        bpy.ops.object.mode_set(mode='OBJECT')
 
-                # Bake on each frame
                 for frame in bake_frames:
                     scene.frame_set(frame)
-                    
+
                     frame_baked = False
-                    
-                    # OBJECT keyframes
+
+                    # Object transforms
                     if props.pos:
                         try:
                             obj.keyframe_insert(data_path="location")
@@ -343,14 +348,15 @@ class BakeKeyframeOperator(Operator):
                         except:
                             pass
 
-                    # BONE keyframes - SELECTED BONES ONLY
+                    # Pose bones – STRICTLY selected bones only
                     if obj.type == 'ARMATURE' and obj.pose:
-                        # SELECTED POSE BONES ONLY - NO FALLBACK
-                        pose_bones = [pb for pb in context.selected_pose_bones if pb.id_data == obj]
-                        
-                        # REQUIRE selected bones
+                        pose_bones = [
+                            pb for pb in (context.selected_pose_bones or [])
+                            if pb.id_data == obj
+                        ]
+
                         if not pose_bones:
-                            print(f"No pose bones selected for armature {obj.name}")
+                            print(f"[Keyframe Tools] No selected pose bones on {obj.name}, bones bake skipped")
                         else:
                             for pbone in pose_bones:
                                 bone_frame_baked = False
@@ -377,9 +383,10 @@ class BakeKeyframeOperator(Operator):
                                         bone_frame_baked = True
                                     except:
                                         pass
-                                
+
                                 if bone_frame_baked:
                                     baked_bones.add(f"{obj.name}:{pbone.name}")
+                                    frame_baked = True
 
                     if frame_baked:
                         affected_keyframes.add(frame)
@@ -391,9 +398,8 @@ class BakeKeyframeOperator(Operator):
             except Exception as e:
                 print(f"Bake failed on {obj.name}: {e}")
             finally:
-                # Restore mode safely
                 try:
-                    if armature_active and obj.mode != original_mode:
+                    if obj.type == 'ARMATURE' and armature_active and obj.mode != original_mode:
                         bpy.ops.object.mode_set(mode=original_mode)
                 except:
                     pass
@@ -402,14 +408,13 @@ class BakeKeyframeOperator(Operator):
         context.view_layer.objects.active = original_active
 
         if baked_objects:
-            frames_sorted = sorted(bake_frames)
             self.report(
                 {'INFO'},
                 f"Baked {len(affected_keyframes)} keyframes on {len(baked_objects)} objects"
             )
             print("
 === KEYFRAME BAKE REPORT ===")
-            print(f"Baked frames: {frames_sorted}")
+            print(f"Baked frames: {sorted(bake_frames)}")
             print(f"Baked objects: {sorted(baked_objects)}")
             if baked_bones:
                 print(f"Baked bones: {sorted(list(baked_bones))}")
@@ -445,14 +450,14 @@ class KeyframeIntervalPanel(Panel):
         row.operator("object.update_keyframe_preview", text="", icon="VIEWZOOM")
 
         layout.label(text="Interval (0 = all)")
-        row = layout.row()
+        row = layout.row(align=True)
         row.prop(props, "interval")
         row.prop(props, "inverse_interval")
 
         layout.label(text="Channels")
         row = layout.row()
         row.prop(props, "all_channels", toggle=True)
-        
+
         sub = layout.row(align=True)
         sub.enabled = not props.all_channels
         sub.prop(props, "pos")
@@ -460,10 +465,10 @@ class KeyframeIntervalPanel(Panel):
         sub.prop(props, "scl")
 
         layout.separator()
-        preview_box = layout.box()
-        preview_box.label(text="Live Preview:", icon="PREVIEW_RANGE")
-        preview_box.label(text=f"Keyframes: {props.preview_keyframes}")
-        preview_box.label(text=f"Total: {props.preview_count}")
+        box = layout.box()
+        box.label(text="Live Preview:", icon="PREVIEW_RANGE")
+        box.label(text=f"Keyframes: {props.preview_keyframes}")
+        box.label(text=f"Total: {props.preview_count}")
 
         layout.separator()
         col = layout.column(align=True)
