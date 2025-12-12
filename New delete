@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Keyframe Tools Interval",
     "author": "Venkatesh Sanku",
-    "version": (2, 6, 9),
+    "version": (2, 7, 0),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Item",
     "description": "Delete or bake keyframes by interval with live preview & all checkbox",
@@ -35,6 +35,12 @@ class DelKeyProperties(PropertyGroup):
     )
     scl: bpy.props.BoolProperty(
         name="Scale", default=True,
+        update=lambda self, context: self._update_preview(context)
+    )
+    custom: bpy.props.BoolProperty(
+        name="Custom Props",
+        description="Affect custom properties on objects / bones",
+        default=False,
         update=lambda self, context: self._update_preview(context)
     )
     all_channels: bpy.props.BoolProperty(
@@ -107,13 +113,20 @@ class LivePreviewUpdateOperator(Operator):
 
 
 def get_selected_pose_bones_for_armature(context, obj):
-    """Return only pose bones selected on this armature (no fallback)."""
     if obj.type != 'ARMATURE' or not obj.pose:
         return []
     sel = getattr(context, "selected_pose_bones", None)
     if not sel:
         return []
     return [pb for pb in sel if pb.id_data == obj]
+
+
+def _iter_custom_prop_paths(id_block):
+    # Iterate custom property names and yield data_path strings
+    for k in id_block.keys():
+        if k.startswith("_"):
+            continue
+        yield f'["{k}"]'
 
 
 class DeleteKeyframeOperator(Operator):
@@ -141,7 +154,7 @@ class DeleteKeyframeOperator(Operator):
         if props.scl:
             paths.append("scale")
 
-        if not paths:
+        if not (paths or props.custom):
             self.report({'WARNING'}, "No channels selected")
             return {'CANCELLED'}
 
@@ -166,7 +179,7 @@ class DeleteKeyframeOperator(Operator):
 
             for obj in objects:
                 touched_obj, bones, frame_keyframes = self._delete_on_object(
-                    context, obj, frame, paths
+                    context, obj, frame, paths, props.custom
                 )
                 if touched_obj:
                     touched_any = True
@@ -203,7 +216,7 @@ class DeleteKeyframeOperator(Operator):
             return frame in key_frames
         return frame not in key_frames
 
-    def _delete_on_object(self, context, obj, frame, paths):
+    def _delete_on_object(self, context, obj, frame, paths, custom_flag):
         touched = False
         touched_bones = set()
         frame_keyframes = set()
@@ -217,6 +230,17 @@ class DeleteKeyframeOperator(Operator):
                     frame_keyframes.add(frame)
             except Exception:
                 pass
+
+        # Object custom props
+        if custom_flag:
+            for cpath in _iter_custom_prop_paths(obj):
+                try:
+                    result = obj.keyframe_delete(data_path=cpath, frame=frame)
+                    if result:
+                        touched = True
+                        frame_keyframes.add(frame)
+                except Exception:
+                    pass
 
         # Pose bones – strictly selected bones only
         if obj.type == 'ARMATURE' and obj.animation_data and obj.pose:
@@ -235,11 +259,27 @@ class DeleteKeyframeOperator(Operator):
                     print(f"[Keyframe Tools] Delete: No selected pose bones on {obj.name}, bones skipped")
                 else:
                     for pbone in pose_bones:
-                        bone_keyframes = self._delete_on_bone(pbone, frame, paths)
-                        if bone_keyframes:
-                            touched = True
-                            touched_bones.add(pbone.name)
-                            frame_keyframes.update(bone_keyframes)
+                        # bone transforms
+                        for path in paths:
+                            try:
+                                result = pbone.keyframe_delete(data_path=path, frame=frame)
+                                if result:
+                                    touched = True
+                                    touched_bones.add(pbone.name)
+                                    frame_keyframes.add(frame)
+                            except Exception:
+                                pass
+                        # bone custom props
+                        if custom_flag:
+                            for cpath in _iter_custom_prop_paths(pbone):
+                                try:
+                                    result = pbone.keyframe_delete(data_path=cpath, frame=frame)
+                                    if result:
+                                        touched = True
+                                        touched_bones.add(pbone.name)
+                                        frame_keyframes.add(frame)
+                                except Exception:
+                                    pass
 
             except Exception:
                 pass
@@ -251,17 +291,6 @@ class DeleteKeyframeOperator(Operator):
                         pass
 
         return touched, touched_bones, frame_keyframes
-
-    def _delete_on_bone(self, pbone, frame, paths):
-        touched_keyframes = set()
-        for path in paths:
-            try:
-                result = pbone.keyframe_delete(data_path=path, frame=frame)
-                if result:
-                    touched_keyframes.add(frame)
-            except Exception:
-                pass
-        return touched_keyframes
 
 
 class BakeKeyframeOperator(Operator):
@@ -323,7 +352,6 @@ class BakeKeyframeOperator(Operator):
                     scene.frame_set(frame)
                     frame_baked = False
 
-                    # Bones only – no object keyframes
                     pose_bones = get_selected_pose_bones_for_armature(context, obj)
 
                     if not pose_bones:
@@ -354,10 +382,29 @@ class BakeKeyframeOperator(Operator):
                                     bone_frame_baked = True
                                 except:
                                     pass
+                            if props.custom:
+                                for cpath in _iter_custom_prop_paths(pbone):
+                                    try:
+                                        pbone.keyframe_insert(data_path=cpath)
+                                        bone_frame_baked = True
+                                    except:
+                                        pass
 
                             if bone_frame_baked:
                                 baked_bones.add(f"{obj.name}:{pbone.name}")
                                 frame_baked = True
+
+                    # Object custom props (no object transforms)
+                    if props.custom:
+                        obj_frame_baked = False
+                        for cpath in _iter_custom_prop_paths(obj):
+                            try:
+                                obj.keyframe_insert(data_path=cpath)
+                                obj_frame_baked = True
+                            except:
+                                pass
+                        if obj_frame_baked:
+                            frame_baked = True
 
                     if frame_baked:
                         affected_keyframes.add(frame)
@@ -381,7 +428,7 @@ class BakeKeyframeOperator(Operator):
         if baked_objects:
             self.report(
                 {'INFO'},
-                f"Baked {len(affected_keyframes)} keyframes on bones of {len(baked_objects)} armature(s)"
+                f"Baked {len(affected_keyframes)} keyframes on bones/props of {len(baked_objects)} armature(s)"
             )
             print("
 === KEYFRAME BAKE REPORT ===")
@@ -390,7 +437,7 @@ class BakeKeyframeOperator(Operator):
             if baked_bones:
                 print(f"Baked bones: {sorted(list(baked_bones))}")
         else:
-            self.report({'INFO'}, "No bones baked")
+            self.report({'INFO'}, "No bones/custom props baked")
 
         return {'FINISHED'}
 
@@ -434,6 +481,7 @@ class KeyframeIntervalPanel(Panel):
         sub.prop(props, "pos")
         sub.prop(props, "rot")
         sub.prop(props, "scl")
+        sub.prop(props, "custom")
 
         layout.separator()
         box = layout.box()
