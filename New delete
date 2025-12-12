@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Keyframe Tools Interval",
     "author": "Venkatesh Sanku",
-    "version": (2, 6, 0),
+    "version": (2, 6, 1),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Item",
     "description": "Delete or bake keyframes by interval with live preview & all checkbox",
@@ -203,6 +203,7 @@ class DeleteKeyframeOperator(Operator):
         touched_bones = set()
         frame_keyframes = set()
 
+        # Object transforms
         for path in paths:
             try:
                 result = obj.keyframe_delete(data_path=path, frame=frame)
@@ -212,18 +213,28 @@ class DeleteKeyframeOperator(Operator):
             except Exception:
                 pass
 
-        if obj.type == 'ARMATURE' and obj.animation_data and obj.mode == 'POSE':
-            if selected_only_flag and context.selected_pose_bones:
-                pose_bones = list(context.selected_pose_bones)
-            else:
-                pose_bones = list(obj.pose.bones)
+        # Pose bones
+        if obj.type == 'ARMATURE' and obj.animation_data:
+            armature = obj
+            if armature.mode != 'POSE':
+                try:
+                    bpy.context.view_layer.objects.active = armature
+                    bpy.ops.object.mode_set(mode='POSE')
+                except:
+                    pass
 
-            for pbone in pose_bones:
-                bone_keyframes = self._delete_on_bone(pbone, frame, paths)
-                if bone_keyframes:
-                    touched = True
-                    touched_bones.add(pbone.name)
-                    frame_keyframes.update(bone_keyframes)
+            if armature.mode == 'POSE':
+                if selected_only_flag and context.selected_pose_bones:
+                    pose_bones = list(context.selected_pose_bones)
+                else:
+                    pose_bones = list(armature.pose.bones)
+
+                for pbone in pose_bones:
+                    bone_keyframes = self._delete_on_bone(pbone, frame, paths)
+                    if bone_keyframes:
+                        touched = True
+                        touched_bones.add(pbone.name)
+                        frame_keyframes.update(bone_keyframes)
 
         return touched, touched_bones, frame_keyframes
 
@@ -258,6 +269,7 @@ class BakeKeyframeOperator(Operator):
 
         scene = context.scene
         original_frame = scene.frame_current
+        original_active = context.view_layer.objects.active
 
         if props.selected_only:
             objects = list(context.selected_objects)
@@ -290,63 +302,101 @@ class BakeKeyframeOperator(Operator):
             prev_active = context.view_layer.objects.active
 
             try:
+                # Select and activate object
                 bpy.ops.object.select_all(action='DESELECT')
                 obj.select_set(True)
                 context.view_layer.objects.active = obj
 
-                if obj.type == 'ARMATURE' and obj.mode != 'POSE':
-                    bpy.ops.object.mode_set(mode='POSE')
-                elif obj.type != 'ARMATURE' and context.object.mode != 'OBJECT':
-                    bpy.ops.object.mode_set(mode='OBJECT')
+                # Ensure correct mode for armatures
+                if obj.type == 'ARMATURE':
+                    if obj.mode != 'POSE':
+                        bpy.ops.object.mode_set(mode='POSE')
+                else:
+                    if context.object.mode != 'OBJECT':
+                        bpy.ops.object.mode_set(mode='OBJECT')
 
-                # PERFECT BAKING - Direct keyframe_insert for ALL channels
+                # Bake keyframes - OBJECTS + BONES
+                baked_this_obj = False
                 for frame in bake_frames:
                     scene.frame_set(frame)
                     
-                    # Insert EXACT channels selected
+                    # Object transforms
                     if props.pos:
                         try:
                             obj.keyframe_insert(data_path="location")
+                            baked_this_obj = True
                         except:
                             pass
                     if props.rot:
                         try:
                             obj.keyframe_insert(data_path="rotation_euler")
+                            baked_this_obj = True
                         except:
                             pass
                         try:
                             obj.keyframe_insert(data_path="rotation_quaternion")
+                            baked_this_obj = True
                         except:
                             pass
                     if props.scl:
                         try:
                             obj.keyframe_insert(data_path="scale")
+                            baked_this_obj = True
                         except:
                             pass
 
+                    # POSE BONES - Critical fix!
+                    if obj.type == 'ARMATURE' and obj.mode == 'POSE' and obj.pose:
+                        pose_bones = context.selected_pose_bones if props.selected_only else obj.pose.bones
+                        bone_baked = False
+                        
+                        for pbone in pose_bones:
+                            if props.pos:
+                                try:
+                                    pbone.keyframe_insert(data_path="location")
+                                    bone_baked = True
+                                except:
+                                    pass
+                            if props.rot:
+                                try:
+                                    pbone.keyframe_insert(data_path="rotation_euler")
+                                    bone_baked = True
+                                except:
+                                    pass
+                                try:
+                                    pbone.keyframe_insert(data_path="rotation_quaternion")
+                                    bone_baked = True
+                                except:
+                                    pass
+                            if props.scl:
+                                try:
+                                    pbone.keyframe_insert(data_path="scale")
+                                    bone_baked = True
+                                except:
+                                    pass
+                        
+                        if bone_baked:
+                            baked_this_obj = True
+                            baked_bones.add(f"{obj.name}:bones")
+
                     affected_keyframes.add(frame)
 
-                baked_objects.add(obj.name)
-
-                # Track bones
-                if obj.type == 'ARMATURE':
-                    if props.selected_only and hasattr(context, "selected_pose_bones") and context.selected_pose_bones:
-                        for pbone in context.selected_pose_bones:
-                            baked_bones.add(f"{obj.name}:{pbone.name}")
-                    elif hasattr(obj.pose, "bones"):
-                        for pbone in obj.pose.bones:
-                            baked_bones.add(f"{obj.name}:{pbone.name}")
+                if baked_this_obj:
+                    baked_objects.add(obj.name)
 
             except Exception as e:
                 print(f"Bake failed on {obj.name}: {e}")
                 continue
             finally:
+                # Restore selection and active
                 bpy.ops.object.select_all(action='DESELECT')
                 for o in prev_selection:
                     o.select_set(True)
                 context.view_layer.objects.active = prev_active
 
         scene.frame_set(original_frame)
+        if original_active:
+            context.view_layer.objects.active = original_active
 
         if baked_objects:
             frames_sorted = sorted(bake_frames)
