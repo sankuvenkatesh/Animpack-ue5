@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Keyframe Tools Interval",
     "author": "Venkatesh Sanku",
-    "version": (2, 6, 4),
+    "version": (2, 6, 5),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Item",
     "description": "Delete or bake keyframes by interval with live preview & all checkbox",
@@ -205,7 +205,7 @@ class DeleteKeyframeOperator(Operator):
             except Exception:
                 pass
 
-        # Pose bones
+        # Pose bones - SELECTED BONES ONLY
         if obj.type == 'ARMATURE' and obj.animation_data and obj.pose:
             original_mode = obj.mode
             armature_active = False
@@ -216,17 +216,19 @@ class DeleteKeyframeOperator(Operator):
                     bpy.ops.object.mode_set(mode='POSE')
                     armature_active = True
                 
-                # Selected pose bones OR all bones
+                # SELECTED POSE BONES ONLY - NO FALLBACK
                 pose_bones = [pb for pb in context.selected_pose_bones if pb.id_data == obj]
+                
+                # REQUIRE selected bones - warn if none
                 if not pose_bones:
-                    pose_bones = obj.pose.bones
-
-                for pbone in pose_bones:
-                    bone_keyframes = self._delete_on_bone(pbone, frame, paths)
-                    if bone_keyframes:
-                        touched = True
-                        touched_bones.add(pbone.name)
-                        frame_keyframes.update(bone_keyframes)
+                    print(f"No pose bones selected for armature {obj.name}")
+                else:
+                    for pbone in pose_bones:
+                        bone_keyframes = self._delete_on_bone(pbone, frame, paths)
+                        if bone_keyframes:
+                            touched = True
+                            touched_bones.add(pbone.name)
+                            frame_keyframes.update(bone_keyframes)
                         
             except Exception:
                 pass
@@ -341,43 +343,43 @@ class BakeKeyframeOperator(Operator):
                         except:
                             pass
 
-                    # BONE keyframes - SIMPLIFIED & BULLETPROOF
+                    # BONE keyframes - SELECTED BONES ONLY
                     if obj.type == 'ARMATURE' and obj.pose:
-                        # Get bones: selected first, then all
-                        pose_bones = []
-                        if context.selected_pose_bones:
-                            pose_bones = [pb for pb in context.selected_pose_bones if pb.id_data == obj]
+                        # SELECTED POSE BONES ONLY - NO FALLBACK
+                        pose_bones = [pb for pb in context.selected_pose_bones if pb.id_data == obj]
+                        
+                        # REQUIRE selected bones
                         if not pose_bones:
-                            pose_bones = list(obj.pose.bones)
-
-                        for pbone in pose_bones:
-                            bone_frame_baked = False
-                            if props.pos:
-                                try:
-                                    pbone.keyframe_insert(data_path="location")
-                                    bone_frame_baked = True
-                                except:
-                                    pass
-                            if props.rot:
-                                try:
-                                    pbone.keyframe_insert(data_path="rotation_euler")
-                                    bone_frame_baked = True
-                                except:
-                                    pass
-                                try:
-                                    pbone.keyframe_insert(data_path="rotation_quaternion")
-                                    bone_frame_baked = True
-                                except:
-                                    pass
-                            if props.scl:
-                                try:
-                                    pbone.keyframe_insert(data_path="scale")
-                                    bone_frame_baked = True
-                                except:
-                                    pass
-                            
-                            if bone_frame_baked:
-                                baked_bones.add(f"{obj.name}:{pbone.name}")
+                            print(f"No pose bones selected for armature {obj.name}")
+                        else:
+                            for pbone in pose_bones:
+                                bone_frame_baked = False
+                                if props.pos:
+                                    try:
+                                        pbone.keyframe_insert(data_path="location")
+                                        bone_frame_baked = True
+                                    except:
+                                        pass
+                                if props.rot:
+                                    try:
+                                        pbone.keyframe_insert(data_path="rotation_euler")
+                                        bone_frame_baked = True
+                                    except:
+                                        pass
+                                    try:
+                                        pbone.keyframe_insert(data_path="rotation_quaternion")
+                                        bone_frame_baked = True
+                                    except:
+                                        pass
+                                if props.scl:
+                                    try:
+                                        pbone.keyframe_insert(data_path="scale")
+                                        bone_frame_baked = True
+                                    except:
+                                        pass
+                                
+                                if bone_frame_baked:
+                                    baked_bones.add(f"{obj.name}:{pbone.name}")
 
                     if frame_baked:
                         affected_keyframes.add(frame)
