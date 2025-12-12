@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Keyframe Tools Interval",
     "author": "Venkatesh Sanku",
-    "version": (2, 6, 6),
+    "version": (2, 6, 7),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Item",
     "description": "Delete or bake keyframes by interval with live preview & all checkbox",
@@ -49,7 +49,6 @@ class DelKeyProperties(PropertyGroup):
         default=False,
         update=lambda self, context: self._update_preview(context)
     )
-    
     preview_keyframes: bpy.props.StringProperty(name="Preview Keyframes", default="")
     preview_count: bpy.props.IntProperty(name="Preview Count", default=0)
 
@@ -107,6 +106,23 @@ class LivePreviewUpdateOperator(Operator):
         return {'FINISHED'}
 
 
+def get_selected_pose_bones_for_object(context, obj):
+    """Return only pose bones selected on this specific armature (active object)."""
+    if obj.type != 'ARMATURE' or not obj.pose:
+        return []
+
+    # Blender provides a helper: selected_pose_bones_from_active_object
+    bones = getattr(context, "selected_pose_bones_from_active_object", None)
+    if bones is None:
+        return []
+
+    # Only if this armature is active
+    if context.object is not obj:
+        return []
+
+    return list(bones)
+
+
 class DeleteKeyframeOperator(Operator):
     bl_idname = "object.delete_keyframe_by_interval"
     bl_label = "Delete Keyframes"
@@ -157,7 +173,7 @@ class DeleteKeyframeOperator(Operator):
 
             for obj in objects:
                 touched_obj, bones, frame_keyframes = self._delete_on_object(
-                    obj, frame, paths, context
+                    context, obj, frame, paths
                 )
                 if touched_obj:
                     touched_any = True
@@ -194,7 +210,7 @@ class DeleteKeyframeOperator(Operator):
             return frame in key_frames
         return frame not in key_frames
 
-    def _delete_on_object(self, obj, frame, paths, context):
+    def _delete_on_object(self, context, obj, frame, paths):
         touched = False
         touched_bones = set()
         frame_keyframes = set()
@@ -209,7 +225,7 @@ class DeleteKeyframeOperator(Operator):
             except Exception:
                 pass
 
-        # Pose bones – STRICTLY selected bones only
+        # Pose bones – strictly selected bones on active armature
         if obj.type == 'ARMATURE' and obj.animation_data and obj.pose:
             original_mode = obj.mode
             armature_active = False
@@ -220,10 +236,7 @@ class DeleteKeyframeOperator(Operator):
                     bpy.ops.object.mode_set(mode='POSE')
                     armature_active = True
 
-                pose_bones = [
-                    pb for pb in (context.selected_pose_bones or [])
-                    if pb.id_data == obj
-                ]
+                pose_bones = get_selected_pose_bones_for_object(context, obj)
 
                 if not pose_bones:
                     print(f"[Keyframe Tools] No selected pose bones on {obj.name}, bones delete skipped")
@@ -320,7 +333,6 @@ class BakeKeyframeOperator(Operator):
 
                 for frame in bake_frames:
                     scene.frame_set(frame)
-
                     frame_baked = False
 
                     # Object transforms
@@ -348,12 +360,9 @@ class BakeKeyframeOperator(Operator):
                         except:
                             pass
 
-                    # Pose bones – STRICTLY selected bones only
+                    # Pose bones – strictly selected bones on active armature
                     if obj.type == 'ARMATURE' and obj.pose:
-                        pose_bones = [
-                            pb for pb in (context.selected_pose_bones or [])
-                            if pb.id_data == obj
-                        ]
+                        pose_bones = get_selected_pose_bones_for_object(context, obj)
 
                         if not pose_bones:
                             print(f"[Keyframe Tools] No selected pose bones on {obj.name}, bones bake skipped")
