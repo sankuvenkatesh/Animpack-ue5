@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Keyframe Tools Interval",
     "author": "Venkatesh Sanku",
-    "version": (2, 6, 1),
+    "version": (2, 6, 2),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Item",
     "description": "Delete or bake keyframes by interval with live preview & all checkbox",
@@ -213,21 +213,20 @@ class DeleteKeyframeOperator(Operator):
             except Exception:
                 pass
 
-        # Pose bones
-        if obj.type == 'ARMATURE' and obj.animation_data:
-            armature = obj
-            if armature.mode != 'POSE':
-                try:
-                    bpy.context.view_layer.objects.active = armature
+        # Pose bones - SAFE mode handling
+        if obj.type == 'ARMATURE' and obj.animation_data and obj.pose:
+            try:
+                # Store original mode
+                original_mode = obj.mode
+                if original_mode != 'POSE':
+                    context.view_layer.objects.active = obj
                     bpy.ops.object.mode_set(mode='POSE')
-                except:
-                    pass
-
-            if armature.mode == 'POSE':
+                
+                # Get pose bones
                 if selected_only_flag and context.selected_pose_bones:
-                    pose_bones = list(context.selected_pose_bones)
+                    pose_bones = [pb for pb in context.selected_pose_bones if pb.bone.id_data == obj.data]
                 else:
-                    pose_bones = list(armature.pose.bones)
+                    pose_bones = obj.pose.bones
 
                 for pbone in pose_bones:
                     bone_keyframes = self._delete_on_bone(pbone, frame, paths)
@@ -235,6 +234,12 @@ class DeleteKeyframeOperator(Operator):
                         touched = True
                         touched_bones.add(pbone.name)
                         frame_keyframes.update(bone_keyframes)
+                
+                # Restore mode
+                if original_mode != 'POSE':
+                    bpy.ops.object.mode_set(mode=original_mode)
+            except Exception:
+                pass
 
         return touched, touched_bones, frame_keyframes
 
@@ -269,7 +274,6 @@ class BakeKeyframeOperator(Operator):
 
         scene = context.scene
         original_frame = scene.frame_current
-        original_active = context.view_layer.objects.active
 
         if props.selected_only:
             objects = list(context.selected_objects)
@@ -298,105 +302,114 @@ class BakeKeyframeOperator(Operator):
             if not obj.animation_data:
                 continue
 
-            prev_selection = [o for o in context.selected_objects]
-            prev_active = context.view_layer.objects.active
+            original_mode = obj.mode if hasattr(obj, 'mode') else 'OBJECT'
+            original_active = context.view_layer.objects.active
+
+            baked_this_obj = False
 
             try:
-                # Select and activate object
-                bpy.ops.object.select_all(action='DESELECT')
-                obj.select_set(True)
+                # SAFE selection - only if needed
+                was_selected = obj.select_get()
                 context.view_layer.objects.active = obj
 
-                # Ensure correct mode for armatures
+                # Ensure correct mode
                 if obj.type == 'ARMATURE':
                     if obj.mode != 'POSE':
                         bpy.ops.object.mode_set(mode='POSE')
                 else:
-                    if context.object.mode != 'OBJECT':
+                    if obj.mode != 'OBJECT':
                         bpy.ops.object.mode_set(mode='OBJECT')
 
-                # Bake keyframes - OBJECTS + BONES
-                baked_this_obj = False
+                # Bake keyframes on frames
                 for frame in bake_frames:
                     scene.frame_set(frame)
                     
                     # Object transforms
+                    obj_baked = False
                     if props.pos:
                         try:
                             obj.keyframe_insert(data_path="location")
-                            baked_this_obj = True
+                            obj_baked = True
                         except:
                             pass
                     if props.rot:
                         try:
                             obj.keyframe_insert(data_path="rotation_euler")
-                            baked_this_obj = True
+                            obj_baked = True
                         except:
                             pass
                         try:
                             obj.keyframe_insert(data_path="rotation_quaternion")
-                            baked_this_obj = True
+                            obj_baked = True
                         except:
                             pass
                     if props.scl:
                         try:
                             obj.keyframe_insert(data_path="scale")
-                            baked_this_obj = True
+                            obj_baked = True
                         except:
                             pass
-
-                    # POSE BONES - Critical fix!
-                    if obj.type == 'ARMATURE' and obj.mode == 'POSE' and obj.pose:
-                        pose_bones = context.selected_pose_bones if props.selected_only else obj.pose.bones
+                    
+                    # BONES - SAFE keyframing
+                    if obj.type == 'ARMATURE' and obj.pose:
                         bone_baked = False
+                        if props.selected_only:
+                            pose_bones = [pb for pb in context.selected_pose_bones if pb.bone.id_data == obj.data]
+                        else:
+                            pose_bones = obj.pose.bones
                         
                         for pbone in pose_bones:
+                            bone_this_frame = False
                             if props.pos:
                                 try:
                                     pbone.keyframe_insert(data_path="location")
-                                    bone_baked = True
+                                    bone_this_frame = True
                                 except:
                                     pass
                             if props.rot:
                                 try:
                                     pbone.keyframe_insert(data_path="rotation_euler")
-                                    bone_baked = True
+                                    bone_this_frame = True
                                 except:
                                     pass
                                 try:
                                     pbone.keyframe_insert(data_path="rotation_quaternion")
-                                    bone_baked = True
+                                    bone_this_frame = True
                                 except:
                                     pass
                             if props.scl:
                                 try:
                                     pbone.keyframe_insert(data_path="scale")
-                                    bone_baked = True
+                                    bone_this_frame = True
                                 except:
                                     pass
+                            
+                            if bone_this_frame:
+                                bone_baked = True
+                                baked_bones.add(f"{obj.name}:{pbone.name}")
                         
                         if bone_baked:
                             baked_this_obj = True
-                            baked_bones.add(f"{obj.name}:bones")
 
-                    affected_keyframes.add(frame)
+                    if obj_baked or (obj.type == 'ARMATURE' and bone_baked):
+                        baked_this_obj = True
+                        affected_keyframes.add(frame)
 
                 if baked_this_obj:
                     baked_objects.add(obj.name)
 
             except Exception as e:
                 print(f"Bake failed on {obj.name}: {e}")
-                continue
             finally:
-                # Restore selection and active
-                bpy.ops.object.select_all(action='DESELECT')
-                for o in prev_selection:
-                    o.select_set(True)
-                context.view_layer.objects.active = prev_active
+                # SAFE mode restore
+                try:
+                    if obj.type == 'ARMATURE' and obj.mode != original_mode:
+                        bpy.ops.object.mode_set(mode=original_mode)
+                except:
+                    pass
+                context.view_layer.objects.active = original_active
 
         scene.frame_set(original_frame)
-        if original_active:
-            context.view_layer.objects.active = original_active
 
         if baked_objects:
             frames_sorted = sorted(bake_frames)
@@ -409,7 +422,7 @@ class BakeKeyframeOperator(Operator):
             print(f"Baked frames: {frames_sorted}")
             print(f"Baked objects: {sorted(baked_objects)}")
             if baked_bones:
-                print(f"Baked bones: {sorted(baked_bones)}")
+                print(f"Baked bones: {sorted(list(baked_bones))}")
         else:
             self.report({'INFO'}, "No objects baked")
 
