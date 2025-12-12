@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Keyframe Tools Interval",
     "author": "Venkatesh Sanku",
-    "version": (2, 6, 2),
+    "version": (2, 6, 3),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Item",
     "description": "Delete or bake keyframes by interval with live preview & all checkbox",
@@ -48,11 +48,6 @@ class DelKeyProperties(PropertyGroup):
         description="Invert interval behavior (delete/bake only kept frames)",
         default=False,
         update=lambda self, context: self._update_preview(context)
-    )
-    selected_only: bpy.props.BoolProperty(
-        name="Selected Only",
-        description="Affect only selected objects / selected pose bones",
-        default=True
     )
     
     # Live preview properties
@@ -136,13 +131,11 @@ class DeleteKeyframeOperator(Operator):
             self.report({'WARNING'}, "No channels selected")
             return {'CANCELLED'}
 
-        if props.selected_only:
-            objects = list(context.selected_objects)
-            if not objects:
-                self.report({'WARNING'}, "No objects selected")
-                return {'CANCELLED'}
-        else:
-            objects = [o for o in context.scene.objects]
+        # DEFAULT: Selected objects only
+        objects = list(context.selected_objects)
+        if not objects:
+            self.report({'WARNING'}, "No objects selected")
+            return {'CANCELLED'}
 
         all_frames = range(props.start_frame, props.end_frame)
         key_frames = set(range(props.start_frame, props.end_frame, props.interval + 1)) if props.interval > 0 else set()
@@ -160,7 +153,7 @@ class DeleteKeyframeOperator(Operator):
 
             for obj in objects:
                 touched_obj, bones, frame_keyframes = self._delete_on_object(
-                    obj, frame, paths, context, props.selected_only
+                    obj, frame, paths, context
                 )
                 if touched_obj:
                     touched_any = True
@@ -198,7 +191,7 @@ class DeleteKeyframeOperator(Operator):
             return frame in key_frames
         return frame not in key_frames
 
-    def _delete_on_object(self, obj, frame, paths, context, selected_only_flag):
+    def _delete_on_object(self, obj, frame, paths, context):
         touched = False
         touched_bones = set()
         frame_keyframes = set()
@@ -213,7 +206,7 @@ class DeleteKeyframeOperator(Operator):
             except Exception:
                 pass
 
-        # Pose bones - SAFE mode handling
+        # Pose bones - DEFAULT selected bones only
         if obj.type == 'ARMATURE' and obj.animation_data and obj.pose:
             try:
                 # Store original mode
@@ -222,12 +215,11 @@ class DeleteKeyframeOperator(Operator):
                     context.view_layer.objects.active = obj
                     bpy.ops.object.mode_set(mode='POSE')
                 
-                # Get pose bones
-                if selected_only_flag and context.selected_pose_bones:
-                    pose_bones = [pb for pb in context.selected_pose_bones if pb.bone.id_data == obj.data]
-                else:
-                    pose_bones = obj.pose.bones
-
+                # DEFAULT: Selected pose bones only
+                pose_bones = [pb for pb in context.selected_pose_bones if pb.bone.id_data == obj.data]
+                if not pose_bones:
+                    pose_bones = obj.pose.bones  # Fallback to all bones if none selected
+                
                 for pbone in pose_bones:
                     bone_keyframes = self._delete_on_bone(pbone, frame, paths)
                     if bone_keyframes:
@@ -275,13 +267,11 @@ class BakeKeyframeOperator(Operator):
         scene = context.scene
         original_frame = scene.frame_current
 
-        if props.selected_only:
-            objects = list(context.selected_objects)
-            if not objects:
-                self.report({'WARNING'}, "No objects selected")
-                return {'CANCELLED'}
-        else:
-            objects = [o for o in scene.objects if o.animation_data]
+        # DEFAULT: Selected objects only
+        objects = list(context.selected_objects)
+        if not objects:
+            self.report({'WARNING'}, "No objects selected")
+            return {'CANCELLED'}
 
         all_frames = range(props.start_frame, props.end_frame)
         key_frames = set(range(props.start_frame, props.end_frame, props.interval + 1)) if props.interval > 0 else set()
@@ -308,8 +298,6 @@ class BakeKeyframeOperator(Operator):
             baked_this_obj = False
 
             try:
-                # SAFE selection - only if needed
-                was_selected = obj.select_get()
                 context.view_layer.objects.active = obj
 
                 # Ensure correct mode
@@ -350,13 +338,13 @@ class BakeKeyframeOperator(Operator):
                         except:
                             pass
                     
-                    # BONES - SAFE keyframing
+                    # BONES - DEFAULT selected bones only
                     if obj.type == 'ARMATURE' and obj.pose:
                         bone_baked = False
-                        if props.selected_only:
-                            pose_bones = [pb for pb in context.selected_pose_bones if pb.bone.id_data == obj.data]
-                        else:
-                            pose_bones = obj.pose.bones
+                        # DEFAULT: Selected pose bones only
+                        pose_bones = [pb for pb in context.selected_pose_bones if pb.bone.id_data == obj.data]
+                        if not pose_bones:
+                            pose_bones = obj.pose.bones  # Fallback to all bones if none selected
                         
                         for pbone in pose_bones:
                             bone_this_frame = False
@@ -468,8 +456,6 @@ class KeyframeIntervalPanel(Panel):
         sub.prop(props, "pos")
         sub.prop(props, "rot")
         sub.prop(props, "scl")
-
-        layout.prop(props, "selected_only")
 
         layout.separator()
         preview_box = layout.box()
