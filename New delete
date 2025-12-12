@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Keyframe Tools Interval",
     "author": "Venkatesh Sanku",
-    "version": (2, 5, 8),
+    "version": (2, 5, 7),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Item",
     "description": "Delete or bake keyframes by interval with live preview & all checkbox",
@@ -51,12 +51,6 @@ class DelKeyProperties(PropertyGroup):
     # Live preview properties
     preview_keyframes: bpy.props.StringProperty(name="Preview Keyframes", default="")
     preview_count: bpy.props.IntProperty(name="Preview Count", default=0)
-
-    def _all_channels_update(self, context):
-        """Update individual checkboxes when 'All Channels' changes"""
-        self.pos = self.all_channels
-        self.rot = self.all_channels
-        self.scl = self.all_channels
 
 
 def update_live_preview(scene, props):
@@ -119,7 +113,6 @@ class DeleteKeyframeOperator(Operator):
         start = props.start_frame
         end = props.end_frame
 
-        # Build exact paths based on checkbox selection
         paths = []
         if props.pos:
             paths.append("location")
@@ -179,7 +172,6 @@ class DeleteKeyframeOperator(Operator):
             print("
 === KEYFRAME DELETION REPORT ===")
             print(f"Deleted frames: {frames_sorted}")
-            print(f"Channels: {', '.join(['Pos' if p=='location' else 'Rot' if 'rotation' in p else 'Scale' for p in paths])}")
             print(f"Affected objects: {sorted(affected_objects)}")
             if affected_bones:
                 print(f"Affected bones: {sorted(affected_bones)}")
@@ -200,7 +192,6 @@ class DeleteKeyframeOperator(Operator):
         touched_bones = set()
         frame_keyframes = set()
 
-        # Delete object keyframes for selected paths only
         for path in paths:
             try:
                 result = obj.keyframe_delete(data_path=path, frame=frame)
@@ -210,19 +201,19 @@ class DeleteKeyframeOperator(Operator):
             except Exception:
                 pass
 
-        # Handle armature pose bones
-        if obj.type == 'ARMATURE' and obj.animation_data and obj.mode == 'POSE':
-            if selected_only_flag and context.selected_pose_bones:
-                pose_bones = list(context.selected_pose_bones)
-            else:
-                pose_bones = list(obj.pose.bones)
+        if obj.type == 'ARMATURE' and obj.animation_data:
+            if obj.mode == 'POSE':
+                if selected_only_flag and context.selected_pose_bones:
+                    pose_bones = list(context.selected_pose_bones)
+                else:
+                    pose_bones = list(obj.pose.bones)
 
-            for pbone in pose_bones:
-                bone_keyframes = self._delete_on_bone(pbone, frame, paths)
-                if bone_keyframes:
-                    touched = True
-                    touched_bones.add(pbone.name)
-                    frame_keyframes.update(bone_keyframes)
+                for pbone in pose_bones:
+                    bone_keyframes = self._delete_on_bone(pbone, frame, paths)
+                    if bone_keyframes:
+                        touched = True
+                        touched_bones.add(pbone.name)
+                        frame_keyframes.update(bone_keyframes)
 
         return touched, touched_bones, frame_keyframes
 
@@ -257,6 +248,7 @@ class BakeKeyframeOperator(Operator):
 
         scene = context.scene
         original_frame = scene.frame_current
+        original_mode = context.object.mode if context.object else 'OBJECT'
 
         if props.selected_only:
             objects = list(context.selected_objects)
@@ -278,16 +270,13 @@ class BakeKeyframeOperator(Operator):
             return {'CANCELLED'}
 
         baked_objects = set()
+        baked_bones = set()
         affected_keyframes = set()
 
-        # Build exact paths based on checkbox selection
         paths = []
-        if props.pos:
-            paths.append("location")
-        if props.rot:
-            paths.extend(["rotation_euler", "rotation_quaternion"])
-        if props.scl:
-            paths.append("scale")
+        if props.pos: paths.append("location")
+        if props.rot: paths.extend(["rotation_euler", "rotation_quaternion"])
+        if props.scl: paths.append("scale")
 
         for obj in objects:
             if not obj.animation_data:
@@ -309,39 +298,27 @@ class BakeKeyframeOperator(Operator):
                 elif obj.type != 'ARMATURE' and context.object.mode != 'OBJECT':
                     bpy.ops.object.mode_set(mode='OBJECT')
 
-                # Bake specific channels only
+                # Bake keyframes on selected frames
                 for frame in bake_frames:
                     scene.frame_set(frame)
-                    
-                    # Insert keyframes for exactly selected channels
-                    if props.pos and props.rot and props.scl:
-                        # All channels selected
+                    # Insert keyframes based on channel selection
+                    if props.pos or props.rot or props.scl:
                         bpy.ops.anim.keyframe_insert(type='LocRotScale')
-                    elif props.pos and props.rot:
-                        # Only pos + rot
-                        bpy.ops.anim.keyframe_insert(type='LocRot')
-                    elif props.pos and props.scl:
-                        # Only pos + scale
-                        for path in ["location", "scale"]:
-                            obj.keyframe_insert(data_path=path)
-                    elif props.rot and props.scl:
-                        # Only rot + scale
-                        for path in ["rotation_euler", "scale"]:
-                            obj.keyframe_insert(data_path=path)
-                    elif props.pos:
-                        # Only position
-                        obj.keyframe_insert(data_path="location")
-                    elif props.rot:
-                        # Only rotation
-                        obj.keyframe_insert(data_path="rotation_euler")
-                        obj.keyframe_insert(data_path="rotation_quaternion")
-                    elif props.scl:
-                        # Only scale
-                        obj.keyframe_insert(data_path="scale")
-                    
+                    else:
+                        bpy.ops.anim.keyframe_insert(type='Location' if props.pos else 'Rotation' if props.rot else 'Scaling')
+
                     affected_keyframes.add(frame)
 
                 baked_objects.add(obj.name)
+
+                # Track bones for armatures
+                if obj.type == 'ARMATURE' and hasattr(obj.data, 'bones'):
+                    if props.selected_only and context.selected_pose_bones:
+                        for pbone in context.selected_pose_bones:
+                            baked_bones.add(f"{obj.name}:{pbone.name}")
+                    else:
+                        for pbone in obj.pose.bones:
+                            baked_bones.add(f"{obj.name}:{pbone.name}")
 
             except Exception as e:
                 print(f"Bake failed on {obj.name}: {e}")
@@ -350,13 +327,16 @@ class BakeKeyframeOperator(Operator):
                 # Restore selection
                 bpy.ops.object.select_all(action='DESELECT')
                 for o in prev_selection:
-                    if o.name in context.scene.objects:  # Ensure object still exists
-                        o.select_set(True)
-                if prev_active and prev_active.name in context.scene.objects:
-                    context.view_layer.objects.active = prev_active
+                    o.select_set(True)
+                context.view_layer.objects.active = prev_active
 
-        # Restore original frame
+        # Restore original frame and mode
         scene.frame_set(original_frame)
+        if original_mode != 'OBJECT' and context.object:
+            try:
+                bpy.ops.object.mode_set(mode=original_mode)
+            except:
+                pass
 
         if baked_objects:
             frames_sorted = sorted(bake_frames)
@@ -367,8 +347,9 @@ class BakeKeyframeOperator(Operator):
             print("
 === KEYFRAME BAKE REPORT ===")
             print(f"Baked frames: {frames_sorted}")
-            print(f"Channels: {', '.join(['Pos' if p=='location' else 'Rot' if 'rotation' in p else 'Scale' for p in paths])}")
             print(f"Baked objects: {sorted(baked_objects)}")
+            if baked_bones:
+                print(f"Baked bones: {sorted(baked_bones)}")
         else:
             self.report({'INFO'}, "No objects baked")
 
@@ -414,9 +395,9 @@ class KeyframeIntervalPanel(Panel):
         
         sub = layout.row(align=True)
         sub.enabled = not props.all_channels
-        sub.prop(props, "pos", toggle=True)
-        sub.prop(props, "rot", toggle=True)
-        sub.prop(props, "scl", toggle=True)
+        sub.prop(props, "pos")
+        sub.prop(props, "rot")
+        sub.prop(props, "scl")
 
         layout.prop(props, "selected_only")
 
