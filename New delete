@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Keyframe Tools Interval",
     "author": "Venkatesh Sanku",
-    "version": (2, 5, 8),
+    "version": (2, 5, 9),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Item",
     "description": "Delete or bake keyframes by interval with live preview & all checkbox",
@@ -279,15 +279,6 @@ class BakeKeyframeOperator(Operator):
         baked_bones = set()
         affected_keyframes = set()
 
-        # Build paths list from checkboxes
-        paths = []
-        if props.pos:
-            paths.append("location")
-        if props.rot:
-            paths.extend(["rotation_euler", "rotation_quaternion"])
-        if props.scl:
-            paths.append("scale")
-
         for obj in objects:
             if not obj.animation_data:
                 continue
@@ -308,37 +299,31 @@ class BakeKeyframeOperator(Operator):
                 elif obj.type != 'ARMATURE' and context.object.mode != 'OBJECT':
                     bpy.ops.object.mode_set(mode='OBJECT')
 
-                # Bake keyframes on selected frames - RESPECTS CHECKBOX SELECTIONS
+                # Bake keyframes on selected frames - PRECISE CHANNEL CONTROL
                 for frame in bake_frames:
                     scene.frame_set(frame)
                     
-                    # Insert keyframes based on EXACT channel selection
-                    if props.pos and props.rot and props.scl:
-                        # All three selected → LocRotScale
-                        bpy.ops.anim.keyframe_insert(type='LocRotScale')
-                    elif props.pos:
-                        # Only position → Location only
-                        bpy.ops.anim.keyframe_insert(type='Location')
-                    elif props.rot:
-                        # Only rotation → Rotation only  
-                        bpy.ops.anim.anim.keyframe_insert(type='Rotation')
-                    elif props.scl:
-                        # Only scale → Scaling only
-                        bpy.ops.anim.keyframe_insert(type='Scaling')
-                    else:
-                        # Fallback - should not happen due to UI validation
-                        continue
+                    # Insert keyframes using DIRECT data_path method (WORKS FOR ALL CHANNELS)
+                    if props.pos:
+                        obj.keyframe_insert(data_path="location")
+                    if props.rot:
+                        if hasattr(obj, "rotation_euler"):
+                            obj.keyframe_insert(data_path="rotation_euler")
+                        if hasattr(obj, "rotation_quaternion"):
+                            obj.keyframe_insert(data_path="rotation_quaternion")
+                    if props.scl:
+                        obj.keyframe_insert(data_path="scale")
 
                     affected_keyframes.add(frame)
 
                 baked_objects.add(obj.name)
 
                 # Track bones for armatures
-                if obj.type == 'ARMATURE' and hasattr(obj.data, 'bones'):
-                    if props.selected_only and context.selected_pose_bones:
+                if obj.type == 'ARMATURE':
+                    if props.selected_only and hasattr(context, "selected_pose_bones") and context.selected_pose_bones:
                         for pbone in context.selected_pose_bones:
                             baked_bones.add(f"{obj.name}:{pbone.name}")
-                    else:
+                    elif hasattr(obj.pose, "bones"):
                         for pbone in obj.pose.bones:
                             baked_bones.add(f"{obj.name}:{pbone.name}")
 
