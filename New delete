@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Keyframe Tools Interval",
     "author": "Venkatesh Sanku",
-    "version": (2, 5, 7),
+    "version": (2, 5, 8),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Item",
     "description": "Delete or bake keyframes by interval with live preview & all checkbox",
@@ -51,6 +51,12 @@ class DelKeyProperties(PropertyGroup):
     # Live preview properties
     preview_keyframes: bpy.props.StringProperty(name="Preview Keyframes", default="")
     preview_count: bpy.props.IntProperty(name="Preview Count", default=0)
+
+    def _all_channels_update(self, context):
+        """Update individual checkboxes when All Channels toggles"""
+        self.pos = self.all_channels
+        self.rot = self.all_channels
+        self.scl = self.all_channels
 
 
 def update_live_preview(scene, props):
@@ -273,10 +279,14 @@ class BakeKeyframeOperator(Operator):
         baked_bones = set()
         affected_keyframes = set()
 
+        # Build paths list from checkboxes
         paths = []
-        if props.pos: paths.append("location")
-        if props.rot: paths.extend(["rotation_euler", "rotation_quaternion"])
-        if props.scl: paths.append("scale")
+        if props.pos:
+            paths.append("location")
+        if props.rot:
+            paths.extend(["rotation_euler", "rotation_quaternion"])
+        if props.scl:
+            paths.append("scale")
 
         for obj in objects:
             if not obj.animation_data:
@@ -298,14 +308,26 @@ class BakeKeyframeOperator(Operator):
                 elif obj.type != 'ARMATURE' and context.object.mode != 'OBJECT':
                     bpy.ops.object.mode_set(mode='OBJECT')
 
-                # Bake keyframes on selected frames
+                # Bake keyframes on selected frames - RESPECTS CHECKBOX SELECTIONS
                 for frame in bake_frames:
                     scene.frame_set(frame)
-                    # Insert keyframes based on channel selection
-                    if props.pos or props.rot or props.scl:
+                    
+                    # Insert keyframes based on EXACT channel selection
+                    if props.pos and props.rot and props.scl:
+                        # All three selected → LocRotScale
                         bpy.ops.anim.keyframe_insert(type='LocRotScale')
+                    elif props.pos:
+                        # Only position → Location only
+                        bpy.ops.anim.keyframe_insert(type='Location')
+                    elif props.rot:
+                        # Only rotation → Rotation only  
+                        bpy.ops.anim.anim.keyframe_insert(type='Rotation')
+                    elif props.scl:
+                        # Only scale → Scaling only
+                        bpy.ops.anim.keyframe_insert(type='Scaling')
                     else:
-                        bpy.ops.anim.keyframe_insert(type='Location' if props.pos else 'Rotation' if props.rot else 'Scaling')
+                        # Fallback - should not happen due to UI validation
+                        continue
 
                     affected_keyframes.add(frame)
 
