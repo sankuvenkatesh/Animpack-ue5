@@ -1,24 +1,26 @@
-
 # -*- coding: utf-8 -*-
 
 bl_info = {
     "name": "Anim Tool Transfer",
     "author": "Venkatesh sanku",
-    "version": (1, 0, 1),
+    "version": (1, 1, 0),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Anim Tool Transfer",
     "description": (
-        "This addon allows you to adjust the root controller position based on each action "
-        "or set it in origin world space. Supports batch processing for multiple actions, "
-        "making it easier to calculate character positions in game engines."
+        "Adjust root controller per action or keep in world origin. "
+        "Supports batch processing for multiple actions to extract root motion."
     ),
-    "category": "Anim Tool Transfer",
-    "license": "SPDX:GPL-3.0-or-later"
+    "category": "Animation",
+    "license": "SPDX:GPL-3.0-or-later",
 }
 
 import bpy
 
-# --- properties.py portion ---
+
+# ---------------------------------------------------------
+# Properties
+# ---------------------------------------------------------
+
 
 class RMT_ControllerItem(bpy.types.PropertyGroup):
     name: bpy.props.StringProperty()
@@ -38,8 +40,9 @@ def get_torso_items(self, context):
 
 def register_properties():
     bpy.types.Scene.rmt_selected_rig = bpy.props.PointerProperty(
-        name="Rig", type=bpy.types.Object,
-        update=lambda self, ctx: ctx.area.tag_redraw() if ctx.area else None
+        name="Rig",
+        type=bpy.types.Object,
+        update=lambda self, ctx: ctx.area.tag_redraw() if ctx and ctx.area else None,
     )
 
     bpy.types.Scene.controllers = bpy.props.CollectionProperty(type=RMT_ControllerItem)
@@ -52,18 +55,18 @@ def register_properties():
     bpy.types.Scene.rmt_torso_controller_enum = bpy.props.EnumProperty(
         name="Torso Controller",
         description="Select Target from added controllers",
-        items=get_torso_items
+        items=get_torso_items,
     )
 
     bpy.types.Scene.rmt_root_controller_name = bpy.props.StringProperty(
         name="Root Controller",
-        description="Search for root controller bone"
+        description="Search for root controller bone",
     )
 
     bpy.types.Scene.keep_in_world_origin = bpy.props.BoolProperty(
         name="Keep in World Origin",
         description="Keep root controller at world origin",
-        default=False
+        default=False,
     )
 
     bpy.types.Scene.rmt_action_items = bpy.props.CollectionProperty(type=RMT_ActionItem)
@@ -84,7 +87,10 @@ def unregister_properties():
     del bpy.types.Scene.rmt_batch_actions
 
 
-# --- operators.py portion ---
+# ---------------------------------------------------------
+# Operators
+# ---------------------------------------------------------
+
 
 class RMT_OT_AddController(bpy.types.Operator):
     bl_idname = "rmt.add_controller"
@@ -186,7 +192,7 @@ class RMT_OT_SelectAllControllers(bpy.types.Operator):
 class RMT_OT_TransferRootMotion(bpy.types.Operator):
     bl_idname = "rmt.transfer_root_motion"
     bl_label = "Transfer Root Motion"
-    bl_description = "Transfer selected axis motion from COG Controller to Root Controller, bake motion, and clean up."
+    bl_description = "Transfer motion from COG/controllers to Root Controller, bake, and clean up."
     bl_options = {'REGISTER', 'UNDO'}
 
     action_name: bpy.props.StringProperty(name="Action Name", default="")
@@ -220,19 +226,34 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
             self.report({'WARNING'}, "No Root Controller selected.")
             return {'CANCELLED'}
 
-        self.create_reference(context, rig, controller_names)
-        self.bake_reference(context)
-        self.constraint_to_reference(context, rig)
-        result = self.transfer_motion(context, rig)
-        if result == {'CANCELLED'}:
-            return result
-        result = self.final_bake(context, rig)
-        if result == {'CANCELLED'}:
-            return result
-        self.cleanup_reference_objects(context)
+        keep_in_world_origin = scene.keep_in_world_origin
+
+        # Branch A: keep in world origin → direct controller workflow (no ref empties)
+        if keep_in_world_origin:
+            result = self.transfer_motion_direct_world_origin(context, rig)
+            if result == {'CANCELLED'}:
+                return result
+            result = self.final_bake(context, rig)
+            if result == {'CANCELLED'}:
+                return result
+
+        # Branch B: normal root motion (uses reference empties)
+        else:
+            self.create_reference(context, rig, controller_names)
+            self.bake_reference(context)
+            self.constraint_to_reference(context, rig)
+            result = self.transfer_motion_from_torso(context, rig)
+            if result == {'CANCELLED'}:
+                return result
+            result = self.final_bake(context, rig)
+            if result == {'CANCELLED'}:
+                return result
+            self.cleanup_reference_objects(context)
 
         self.report({'INFO'}, "Transfer Root Motion completed.")
         return {'FINISHED'}
+
+    # ---------- Reference empty workflow (for non-world-origin) ----------
 
     def create_reference(self, context, rig, controller_names):
         scene = context.scene
@@ -290,7 +311,7 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
             clear_constraints=True,
             clear_parents=False,
             use_current_action=True,
-            bake_types={'OBJECT'}
+            bake_types={'OBJECT'},
         )
 
         bpy.ops.object.select_all(action='DESELECT')
@@ -334,20 +355,8 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
             constraint.name = "RMT_Constraint_CopyTransforms"
             constraint.target = ref_obj
 
-    def transfer_motion(self, context, rig):
+    def transfer_motion_from_torso(self, context, rig):
         scene = context.scene
-        keep_in_world_origin = scene.keep_in_world_origin
-
-        collection = bpy.data.collections.get("RootMotionRefs")
-        if not collection:
-            collection = bpy.data.collections.new("RootMotionRefs")
-            scene.collection.children.link(collection)
-
-        empty_root = bpy.data.objects.new("Empty-Root", None)
-        collection.objects.link(empty_root)
-        empty_root.location = (0, 0, 0)
-        empty_root.empty_display_size = 0.2
-        empty_root.empty_display_type = 'SPHERE'
 
         root_controller_name = scene.rmt_root_controller_name
         pb_root = rig.pose.bones.get(root_controller_name)
@@ -355,36 +364,28 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
             self.report({'ERROR'}, f"Root controller '{root_controller_name}' not exist!")
             return {'CANCELLED'}
 
-        pb_root.location = (0, 0, 0)
-
+        # Clear old copy location constraints
         for c in list(pb_root.constraints):
             if c.type == 'COPY_LOCATION':
                 pb_root.constraints.remove(c)
 
+        # Constrain root to torso controller using selected axes
+        torso_controller_name = scene.rmt_torso_controller_enum
+        torso_pbone = rig.pose.bones.get(torso_controller_name)
+
+        if torso_pbone is None:
+            self.report({'ERROR'}, f"Torso controller '{torso_controller_name}' not exists!")
+            return {'CANCELLED'}
+
         constraint = pb_root.constraints.new('COPY_LOCATION')
-
-        if keep_in_world_origin:
-            constraint.use_x = True
-            constraint.use_y = True
-            constraint.use_z = False
-            constraint.target = empty_root
-        else:
-            constraint.use_x = scene.axis_x
-            constraint.use_y = scene.axis_y
-            constraint.use_z = scene.axis_z
-
-            torso_controller_name = scene.rmt_torso_controller_enum
-            torso_pbone = rig.pose.bones.get(torso_controller_name)
-
-            if torso_pbone is None:
-                self.report({'ERROR'}, f"Torso controller '{torso_controller_name}' not exists!")
-                return {'CANCELLED'}
-
-            constraint.target = rig
-            constraint.subtarget = torso_controller_name
-            constraint.use_offset = False
-            constraint.target_space = 'WORLD'
-            constraint.owner_space = 'WORLD'
+        constraint.use_x = scene.axis_x
+        constraint.use_y = scene.axis_y
+        constraint.use_z = scene.axis_z
+        constraint.target = rig
+        constraint.subtarget = torso_controller_name
+        constraint.use_offset = False
+        constraint.target_space = 'WORLD'
+        constraint.owner_space = 'WORLD'
 
         return {'FINISHED'}
 
@@ -409,6 +410,47 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
                     obj.animation_data.action = None
             bpy.data.actions.remove(action, do_unlink=True)
 
+    # ---------- Direct world-origin workflow (no ref empties) ----------
+
+    def transfer_motion_direct_world_origin(self, context, rig):
+        scene = context.scene
+
+        root_controller_name = scene.rmt_root_controller_name
+        torso_controller_name = scene.rmt_torso_controller_enum
+
+        pb_root = rig.pose.bones.get(root_controller_name)
+        if pb_root is None:
+            self.report({'ERROR'}, f"Root controller '{root_controller_name}' not exist!")
+            return {'CANCELLED'}
+
+        torso_pbone = rig.pose.bones.get(torso_controller_name)
+        if torso_pbone is None:
+            self.report({'ERROR'}, f"Torso controller '{torso_controller_name}' not exists!")
+            return {'CANCELLED'}
+
+        # Clear any existing copy-location constraints on the root
+        for c in list(pb_root.constraints):
+            if c.type == 'COPY_LOCATION':
+                pb_root.constraints.remove(c)
+
+        # Ensure root starts at origin
+        pb_root.location = (0.0, 0.0, 0.0)
+
+        # Directly copy location from torso in world space
+        constraint = pb_root.constraints.new('COPY_LOCATION')
+        constraint.use_x = True
+        constraint.use_y = True
+        constraint.use_z = False
+        constraint.target = rig
+        constraint.subtarget = torso_controller_name
+        constraint.use_offset = False
+        constraint.target_space = 'WORLD'
+        constraint.owner_space = 'WORLD'
+
+        return {'FINISHED'}
+
+    # ---------- Final bake (shared) ----------
+
     def final_bake(self, context, rig):
         scene = context.scene
         frame_start = scene.frame_start
@@ -424,6 +466,7 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
         if rig.mode != 'POSE':
             bpy.ops.object.mode_set(mode='POSE')
 
+        # Bake root controller
         bpy.ops.pose.select_all(action='DESELECT')
 
         pb_root = rig.pose.bones.get(root_controller_name)
@@ -439,9 +482,10 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
             clear_constraints=True,
             clear_parents=True,
             use_current_action=True,
-            bake_types={'POSE'}
+            bake_types={'POSE'},
         )
 
+        # Bake other controllers (no parent clearing)
         bpy.ops.pose.select_all(action='DESELECT')
 
         other_controllers = [name for name in controller_names if name != root_controller_name]
@@ -454,7 +498,6 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
         if other_controllers:
             rig.data.bones.active = rig.data.bones[other_controllers[0]]
 
-        if other_controllers:
             bpy.ops.nla.bake(
                 frame_start=frame_start,
                 frame_end=frame_end,
@@ -463,7 +506,7 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
                 clear_constraints=True,
                 clear_parents=False,
                 use_current_action=True,
-                bake_types={'POSE'}
+                bake_types={'POSE'},
             )
 
         return {'FINISHED'}
@@ -499,7 +542,10 @@ class RMT_OT_BatchTransferRootMotionContinue(bpy.types.Operator):
         return {'FINISHED'}
 
 
-# --- UI Panel and helper ---
+# ---------------------------------------------------------
+# UI and helpers
+# ---------------------------------------------------------
+
 
 def action_contains_rig_animation(action, rig):
     if not rig or rig.type != 'ARMATURE' or not action:
@@ -556,7 +602,7 @@ class RMT_PT_RootMotionPanel(bpy.types.Panel):
                 scene.rmt_selected_rig.pose,
                 "bones",
                 text="",
-                icon="OUTLINER_OB_EMPTY"
+                icon="OUTLINER_OB_EMPTY",
             )
         else:
             col.label(text="No rig selected!", icon='ERROR')
@@ -585,7 +631,7 @@ class RMT_OT_SelectActionsPopup(bpy.types.Operator):
     bl_idname = "rmt.batch_transfer_root_motion"
     bl_label = "Batch Transfer"
     bl_options = {'REGISTER', 'UNDO'}
-    bl_description = "Batch execute the following actions (list of actions with keys belonging to Rig)"
+    bl_description = "Batch execute actions that contain animation for this rig"
 
     def invoke(self, context, event):
         rig = context.scene.rmt_selected_rig
@@ -631,12 +677,15 @@ class RMT_OT_SelectActionsPopup(bpy.types.Operator):
 
         self.report(
             {'INFO'},
-            f"Transferred {len(selected)} actions: {', '.join([act.name for act in selected])}"
+            f"Transferred {len(selected)} actions: {', '.join([act.name for act in selected])}",
         )
         return {'FINISHED'}
 
 
-# ------------ Addon registration ------------
+# ---------------------------------------------------------
+# Registration
+# ---------------------------------------------------------
+
 
 classes = (
     RMT_ControllerItem,
@@ -647,8 +696,8 @@ classes = (
     RMT_OT_SelectAllControllers,
     RMT_OT_TransferRootMotion,
     RMT_OT_BatchTransferRootMotionContinue,
-    RMT_OT_SelectActionsPopup,
     RMT_PT_RootMotionPanel,
+    RMT_OT_SelectActionsPopup,
 )
 
 
@@ -666,29 +715,3 @@ def unregister():
 
 if __name__ == "__main__":
     register()
-```
-
-If you hit any specific error in 5.0.1 (e.g. new constraints or NLA changes), paste the traceback and the line number so those parts can be updated as well.
-
-Citations:
-[1] Anim-Transfter-Tool-1.py https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/86831241/4b9c115d-946e-42b4-abff-e2c8df48835a/Anim-Transfter-Tool-1.py
-[2] Property Definitions (bpy.props)¶ https://docs.blender.org/api/current/bpy.props.html
-[3] bpy.utils. - Blender Python API https://docs.blender.org/api/current/bpy.utils.html
-[4] Add-on Tutorial - Blender 5.0 Manual https://docs.blender.org/manual/en/latest/advanced/scripting/addon_tutorial.html
-[5] Quickstart - Blender Python API https://docs.blender.org/api/current/info_quickstart.html
-[6] Blender 5.0 breaks the generate function in MCprep #668 https://github.com/Moo-Ack-Productions/MCprep/issues/668
-[7] What instantiates classes in Blender? - Python Support https://blenderartists.org/t/what-instantiates-classes-in-blender/1277235
-[8] Review Blender 5.0 Python API - Ojambo https://www.ojambo.com/review-blender-5-0-python-api
-[9] blender-python/blenderlib/bpy.props.py at master · kabuku/blender-python https://github.com/kabuku/blender-python/blob/master/blenderlib/bpy.props.py
-[10] Blender 5.0 Python API Explained: Breaking Changes You ... https://www.youtube.com/watch?v=YWZHc9GnODY
-[11] 5.0 — Blender https://www.blender.org/download/releases/5-0/
-[12] Property Definitions (bpy.props)¶ https://docs.blender.org/api/blender_python_api_2_78_4/bpy.props.html
-[13] Does anyone know how to fix or update a script? I have ... https://www.reddit.com/r/blenderhelp/comments/1j5ygou/does_anyone_know_how_to_fix_or_update_a_script_i/
-[14] Pie Menu Editor 1.18.8 - Page 277 - Released Scripts and Themes https://blenderartists.org/t/pie-menu-editor-1-18-8/662456?page=277
-[15] Blender 5.0 Python API Updates: Key Changes in 60 Seconds! https://www.youtube.com/shorts/5jcvNhOeNPU
-[16] Property Definitions (bpy.props) - API documentation https://shuvit.org/python_api/bpy.props.html
-[17] blender/doc/python_api/examples/bpy.props.5.py at main · blender/blender https://github.com/blender/blender/blob/main/doc/python_api/examples/bpy.props.5.py
-[18] Why do Property declarations suffice? https://blenderartists.org/t/why-do-property-declarations-suffice/1443794
-[19] Property Definitions (bpy.props) https://upbge.org/docs/latest/api/bpy.props.html
-[20] How to find Python method in Blender API documentation? https://www.reddit.com/r/blenderhelp/comments/11mq5gp/how_to_find_python_method_in_blender_api/
-[21] How to properly/reliably initialize items of bpy.props.PropertyGroup? htt '''
