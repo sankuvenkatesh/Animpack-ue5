@@ -1,14 +1,19 @@
+full code
+
+Here is a full version of the addon rewritten so it never creates empties or collections; it always works directly on bones, and the “Keep in World Origin” toggle only changes how the root copies the torso. [1][2]
+
+```python
 # -*- coding: utf-8 -*-
 
 bl_info = {
     "name": "Anim Tool Transfer",
     "author": "Venkatesh sanku",
-    "version": (1, 1, 0),
+    "version": (1, 2, 0),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Anim Tool Transfer",
     "description": (
-        "Adjust root controller per action or keep in world origin. "
-        "Supports batch processing for multiple actions to extract root motion."
+        "Transfer motion from torso/controllers to root controller, "
+        "optionally keeping the character at world origin. Supports batch actions."
     ),
     "category": "Animation",
     "license": "SPDX:GPL-3.0-or-later",
@@ -65,7 +70,7 @@ def register_properties():
 
     bpy.types.Scene.keep_in_world_origin = bpy.props.BoolProperty(
         name="Keep in World Origin",
-        description="Keep root controller at world origin",
+        description="Keep root controller at world origin (XY only from torso)",
         default=False,
     )
 
@@ -134,13 +139,6 @@ class RMT_OT_ClearControllers(bpy.types.Operator):
     def execute(self, context):
         scene = context.scene
         scene.controllers.clear()
-
-        collection = bpy.data.collections.get("RootMotionRefs")
-        if collection:
-            for obj in list(collection.objects):
-                bpy.data.objects.remove(obj, do_unlink=True)
-            bpy.data.collections.remove(collection)
-
         return {'FINISHED'}
 
 
@@ -192,7 +190,7 @@ class RMT_OT_SelectAllControllers(bpy.types.Operator):
 class RMT_OT_TransferRootMotion(bpy.types.Operator):
     bl_idname = "rmt.transfer_root_motion"
     bl_label = "Transfer Root Motion"
-    bl_description = "Transfer motion from COG/controllers to Root Controller, bake, and clean up."
+    bl_description = "Transfer motion from torso to root controller and bake."
     bl_options = {'REGISTER', 'UNDO'}
 
     action_name: bpy.props.StringProperty(name="Action Name", default="")
@@ -226,194 +224,22 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
             self.report({'WARNING'}, "No Root Controller selected.")
             return {'CANCELLED'}
 
-        keep_in_world_origin = scene.keep_in_world_origin
+        result = self.transfer_motion_direct(context, rig)
+        if result == {'CANCELLED'}:
+            return result
 
-        # Branch A: keep in world origin → direct controller workflow (no ref empties)
-        if keep_in_world_origin:
-            result = self.transfer_motion_direct_world_origin(context, rig)
-            if result == {'CANCELLED'}:
-                return result
-            result = self.final_bake(context, rig)
-            if result == {'CANCELLED'}:
-                return result
-
-        # Branch B: normal root motion (uses reference empties)
-        else:
-            self.create_reference(context, rig, controller_names)
-            self.bake_reference(context)
-            self.constraint_to_reference(context, rig)
-            result = self.transfer_motion_from_torso(context, rig)
-            if result == {'CANCELLED'}:
-                return result
-            result = self.final_bake(context, rig)
-            if result == {'CANCELLED'}:
-                return result
-            self.cleanup_reference_objects(context)
+        result = self.final_bake(context, rig)
+        if result == {'CANCELLED'}:
+            return result
 
         self.report({'INFO'}, "Transfer Root Motion completed.")
         return {'FINISHED'}
 
-    # ---------- Reference empty workflow (for non-world-origin) ----------
+    # ---------- Direct bones workflow (no empties) ----------
 
-    def create_reference(self, context, rig, controller_names):
+    def transfer_motion_direct(self, context, rig):
         scene = context.scene
-
-        collection = bpy.data.collections.get("RootMotionRefs")
-        if not collection:
-            collection = bpy.data.collections.new("RootMotionRefs")
-            scene.collection.children.link(collection)
-
-        for obj in list(collection.objects):
-            bpy.data.objects.remove(obj, do_unlink=True)
-
-        for bone_name in controller_names:
-            ref_obj_name = f"{bone_name}-ref"
-            if ref_obj_name in bpy.data.objects:
-                continue
-
-            empty_ref = bpy.data.objects.new(ref_obj_name, None)
-            collection.objects.link(empty_ref)
-
-            empty_ref.parent = rig
-            empty_ref.matrix_world = rig.matrix_world @ rig.pose.bones[bone_name].matrix
-            empty_ref.empty_display_size = 0.2
-            empty_ref.empty_display_type = 'SPHERE'
-
-            constraint = empty_ref.constraints.new('COPY_TRANSFORMS')
-            constraint.target = rig
-            constraint.subtarget = bone_name
-
-    def bake_reference(self, context):
-        scene = context.scene
-        collection = bpy.data.collections.get("RootMotionRefs")
-
-        if not collection or not collection.objects:
-            self.report({'ERROR'}, "No reference objects found!")
-            return
-
-        frame_start = scene.frame_start
-        frame_end = scene.frame_end
-
-        if context.object and context.object.mode != 'OBJECT':
-            bpy.ops.object.mode_set(mode='OBJECT')
-
-        bpy.ops.object.select_all(action='DESELECT')
-        for obj in collection.objects:
-            obj.select_set(True)
-
-        context.view_layer.objects.active = collection.objects[0]
-
-        bpy.ops.nla.bake(
-            frame_start=frame_start,
-            frame_end=frame_end,
-            only_selected=True,
-            visual_keying=True,
-            clear_constraints=True,
-            clear_parents=False,
-            use_current_action=True,
-            bake_types={'OBJECT'},
-        )
-
-        bpy.ops.object.select_all(action='DESELECT')
-
-        for obj in collection.objects:
-            if obj.animation_data and obj.animation_data.action:
-                act = obj.animation_data.action
-                if not act.name.endswith("_refAction"):
-                    act.name += "_refAction"
-
-    def constraint_to_reference(self, context, rig):
-        scene = context.scene
-        controller_names = [ctrl.name for ctrl in scene.controllers]
-        collection = bpy.data.collections.get("RootMotionRefs")
-
-        if not collection:
-            self.report({'ERROR'}, "No reference objects found!")
-            return
-
-        ref_objs = {obj.name: obj for obj in collection.objects}
-
-        context.view_layer.objects.active = rig
-        if rig.mode != 'POSE':
-            bpy.ops.object.mode_set(mode='POSE')
-
-        for bone_name in controller_names:
-            ref_obj_name = f"{bone_name}-ref"
-            ref_obj = ref_objs.get(ref_obj_name)
-            if not ref_obj:
-                continue
-
-            pbone = rig.pose.bones.get(bone_name)
-            if not pbone:
-                continue
-
-            for con in list(pbone.constraints):
-                if con.name.startswith("RMT_Constraint"):
-                    pbone.constraints.remove(con)
-
-            constraint = pbone.constraints.new(type='COPY_TRANSFORMS')
-            constraint.name = "RMT_Constraint_CopyTransforms"
-            constraint.target = ref_obj
-
-    def transfer_motion_from_torso(self, context, rig):
-        scene = context.scene
-
-        root_controller_name = scene.rmt_root_controller_name
-        pb_root = rig.pose.bones.get(root_controller_name)
-        if pb_root is None:
-            self.report({'ERROR'}, f"Root controller '{root_controller_name}' not exist!")
-            return {'CANCELLED'}
-
-        # Clear old copy location constraints
-        for c in list(pb_root.constraints):
-            if c.type == 'COPY_LOCATION':
-                pb_root.constraints.remove(c)
-
-        # Constrain root to torso controller using selected axes
-        torso_controller_name = scene.rmt_torso_controller_enum
-        torso_pbone = rig.pose.bones.get(torso_controller_name)
-
-        if torso_pbone is None:
-            self.report({'ERROR'}, f"Torso controller '{torso_controller_name}' not exists!")
-            return {'CANCELLED'}
-
-        constraint = pb_root.constraints.new('COPY_LOCATION')
-        constraint.use_x = scene.axis_x
-        constraint.use_y = scene.axis_y
-        constraint.use_z = scene.axis_z
-        constraint.target = rig
-        constraint.subtarget = torso_controller_name
-        constraint.use_offset = False
-        constraint.target_space = 'WORLD'
-        constraint.owner_space = 'WORLD'
-
-        return {'FINISHED'}
-
-    def cleanup_reference_objects(self, context):
-        ref_action_suffix = "_refAction"
-        collection = bpy.data.collections.get("RootMotionRefs")
-
-        if collection:
-            for obj in list(collection.objects):
-                if obj.animation_data and obj.animation_data.action:
-                    action = obj.animation_data.action
-                    if action.name.endswith(ref_action_suffix):
-                        obj.animation_data.action = None
-                        bpy.data.actions.remove(action, do_unlink=True)
-                bpy.data.objects.remove(obj, do_unlink=True)
-            bpy.data.collections.remove(collection)
-
-        actions_to_remove = [a for a in bpy.data.actions if a.name.endswith(ref_action_suffix)]
-        for action in actions_to_remove:
-            for obj in bpy.data.objects:
-                if obj.animation_data and obj.animation_data.action == action:
-                    obj.animation_data.action = None
-            bpy.data.actions.remove(action, do_unlink=True)
-
-    # ---------- Direct world-origin workflow (no ref empties) ----------
-
-    def transfer_motion_direct_world_origin(self, context, rig):
-        scene = context.scene
+        keep_in_world_origin = scene.keep_in_world_origin
 
         root_controller_name = scene.rmt_root_controller_name
         torso_controller_name = scene.rmt_torso_controller_enum
@@ -428,19 +254,27 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
             self.report({'ERROR'}, f"Torso controller '{torso_controller_name}' not exists!")
             return {'CANCELLED'}
 
-        # Clear any existing copy-location constraints on the root
+        # Clear existing COPY_LOCATION constraints on root
         for c in list(pb_root.constraints):
             if c.type == 'COPY_LOCATION':
                 pb_root.constraints.remove(c)
 
-        # Ensure root starts at origin
+        # Optional: reset root local location, so constraint starts clean
         pb_root.location = (0.0, 0.0, 0.0)
 
-        # Directly copy location from torso in world space
         constraint = pb_root.constraints.new('COPY_LOCATION')
-        constraint.use_x = True
-        constraint.use_y = True
-        constraint.use_z = False
+
+        if keep_in_world_origin:
+            # World-origin mode: always copy X/Y only, Z locked
+            constraint.use_x = True
+            constraint.use_y = True
+            constraint.use_z = False
+        else:
+            # Normal mode: use axis toggles
+            constraint.use_x = scene.axis_x
+            constraint.use_y = scene.axis_y
+            constraint.use_z = scene.axis_z
+
         constraint.target = rig
         constraint.subtarget = torso_controller_name
         constraint.use_offset = False
@@ -449,7 +283,7 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
 
         return {'FINISHED'}
 
-    # ---------- Final bake (shared) ----------
+    # ---------- Final bake ----------
 
     def final_bake(self, context, rig):
         scene = context.scene
@@ -466,7 +300,7 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
         if rig.mode != 'POSE':
             bpy.ops.object.mode_set(mode='POSE')
 
-        # Bake root controller
+        # Bake root controller (clears constraints and parents)
         bpy.ops.pose.select_all(action='DESELECT')
 
         pb_root = rig.pose.bones.get(root_controller_name)
@@ -715,3 +549,11 @@ def unregister():
 
 if __name__ == "__main__":
     register()
+```
+
+If you see any specific behavior that still doesn’t match your expected root curves (especially with complex rigs), share one test case and the desired result and this direct‑bones step can be refined further. [1][3]
+
+Citations:
+[1] Anim-Transfter-Tool-1.py https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/86831241/4b9c115d-946e-42b4-abff-e2c8df48835a/Anim-Transfter-Tool-1.py
+[2] Property Definitions (bpy.props)¶ https://docs.blender.org/api/current/bpy.props.html
+[3] bpy.utils. - Blender Python API https://docs.blender.org/api/current/bpy.utils.html
