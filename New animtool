@@ -1,14 +1,9 @@
-full code
-
-Here is a full version of the addon rewritten so it never creates empties or collections; it always works directly on bones, and the “Keep in World Origin” toggle only changes how the root copies the torso. [1][2]
-
-```python
 # -*- coding: utf-8 -*-
 
 bl_info = {
     "name": "Anim Tool Transfer",
     "author": "Venkatesh sanku",
-    "version": (1, 2, 0),
+    "version": (1, 2, 1),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Anim Tool Transfer",
     "description": (
@@ -26,7 +21,6 @@ import bpy
 # Properties
 # ---------------------------------------------------------
 
-
 class RMT_ControllerItem(bpy.types.PropertyGroup):
     name: bpy.props.StringProperty()
 
@@ -39,15 +33,13 @@ class RMT_ActionItem(bpy.types.PropertyGroup):
 
 def get_torso_items(self, context):
     scene = context.scene
-    ctrls = getattr(scene, "controllers", [])
-    return [(ctrl.name, ctrl.name, "") for ctrl in ctrls]
+    return [(c.name, c.name, "") for c in scene.controllers]
 
 
 def register_properties():
     bpy.types.Scene.rmt_selected_rig = bpy.props.PointerProperty(
         name="Rig",
         type=bpy.types.Object,
-        update=lambda self, ctx: ctx.area.tag_redraw() if ctx and ctx.area else None,
     )
 
     bpy.types.Scene.controllers = bpy.props.CollectionProperty(type=RMT_ControllerItem)
@@ -59,18 +51,18 @@ def register_properties():
 
     bpy.types.Scene.rmt_torso_controller_enum = bpy.props.EnumProperty(
         name="Torso Controller",
-        description="Select Target from added controllers",
+        description="Controller to extract motion from",
         items=get_torso_items,
     )
 
     bpy.types.Scene.rmt_root_controller_name = bpy.props.StringProperty(
         name="Root Controller",
-        description="Search for root controller bone",
+        description="Root controller bone",
     )
 
     bpy.types.Scene.keep_in_world_origin = bpy.props.BoolProperty(
         name="Keep in World Origin",
-        description="Keep root controller at world origin (XY only from torso)",
+        description="Keep root at world origin (XY from torso only)",
         default=False,
     )
 
@@ -96,7 +88,6 @@ def unregister_properties():
 # Operators
 # ---------------------------------------------------------
 
-
 class RMT_OT_AddController(bpy.types.Operator):
     bl_idname = "rmt.add_controller"
     bl_label = "Add Controllers"
@@ -107,38 +98,31 @@ class RMT_OT_AddController(bpy.types.Operator):
         rig = scene.rmt_selected_rig
 
         if not rig or rig.type != 'ARMATURE':
-            self.report({'WARNING'}, "Please select a valid rig (Armature).")
+            self.report({'WARNING'}, "Select a valid Armature")
             return {'CANCELLED'}
 
         if context.mode != 'POSE':
-            self.report({'WARNING'}, "Please switch to Pose Mode and select bones.")
-            return {'CANCELLED'}
-
-        selected_bones = context.selected_pose_bones
-        if not selected_bones:
-            self.report({'WARNING'}, "No bones selected.")
+            self.report({'WARNING'}, "Switch to Pose Mode")
             return {'CANCELLED'}
 
         count = 0
-        for bone in selected_bones:
-            if not any(item.name == bone.name for item in scene.controllers):
-                new_ctrl = scene.controllers.add()
-                new_ctrl.name = bone.name
+        for bone in context.selected_pose_bones:
+            if not any(c.name == bone.name for c in scene.controllers):
+                item = scene.controllers.add()
+                item.name = bone.name
                 count += 1
 
-        scene.controllers_index = max(0, len(scene.controllers) - 1)
-        self.report({'INFO'}, f"Added {count} controllers.")
+        self.report({'INFO'}, f"Added {count} controllers")
         return {'FINISHED'}
 
 
 class RMT_OT_ClearControllers(bpy.types.Operator):
     bl_idname = "rmt.clear_controllers"
-    bl_label = "Clear All Controllers"
+    bl_label = "Clear Controllers"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-        scene = context.scene
-        scene.controllers.clear()
+        context.scene.controllers.clear()
         return {'FINISHED'}
 
 
@@ -165,238 +149,124 @@ class RMT_OT_SelectAllControllers(bpy.types.Operator):
         rig = scene.rmt_selected_rig
 
         if not rig or rig.type != 'ARMATURE':
-            self.report({'WARNING'}, "Please select a valid rig (Armature).")
-            return {'CANCELLED'}
-
-        controller_names = [ctrl.name for ctrl in scene.controllers]
-        if not controller_names:
-            self.report({'WARNING'}, "No controllers to select.")
             return {'CANCELLED'}
 
         context.view_layer.objects.active = rig
-        if rig.mode != 'POSE':
-            bpy.ops.object.mode_set(mode='POSE')
-
+        bpy.ops.object.mode_set(mode='POSE')
         bpy.ops.pose.select_all(action='DESELECT')
 
-        for name in controller_names:
-            if name in rig.pose.bones:
-                rig.pose.bones[name].bone.select = True
+        for c in scene.controllers:
+            if c.name in rig.pose.bones:
+                rig.pose.bones[c.name].bone.select = True
 
-        self.report({'INFO'}, "Selected all controllers.")
         return {'FINISHED'}
 
 
 class RMT_OT_TransferRootMotion(bpy.types.Operator):
     bl_idname = "rmt.transfer_root_motion"
     bl_label = "Transfer Root Motion"
-    bl_description = "Transfer motion from torso to root controller and bake."
     bl_options = {'REGISTER', 'UNDO'}
 
-    action_name: bpy.props.StringProperty(name="Action Name", default="")
+    action_name: bpy.props.StringProperty(default="")
 
     def execute(self, context):
         scene = context.scene
         rig = scene.rmt_selected_rig
 
-        if not rig:
-            self.report({'WARNING'}, "No rig selected.")
+        if not rig or rig.type != 'ARMATURE':
             return {'CANCELLED'}
 
-        # If running from batch then change action to active
         if self.action_name:
-            action = bpy.data.actions.get(self.action_name)
-            if action:
-                if not rig.animation_data:
-                    rig.animation_data_create()
-                rig.animation_data.action = action
-            else:
-                self.report({'ERROR'}, f"Action '{self.action_name}' not found.")
-                return {'CANCELLED'}
+            if not rig.animation_data:
+                rig.animation_data_create()
+            rig.animation_data.action = bpy.data.actions.get(self.action_name)
 
-        controller_names = [ctrl.name for ctrl in scene.controllers]
-        if not controller_names:
-            self.report({'WARNING'}, "No controllers added.")
+        if not self.transfer_motion(context, rig):
             return {'CANCELLED'}
 
-        root_controller = scene.rmt_root_controller_name
-        if not root_controller:
-            self.report({'WARNING'}, "No Root Controller selected.")
-            return {'CANCELLED'}
-
-        result = self.transfer_motion_direct(context, rig)
-        if result == {'CANCELLED'}:
-            return result
-
-        result = self.final_bake(context, rig)
-        if result == {'CANCELLED'}:
-            return result
-
-        self.report({'INFO'}, "Transfer Root Motion completed.")
+        self.bake_motion(context, rig)
+        self.report({'INFO'}, "Root Motion Transferred")
         return {'FINISHED'}
 
-    # ---------- Direct bones workflow (no empties) ----------
-
-    def transfer_motion_direct(self, context, rig):
+    def transfer_motion(self, context, rig):
         scene = context.scene
-        keep_in_world_origin = scene.keep_in_world_origin
+        pb_root = rig.pose.bones.get(scene.rmt_root_controller_name)
+        pb_torso = rig.pose.bones.get(scene.rmt_torso_controller_enum)
 
-        root_controller_name = scene.rmt_root_controller_name
-        torso_controller_name = scene.rmt_torso_controller_enum
+        if not pb_root or not pb_torso:
+            return False
 
-        pb_root = rig.pose.bones.get(root_controller_name)
-        if pb_root is None:
-            self.report({'ERROR'}, f"Root controller '{root_controller_name}' not exist!")
-            return {'CANCELLED'}
-
-        torso_pbone = rig.pose.bones.get(torso_controller_name)
-        if torso_pbone is None:
-            self.report({'ERROR'}, f"Torso controller '{torso_controller_name}' not exists!")
-            return {'CANCELLED'}
-
-        # Clear existing COPY_LOCATION constraints on root
         for c in list(pb_root.constraints):
             if c.type == 'COPY_LOCATION':
                 pb_root.constraints.remove(c)
 
-        # Optional: reset root local location, so constraint starts clean
-        pb_root.location = (0.0, 0.0, 0.0)
+        pb_root.location = (0, 0, 0)
 
-        constraint = pb_root.constraints.new('COPY_LOCATION')
+        c = pb_root.constraints.new('COPY_LOCATION')
+        c.target = rig
+        c.subtarget = pb_torso.name
+        c.target_space = 'WORLD'
+        c.owner_space = 'WORLD'
+        c.use_offset = False
 
-        if keep_in_world_origin:
-            # World-origin mode: always copy X/Y only, Z locked
-            constraint.use_x = True
-            constraint.use_y = True
-            constraint.use_z = False
+        if scene.keep_in_world_origin:
+            c.use_x, c.use_y, c.use_z = True, True, False
         else:
-            # Normal mode: use axis toggles
-            constraint.use_x = scene.axis_x
-            constraint.use_y = scene.axis_y
-            constraint.use_z = scene.axis_z
+            c.use_x = scene.axis_x
+            c.use_y = scene.axis_y
+            c.use_z = scene.axis_z
 
-        constraint.target = rig
-        constraint.subtarget = torso_controller_name
-        constraint.use_offset = False
-        constraint.target_space = 'WORLD'
-        constraint.owner_space = 'WORLD'
+        return True
 
-        return {'FINISHED'}
-
-    # ---------- Final bake ----------
-
-    def final_bake(self, context, rig):
+    def bake_motion(self, context, rig):
         scene = context.scene
-        frame_start = scene.frame_start
-        frame_end = scene.frame_end
+        bpy.ops.object.mode_set(mode='POSE')
 
-        root_controller_name = scene.rmt_root_controller_name
-        controller_names = [ctrl.name for ctrl in scene.controllers]
-
-        if not root_controller_name:
-            self.report({'ERROR'}, "No Root Controller selected for baking!")
-            return {'CANCELLED'}
-
-        if rig.mode != 'POSE':
-            bpy.ops.object.mode_set(mode='POSE')
-
-        # Bake root controller (clears constraints and parents)
         bpy.ops.pose.select_all(action='DESELECT')
-
-        pb_root = rig.pose.bones.get(root_controller_name)
-        if pb_root:
-            pb_root.bone.select = True
-            rig.data.bones.active = pb_root.bone
+        pb_root = rig.pose.bones.get(scene.rmt_root_controller_name)
+        pb_root.bone.select = True
+        rig.data.bones.active = pb_root.bone
 
         bpy.ops.nla.bake(
-            frame_start=frame_start,
-            frame_end=frame_end,
+            frame_start=scene.frame_start,
+            frame_end=scene.frame_end,
             only_selected=True,
             visual_keying=True,
             clear_constraints=True,
             clear_parents=True,
-            use_current_action=True,
             bake_types={'POSE'},
         )
-
-        # Bake other controllers (no parent clearing)
-        bpy.ops.pose.select_all(action='DESELECT')
-
-        other_controllers = [name for name in controller_names if name != root_controller_name]
-        for bone_name in other_controllers:
-            pbone = rig.pose.bones.get(bone_name)
-            if not pbone:
-                continue
-            pbone.bone.select = True
-
-        if other_controllers:
-            rig.data.bones.active = rig.data.bones[other_controllers[0]]
-
-            bpy.ops.nla.bake(
-                frame_start=frame_start,
-                frame_end=frame_end,
-                only_selected=True,
-                visual_keying=True,
-                clear_constraints=True,
-                clear_parents=False,
-                use_current_action=True,
-                bake_types={'POSE'},
-            )
-
-        return {'FINISHED'}
 
 
 class RMT_OT_BatchTransferRootMotionContinue(bpy.types.Operator):
     bl_idname = "rmt.batch_transfer_root_motion_continue"
     bl_label = "Batch Transfer Root Motion"
-    bl_description = "Apply Transfer Root Motion for all selected Actions"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
         scene = context.scene
-        selected_actions = scene.rmt_batch_actions
-
-        if not selected_actions:
-            self.report({'WARNING'}, "No actions selected for batch processing.")
-            return {'CANCELLED'}
-
         rig = scene.rmt_selected_rig
+
         current_action = rig.animation_data.action if rig.animation_data else None
 
-        for item in selected_actions:
-            action_name = item.name
-            result = bpy.ops.rmt.transfer_root_motion('INVOKE_DEFAULT', action_name=action_name)
-            if result != {'FINISHED'}:
-                self.report({'ERROR'}, f"Failed to process action: {action_name}")
+        for item in scene.rmt_batch_actions:
+            bpy.ops.rmt.transfer_root_motion(
+                'EXEC_DEFAULT',
+                action_name=item.name
+            )
 
         if current_action and rig.animation_data:
             rig.animation_data.action = current_action
 
-        self.report({'INFO'}, "Batch Transfer Root Motion completed.")
         return {'FINISHED'}
 
 
 # ---------------------------------------------------------
-# UI and helpers
+# UI
 # ---------------------------------------------------------
-
-
-def action_contains_rig_animation(action, rig):
-    if not rig or rig.type != 'ARMATURE' or not action:
-        return False
-
-    for fcurve in action.fcurves:
-        if fcurve.data_path.startswith('pose.bones["'):
-            bone_name = fcurve.data_path.split('["')[1].split('"]')[0]
-            if bone_name in rig.data.bones:
-                return True
-
-    return False
-
 
 class RMT_PT_RootMotionPanel(bpy.types.Panel):
     bl_label = "Anim Tool Transfer"
-    bl_idname = "RMT_PT_root_motion_transfer"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
     bl_category = "Venky Anim Toolz"
@@ -405,121 +275,39 @@ class RMT_PT_RootMotionPanel(bpy.types.Panel):
         layout = self.layout
         scene = context.scene
 
-        col = layout.column(align=True)
-        col.prop(scene, "rmt_selected_rig", text="Target Object")
-
-        row = layout.row(align=True)
-        row.operator("rmt.add_controller", text="Add Controllers", icon='PLUS')
-
-        row = layout.row(align=True)
-        row.operator("rmt.clear_controllers", text="Clear All", icon='TRASH')
-        row.operator("rmt.select_all_controllers", text="Select All", icon='RESTRICT_SELECT_OFF')
+        layout.prop(scene, "rmt_selected_rig")
+        layout.operator("rmt.add_controller", icon='PLUS')
+        layout.operator("rmt.clear_controllers", icon='TRASH')
 
         box = layout.box()
-        for index, item in enumerate(scene.controllers):
-            row = box.row(align=True)
-            row.label(text=item.name, icon='BONE_DATA')
+        for i, c in enumerate(scene.controllers):
+            row = box.row()
+            row.label(text=c.name, icon='BONE_DATA')
             op = row.operator("rmt.remove_controller", text="", icon='X')
-            op.index = index
+            op.index = i
 
-        col = layout.column(align=True)
-        col.label(text="Target Controller (usually torso - COG):")
-        col.prop(scene, "rmt_torso_controller_enum", text="")
+        layout.prop(scene, "rmt_torso_controller_enum")
+        layout.prop_search(
+            scene,
+            "rmt_root_controller_name",
+            scene.rmt_selected_rig.pose if scene.rmt_selected_rig else None,
+            "bones",
+            text="Root"
+        )
 
-        col.separator()
-        col.label(text="Master Controller (root):")
-
-        if scene.rmt_selected_rig:
-            col.prop_search(
-                scene,
-                "rmt_root_controller_name",
-                scene.rmt_selected_rig.pose,
-                "bones",
-                text="",
-                icon="OUTLINER_OB_EMPTY",
-            )
-        else:
-            col.label(text="No rig selected!", icon='ERROR')
-
-        row = layout.row(align=True)
-        row.label(text="Keep in World Origin")
-        row.prop(scene, "keep_in_world_origin", text="")
-
+        layout.prop(scene, "keep_in_world_origin")
         if not scene.keep_in_world_origin:
             row = layout.row(align=True)
-            row.label(text="Transfer Axes:")
-            subrow = row.row(align=True)
-            subrow.scale_x = 0.5
-            subrow.prop(scene, "axis_x", text="X")
-            subrow.prop(scene, "axis_y", text="Y")
-            subrow.prop(scene, "axis_z", text="Z")
+            row.prop(scene, "axis_x")
+            row.prop(scene, "axis_y")
+            row.prop(scene, "axis_z")
 
-        col = layout.column(align=True)
-        col.scale_y = 1.0
-        col.operator("rmt.transfer_root_motion", text="Apply Root Motion", icon='PLAY')
-
-        layout.operator("rmt.batch_transfer_root_motion", icon="ACTION")
-
-
-class RMT_OT_SelectActionsPopup(bpy.types.Operator):
-    bl_idname = "rmt.batch_transfer_root_motion"
-    bl_label = "Batch Transfer"
-    bl_options = {'REGISTER', 'UNDO'}
-    bl_description = "Batch execute actions that contain animation for this rig"
-
-    def invoke(self, context, event):
-        rig = context.scene.rmt_selected_rig
-        scene = context.scene
-        scene.rmt_action_items.clear()
-
-        if not rig or rig.type != 'ARMATURE':
-            self.report({'WARNING'}, "No rig selected.")
-            return {'CANCELLED'}
-
-        for act in bpy.data.actions:
-            if act.users > 0 and action_contains_rig_animation(act, rig):
-                item = scene.rmt_action_items.add()
-                item.name = act.name
-                item.action = act
-                item.is_selected = False
-
-        return context.window_manager.invoke_props_dialog(self, width=400)
-
-    def draw(self, context):
-        layout = self.layout
-        scene = context.scene
-
-        layout.label(text="Select actions to process:", icon='ACTION')
-        for item in scene.rmt_action_items:
-            layout.prop(item, "is_selected", text=item.name)
-
-    def execute(self, context):
-        selected = [item.action for item in context.scene.rmt_action_items if item.is_selected]
-
-        if not selected:
-            self.report({'WARNING'}, "No actions selected for batch processing.")
-            return {'CANCELLED'}
-
-        context.scene.rmt_batch_actions.clear()
-
-        for action in selected:
-            item = context.scene.rmt_batch_actions.add()
-            item.name = action.name
-            item.action = action
-
-        bpy.ops.rmt.batch_transfer_root_motion_continue()
-
-        self.report(
-            {'INFO'},
-            f"Transferred {len(selected)} actions: {', '.join([act.name for act in selected])}",
-        )
-        return {'FINISHED'}
+        layout.operator("rmt.transfer_root_motion", icon='PLAY')
 
 
 # ---------------------------------------------------------
 # Registration
 # ---------------------------------------------------------
-
 
 classes = (
     RMT_ControllerItem,
@@ -531,7 +319,6 @@ classes = (
     RMT_OT_TransferRootMotion,
     RMT_OT_BatchTransferRootMotionContinue,
     RMT_PT_RootMotionPanel,
-    RMT_OT_SelectActionsPopup,
 )
 
 
@@ -549,11 +336,3 @@ def unregister():
 
 if __name__ == "__main__":
     register()
-```
-
-If you see any specific behavior that still doesn’t match your expected root curves (especially with complex rigs), share one test case and the desired result and this direct‑bones step can be refined further. [1][3]
-
-Citations:
-[1] Anim-Transfter-Tool-1.py https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/86831241/4b9c115d-946e-42b4-abff-e2c8df48835a/Anim-Transfter-Tool-1.py
-[2] Property Definitions (bpy.props)¶ https://docs.blender.org/api/current/bpy.props.html
-[3] bpy.utils. - Blender Python API https://docs.blender.org/api/current/bpy.utils.html
