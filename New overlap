@@ -1,0 +1,225 @@
+# -*- coding: utf-8 -*-
+
+bl_info = {
+    "name": "Overlap Addon",
+    "description": "Calculate an overlap/phase animation.",
+    "author": "Venkatesh sanku",
+    "version": (1, 2, 0),
+    "blender": (5, 0, 1),
+    "location": "View3D > Sidebar > Tool Tab",
+    "support": "COMMUNITY",
+    "category": "Animation"
+}
+
+import bpy
+import math
+import mathutils
+import copy
+import numpy as np
+
+# ----------------------------------------------------------
+# Core Logic
+# ----------------------------------------------------------
+
+class OverlapModule:
+    def __init__(self):
+        self.delay = 5.0
+        self.recursion = 5.0
+        self.strength = 1.0
+        self.threshold = 0.001
+        self.sf = 0
+        self.ef = 10
+        self.debug = False
+
+    # ------------------------------------------------------
+
+    def get_hierarchy_count(self, pbn):
+        cnt = 0
+        p = pbn.parent
+        while p:
+            cnt += 1
+            p = p.parent
+        return cnt
+
+    def get_tree_list(self):
+        obj_trees = {}
+        selected = bpy.context.selected_pose_bones
+
+        for pbn in selected:
+            if not pbn.parent:
+                continue
+            if pbn.parent in selected and pbn.parent.children[0] == pbn:
+                continue
+
+            depth = self.get_hierarchy_count(pbn)
+            obj_trees.setdefault(depth, {})
+            tree = [pbn]
+
+            c = pbn.children[0] if pbn.children else None
+            while c and c in selected:
+                tree.append(c)
+                c = c.children[0] if c.children else None
+
+            obj_trees[depth][f"tree_{len(obj_trees[depth])}"] = {
+                "obj_list": tree,
+                "pre_mt": [],
+                "obj_length": [],
+                "old_vec": []
+            }
+        return obj_trees
+
+    # ------------------------------------------------------
+
+    def get_bone_pre_matrix(self, pbn):
+        amt = bpy.context.active_object
+        return amt.matrix_world @ pbn.matrix
+
+    def get_bone_length_matrix(self, pbn):
+        amt = bpy.context.active_object
+        wmt = amt.matrix_world @ pbn.matrix
+        pmt = amt.matrix_world @ pbn.parent.matrix
+        return (wmt.transposed() @ pmt.transposed().inverted()).transposed()
+
+    def normalize(self, v):
+        n = np.linalg.norm(v)
+        return v if n == 0 else v / n
+
+    # ------------------------------------------------------
+
+    def set_pre_data(self, trees):
+        for depth in trees:
+            for t in trees[depth].values():
+                for pbn in t["obj_list"]:
+                    t["pre_mt"].append(self.get_bone_pre_matrix(pbn))
+                    t["obj_length"].append(self.get_bone_length_matrix(pbn))
+                    t["old_vec"].append(mathutils.Vector((0, 0, 0)))
+        return trees
+
+    # ------------------------------------------------------
+
+    def set_animkey(self, obj):
+        f = bpy.context.scene.frame_current
+        for path in ("location", "rotation_euler", "rotation_quaternion", "scale"):
+            obj.keyframe_insert(data_path=path, frame=f)
+
+    # ------------------------------------------------------
+
+    def calculate(self, data):
+        amt = bpy.context.active_object
+        parent_mt = amt.matrix_world @ data["obj_list"][0].parent.matrix
+
+        for i, obj in enumerate(data["obj_list"]):
+            target = (data["obj_length"][i].transposed() @ parent_mt.transposed()).transposed()
+            new_mt = copy.copy(data["pre_mt"][i])
+
+            # phase rotation
+            pre_y = new_mt.to_3x3()[1].normalized()
+            tar_y = target.to_3x3()[1].normalized()
+            axis = pre_y.cross(tar_y)
+
+            if axis.length > 0:
+                angle = pre_y.angle(tar_y)
+                rot = mathutils.Matrix.Rotation(angle / self.delay, 4, axis)
+                new_mt = rot @ new_mt
+
+            new_mt.translation = target.translation
+
+            # apply
+            obj.matrix_basis = amt.matrix_world.inverted() @ new_mt
+            bpy.context.view_layer.update()
+            self.set_animkey(obj)
+
+            data["pre_mt"][i] = new_mt
+            parent_mt = new_mt
+
+    # ------------------------------------------------------
+
+    def execute(self, trees):
+        for f in range(self.sf + 1, self.ef + 1):
+            bpy.context.scene.frame_set(f)
+            for depth in trees:
+                for t in trees[depth].values():
+                    self.calculate(t)
+
+# ----------------------------------------------------------
+# UI
+# ----------------------------------------------------------
+
+class OverlapProperties(bpy.types.PropertyGroup):
+    start_frame: bpy.props.IntProperty(default=0)
+    end_frame: bpy.props.IntProperty(default=100)
+    delay: bpy.props.FloatProperty(default=3.0, min=1.0)
+    recursion: bpy.props.FloatProperty(default=5.0)
+    strength: bpy.props.FloatProperty(default=1.0)
+    threshold: bpy.props.FloatProperty(default=0.001)
+    debug: bpy.props.BoolProperty(default=False)
+
+# ----------------------------------------------------------
+
+class OVERLAP_OT_Calculate(bpy.types.Operator):
+    bl_idname = "overlap.calculate"
+    bl_label = "Calculate Overlap"
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'POSE'
+
+    def execute(self, context):
+        ps = context.scene.overlap_props
+        mod = OverlapModule()
+        mod.sf = ps.start_frame
+        mod.ef = ps.end_frame
+        mod.delay = ps.delay
+        mod.recursion = ps.recursion / 10
+        mod.strength = ps.strength
+        mod.threshold = ps.threshold
+
+        bpy.context.scene.frame_set(ps.start_frame)
+        trees = mod.get_tree_list()
+        trees = mod.set_pre_data(trees)
+        mod.execute(trees)
+
+        return {'FINISHED'}
+
+# ----------------------------------------------------------
+
+class OVERLAP_PT_Panel(bpy.types.Panel):
+    bl_label = "Overlap Addon"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Venky Anim Toolz"
+    bl_context = "posemode"
+
+    def draw(self, context):
+        ps = context.scene.overlap_props
+        layout = self.layout
+        layout.prop(ps, "start_frame")
+        layout.prop(ps, "end_frame")
+        layout.prop(ps, "delay")
+        layout.prop(ps, "recursion")
+        layout.prop(ps, "strength")
+        layout.prop(ps, "threshold")
+        layout.operator("overlap.calculate", icon='KEYTYPE_KEYFRAME_VEC')
+
+# ----------------------------------------------------------
+# Register
+# ----------------------------------------------------------
+
+classes = (
+    OverlapProperties,
+    OVERLAP_OT_Calculate,
+    OVERLAP_PT_Panel,
+)
+
+def register():
+    for c in classes:
+        bpy.utils.register_class(c)
+    bpy.types.Scene.overlap_props = bpy.props.PointerProperty(type=OverlapProperties)
+
+def unregister():
+    for c in reversed(classes):
+        bpy.utils.unregister_class(c)
+    del bpy.types.Scene.overlap_props
+
+if __name__ == "__main__":
+    register()
