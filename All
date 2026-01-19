@@ -3,22 +3,15 @@
 bl_info = {
     "name": "Combined Animation & Gizmo Tools",
     "author": "Venkatesh sanku",
-    "version": (1, 6, 1),
+    "version": (1, 6, 2),
     "blender": (5, 0, 1),
     "location": "Timeline / Dopesheet / Graph / 3D View",
-    "description": "Animation utilities + working gizmo size controller",
+    "description": "Animation tools + correct gizmo-only size control",
     "category": "Animation",
 }
 
 import bpy
 from bpy.props import FloatProperty, PointerProperty
-
-# --------------------------------------------------
-# UTIL
-# --------------------------------------------------
-
-def get_active_object(context):
-    return context.view_layer.objects.active
 
 
 # --------------------------------------------------
@@ -31,7 +24,7 @@ class ANIM_OT_new_action(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-        obj = get_active_object(context)
+        obj = context.view_layer.objects.active
         if not obj:
             return {'CANCELLED'}
 
@@ -43,7 +36,7 @@ class ANIM_OT_new_action(bpy.types.Operator):
 
 
 # --------------------------------------------------
-# ACTION → SCENE RANGE (FIXED)
+# ACTION → SCENE RANGE (FIXED PROPERLY)
 # --------------------------------------------------
 
 class ANIM_OT_action_to_scene_range(bpy.types.Operator):
@@ -53,26 +46,17 @@ class ANIM_OT_action_to_scene_range(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        obj = get_active_object(context)
+        obj = context.view_layer.objects.active
         return obj and obj.animation_data and obj.animation_data.action
 
     def execute(self, context):
-        obj = get_active_object(context)
-        action = obj.animation_data.action
+        action = context.view_layer.objects.active.animation_data.action
 
-        frames = [
-            kp.co.x
-            for fc in action.fcurves
-            for kp in fc.keyframe_points
-        ]
-
-        if not frames:
-            self.report({'WARNING'}, "Action has no keyframes")
-            return {'CANCELLED'}
+        start, end = action.frame_range
 
         scene = context.scene
-        scene.frame_start = int(min(frames))
-        scene.frame_end = int(max(frames))
+        scene.frame_start = int(start)
+        scene.frame_end = int(end)
 
         return {'FINISHED'}
 
@@ -97,7 +81,7 @@ def draw_timeline_header(self, context):
 
 
 def draw_anim_header(self, context):
-    obj = get_active_object(context)
+    obj = context.view_layer.objects.active
     if not obj or not obj.animation_data:
         return
 
@@ -118,21 +102,20 @@ def draw_anim_header(self, context):
 
 
 # --------------------------------------------------
-# GIZMO SIZE (FIXED)
+# GIZMO SIZE (GIZMO ONLY – CORRECT)
 # --------------------------------------------------
 
 def update_gizmo(self, context):
-    # Blender 5.x correct property
-    context.preferences.view.ui_scale = self.gizmo_size
+    context.preferences.view.gizmo_size = self.gizmo_size
 
 
 class GizmoProps(bpy.types.PropertyGroup):
     gizmo_size: FloatProperty(
-        name="UI / Gizmo Scale",
-        description="Scales viewport gizmos correctly in Blender 5.x",
-        default=1.0,
-        min=0.5,
-        max=2.0,
+        name="Gizmo Size",
+        description="Scales transform gizmos only",
+        default=75.0,
+        min=10.0,
+        max=200.0,
         update=update_gizmo
     )
 
