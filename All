@@ -3,10 +3,10 @@
 bl_info = {
     "name": "Combined Animation & Gizmo Tools",
     "author": "Venkatesh sanku",
-    "version": (1, 5, 2),
+    "version": (1, 6, 0),
     "blender": (5, 0, 1),
-    "location": "Timeline Header, 3D View Sidebar",
-    "description": "Action tools + Gizmo size controller",
+    "location": "Timeline / Dopesheet / Graph Editor",
+    "description": "Animation header tools + Gizmo size controller",
     "category": "Animation",
 }
 
@@ -18,8 +18,8 @@ from bpy.props import FloatProperty, PointerProperty
 # NEW ACTION
 # --------------------------------------------------
 
-class TIMELINE_OT_new_action(bpy.types.Operator):
-    bl_idname = "timeline.new_action"
+class ANIM_OT_new_action(bpy.types.Operator):
+    bl_idname = "anim.new_action"
     bl_label = "New Action"
 
     def execute(self, context):
@@ -38,8 +38,8 @@ class TIMELINE_OT_new_action(bpy.types.Operator):
 # ACTION → SCENE RANGE
 # --------------------------------------------------
 
-class TIMELINE_OT_action_to_scene_range(bpy.types.Operator):
-    bl_idname = "timeline.action_to_scene_range"
+class ANIM_OT_action_to_scene_range(bpy.types.Operator):
+    bl_idname = "anim.action_to_scene_range"
     bl_label = "Action to Scene Range"
 
     @classmethod
@@ -56,7 +56,7 @@ class TIMELINE_OT_action_to_scene_range(bpy.types.Operator):
         ]
 
         if not frames:
-            self.report({'WARNING'}, "No keyframes")
+            self.report({'WARNING'}, "No keyframes in action")
             return {'CANCELLED'}
 
         scene = context.scene
@@ -66,28 +66,45 @@ class TIMELINE_OT_action_to_scene_range(bpy.types.Operator):
 
 
 # --------------------------------------------------
-# TIMELINE HEADER DRAW
+# TIMELINE HEADER (NO ACTION LIST – BY DESIGN)
 # --------------------------------------------------
 
 def draw_timeline_header(self, context):
-    if context.space_data.type != 'TIMELINE':
-        return
+    layout = self.layout
 
+    layout.separator()
+    layout.operator("ed.undo", text="", icon='LOOP_BACK')
+    layout.operator("ed.redo", text="", icon='LOOP_FORWARDS')
+
+    if ANIM_OT_action_to_scene_range.poll(context):
+        layout.operator(
+            "anim.action_to_scene_range",
+            text="",
+            icon='TIME'
+        )
+
+
+# --------------------------------------------------
+# DOPESHEET / GRAPH HEADER (ACTION LIST WORKS HERE)
+# --------------------------------------------------
+
+def draw_anim_header(self, context):
     obj = context.active_object
     if not obj or not obj.animation_data:
         return
 
-    layout = self.layout
     anim = obj.animation_data
+    layout = self.layout
 
     layout.separator()
-    layout.template_ID(anim, "action", new="timeline.new_action")
+    layout.template_ID(anim, "action", new="anim.new_action")
+
     layout.operator("ed.undo", text="", icon='LOOP_BACK')
     layout.operator("ed.redo", text="", icon='LOOP_FORWARDS')
 
     if anim.action:
         layout.operator(
-            "timeline.action_to_scene_range",
+            "anim.action_to_scene_range",
             text="",
             icon='TIME'
         )
@@ -126,8 +143,8 @@ class VIEW3D_PT_gizmo_panel(bpy.types.Panel):
 # --------------------------------------------------
 
 classes = (
-    TIMELINE_OT_new_action,
-    TIMELINE_OT_action_to_scene_range,
+    ANIM_OT_new_action,
+    ANIM_OT_action_to_scene_range,
     GizmoProps,
     VIEW3D_PT_gizmo_panel,
 )
@@ -137,11 +154,17 @@ def register():
         bpy.utils.register_class(c)
 
     bpy.types.Scene.gizmo_props = PointerProperty(type=GizmoProps)
+
     bpy.types.TIMELINE_HT_header.append(draw_timeline_header)
+    bpy.types.DOPESHEET_HT_header.append(draw_anim_header)
+    bpy.types.GRAPH_HT_header.append(draw_anim_header)
 
 
 def unregister():
     bpy.types.TIMELINE_HT_header.remove(draw_timeline_header)
+    bpy.types.DOPESHEET_HT_header.remove(draw_anim_header)
+    bpy.types.GRAPH_HT_header.remove(draw_anim_header)
+
     del bpy.types.Scene.gizmo_props
 
     for c in reversed(classes):
