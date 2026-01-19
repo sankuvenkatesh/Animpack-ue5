@@ -1,5 +1,6 @@
 import bpy
 import os
+import shutil
 import platform
 import subprocess
 from bpy.props import StringProperty, BoolProperty
@@ -7,10 +8,10 @@ from bpy.props import StringProperty, BoolProperty
 bl_info = {
     "name": "Playblast Quad View",
     "author": "Venkatesh sanku",
-    "version": (1, 3),
+    "version": (1, 4),
     "blender": (5, 0, 1),
     "location": "View3D > Sidebar > Playblast",
-    "description": "One-click Quad View playblast (image & animation) for viewport",
+    "description": "True Quad View playblast (PNG → MP4) for viewport",
     "category": "3D View",
 }
 
@@ -27,12 +28,12 @@ class QP_Props(bpy.types.PropertyGroup):
     is_quad_active: BoolProperty(default=False)
 
 # ------------------------------------------------------------------------
-# Quad View
+# Quad View Switch
 # ------------------------------------------------------------------------
 
 class QP_OT_switch_layout(bpy.types.Operator):
     bl_idname = "qp.switch_layout"
-    bl_label = "Switch Quad View"
+    bl_label = "Toggle Quad View"
 
     def execute(self, context):
         for area in context.screen.areas:
@@ -45,57 +46,109 @@ class QP_OT_switch_layout(bpy.types.Operator):
         return {'CANCELLED'}
 
 # ------------------------------------------------------------------------
-# Screenshot Animation → MP4 (NO VSE)
+# Quad View PNG Playblast (Modal)
 # ------------------------------------------------------------------------
 
-class QP_OT_playblast_animation(bpy.types.Operator):
-    bl_idname = "qp.playblast_animation"
-    bl_label = "Playblast Animation"
+class QP_OT_quad_playblast(bpy.types.Operator):
+    bl_idname = "qp.quad_playblast"
+    bl_label = "Quad View Playblast"
+
+    _timer = None
+    _frame = 0
 
     def execute(self, context):
-        scene = context.scene
-        props = scene.qp_props
+        self.scene = context.scene
+        self.start = self.scene.frame_start
+        self.end = self.scene.frame_end
+        self._frame = self.start
 
-        output = bpy.path.abspath(props.render_filepath)
-        folder = os.path.dirname(output)
-        os.makedirs(folder, exist_ok=True)
+        base = bpy.path.abspath(self.scene.qp_props.render_filepath)
+        self.temp_dir = os.path.splitext(base)[0] + "_temp"
+        os.makedirs(self.temp_dir, exist_ok=True)
 
-        # Render settings (CRITICAL)
-        scene.render.image_settings.file_format = 'FFMPEG'
-        scene.render.ffmpeg.format = 'MPEG4'
-        scene.render.ffmpeg.codec = 'H264'
-        scene.render.ffmpeg.constant_rate_factor = 'MEDIUM'
-        scene.render.ffmpeg.ffmpeg_preset = 'GOOD'
-        scene.render.ffmpeg.use_max_b_frames = False
-        scene.render.filepath = output
+        self.area = next(a for a in context.screen.areas if a.type == 'VIEW_3D')
+        self.region = next(r for r in self.area.regions if r.type == 'WINDOW')
+        self.space = self.area.spaces.active
 
-        # Viewport render (Playblast)
-        scene.render.use_lock_interface = True
-        bpy.ops.render.opengl(animation=True)
+        # Hide UI
+        self._ui = self.space.show_region_ui
+        self._toolbar = self.space.show_region_toolbar
+        self._gizmo = getattr(self.space, "show_gizmo", None)
 
-        self.report({'INFO'}, f"MP4 Generated: {output}")
-        return {'FINISHED'}
+        self.space.show_region_ui = False
+        self.space.show_region_toolbar = False
+        if self._gizmo is not None:
+            self.space.show_gizmo = False
+
+        wm = context.window_manager
+        self._timer = wm.event_timer_add(0.05, window=context.window)
+        wm.modal_handler_add(self)
+        return {'RUNNING_MODAL'}
+
+    def modal(self, context, event):
+        if event.type != 'TIMER':
+            return {'RUNNING_MODAL'}
+
+        if self._frame > self.end:
+            # Restore UI
+            self.space.show_region_ui = self._ui
+            self.space.show_region_toolbar = self._toolbar
+            if self._gizmo is not None:
+                self.space.show_gizmo = self._gizmo
+
+            context.window_manager.event_timer_remove(self._timer)
+
+            bpy.app.timers.register(
+                lambda: bpy.ops.qp.encode_ffmpeg(),
+                first_interval=0.1
+            )
+            return {'FINISHED'}
+
+        self.scene.frame_set(self._frame)
+        path = os.path.join(self.temp_dir, f"frame_{self._frame:04d}.png")
+
+        with context.temp_override(area=self.area, region=self.region):
+            bpy.ops.screen.screenshot_area(filepath=path)
+
+        self._frame += 1
+        return {'RUNNING_MODAL'}
 
 # ------------------------------------------------------------------------
-# Open Folder
+# FFMPEG Encode (SAFE & FAST)
 # ------------------------------------------------------------------------
 
-class QP_OT_open_folder(bpy.types.Operator):
-    bl_idname = "qp.open_folder"
-    bl_label = "Open Output Folder"
+class QP_OT_encode_ffmpeg(bpy.types.Operator):
+    bl_idname = "qp.encode_ffmpeg"
+    bl_label = "Encode Quad Playblast"
 
     def execute(self, context):
-        path = os.path.dirname(
-            bpy.path.abspath(context.scene.qp_props.render_filepath)
-        )
+        base = bpy.path.abspath(context.scene.qp_props.render_filepath)
+        temp = os.path.splitext(base)[0] + "_temp"
 
         if platform.system() == "Windows":
-            os.startfile(path)
-        elif platform.system() == "Darwin":
-            subprocess.Popen(["open", path])
+            ffmpeg = "ffmpeg"
         else:
-            subprocess.Popen(["xdg-open", path])
+            ffmpeg = "ffmpeg"
 
+        cmd = [
+            ffmpeg,
+            "-y",
+            "-framerate", str(context.scene.render.fps),
+            "-i", os.path.join(temp, "frame_%04d.png"),
+            "-c:v", "libx264",
+            "-pix_fmt", "yuv420p",
+            "-crf", "18",
+            base
+        ]
+
+        try:
+            subprocess.run(cmd, check=True)
+        except Exception as e:
+            self.report({'ERROR'}, str(e))
+            return {'CANCELLED'}
+
+        shutil.rmtree(temp)
+        self.report({'INFO'}, f"Quad MP4 created: {base}")
         return {'FINISHED'}
 
 # ------------------------------------------------------------------------
@@ -104,14 +157,12 @@ class QP_OT_open_folder(bpy.types.Operator):
 
 class QP_OT_one_click(bpy.types.Operator):
     bl_idname = "qp.one_click"
-    bl_label = "One-Click Playblast"
+    bl_label = "One-Click Quad Playblast"
 
     def execute(self, context):
         if not context.scene.qp_props.is_quad_active:
             bpy.ops.qp.switch_layout()
-
-        bpy.ops.qp.playblast_animation()
-        bpy.ops.qp.open_folder()
+        bpy.ops.qp.quad_playblast()
         return {'FINISHED'}
 
 # ------------------------------------------------------------------------
@@ -130,11 +181,9 @@ class QP_PT_panel(bpy.types.Panel):
 
         layout.prop(props, "render_filepath")
         layout.operator("qp.switch_layout")
-        layout.operator("qp.playblast_animation", icon='RENDER_ANIMATION')
         layout.separator()
+        layout.operator("qp.quad_playblast", icon='RENDER_ANIMATION')
         layout.operator("qp.one_click", icon='PLAY')
-        layout.separator()
-        layout.operator("qp.open_folder", icon='FOLDER_REDIRECT')
 
 # ------------------------------------------------------------------------
 # Register
@@ -143,8 +192,8 @@ class QP_PT_panel(bpy.types.Panel):
 classes = (
     QP_Props,
     QP_OT_switch_layout,
-    QP_OT_playblast_animation,
-    QP_OT_open_folder,
+    QP_OT_quad_playblast,
+    QP_OT_encode_ffmpeg,
     QP_OT_one_click,
     QP_PT_panel,
 )
