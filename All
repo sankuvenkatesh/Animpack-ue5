@@ -1,7 +1,9 @@
+# -*- coding: utf-8 -*-
+
 bl_info = {
     "name": "Combined Animation & Gizmo Tools",
     "author": "Venkatesh sanku",
-    "version": (1, 4, 0),
+    "version": (1, 4, 1),
     "blender": (5, 0, 1),
     "description": (
         "Adds Action list and Undo/Redo buttons to timeline/dopesheet/graph editor headers, "
@@ -9,10 +11,32 @@ bl_info = {
         "Gizmo Size Adjuster panel with shortcuts, "
         "and Action-to-Scene-Range button in Timeline."
     ),
-    "category": "Animation / 3D View",
+    "category": "Animation",
 }
 
 import bpy
+
+# ---------------------------------------------------
+# New Action Operator
+# ---------------------------------------------------
+
+class TIMELINE_OT_new_action(bpy.types.Operator):
+    bl_idname = "timeline.new_action"
+    bl_label = "New Action"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        obj = context.active_object
+        if not obj:
+            return {'CANCELLED'}
+
+        if not obj.animation_data:
+            obj.animation_data_create()
+
+        act = bpy.data.actions.new(name="Action")
+        obj.animation_data.action = act
+        return {'FINISHED'}
+
 
 # ---------------------------------------------------
 # Action → Scene Range Operator
@@ -46,55 +70,49 @@ class TIMELINE_OT_action_to_scene_range(bpy.types.Operator):
         scene.frame_end = int(max(frames))
         return {'FINISHED'}
 
+
 # ---------------------------------------------------
 # Timeline Header UI
 # ---------------------------------------------------
 
-def add_timeline_action_tools(self, context):
-    layout = self.layout
-    obj = context.active_object
-
-    if obj and obj.animation_data:
-        layout.separator()
-        layout.operator(
-            TIMELINE_OT_action_to_scene_range.bl_idname,
-            text="",
-            icon='TIME'
-        )
-
-# ---------------------------------------------------
-# Existing Action List
-# ---------------------------------------------------
-
-regions = {'TIMELINE', 'DOPESHEET', 'FCURVES'}
+REGIONS = {'TIMELINE', 'DOPESHEET', 'FCURVES'}
 
 def add_actionlist(self, context):
     obj = context.active_object
     sd = context.space_data
-    if obj and sd.mode in regions:
-        anim_data = obj.animation_data
-        if anim_data:
-            self.layout.template_ID(anim_data, "action", new=NEW_ACTION.bl_idname)
 
-class NEW_ACTION(bpy.types.Operator):
-    bl_idname = "timelineaction.newaction"
-    bl_label = "New Action"
-    bl_options = {"REGISTER", "UNDO"}
+    if not obj or not sd or sd.mode not in REGIONS:
+        return
 
-    def execute(self, context):
-        act = bpy.data.actions.new(name="Action")
-        obj = context.active_object
-        if not obj.animation_data:
-            obj.animation_data_create()
-        obj.animation_data.action = act
-        return {'FINISHED'}
+    anim = obj.animation_data
+    if not anim:
+        return
+
+    layout = self.layout
+    layout.template_ID(
+        anim,
+        "action",
+        new="timeline.new_action"
+    )
+
+
+def add_timeline_action_tools(self, context):
+    obj = context.active_object
+    if obj and obj.animation_data and obj.animation_data.action:
+        self.layout.separator()
+        self.layout.operator(
+            "timeline.action_to_scene_range",
+            text="",
+            icon='TIME'
+        )
+
 
 # ---------------------------------------------------
 # Registration
 # ---------------------------------------------------
 
 classes = (
-    NEW_ACTION,
+    TIMELINE_OT_new_action,
     TIMELINE_OT_action_to_scene_range,
 )
 
@@ -107,6 +125,7 @@ def register():
 
     print("✅ Combined Animation & Gizmo Tools (5.0.1) Registered")
 
+
 def unregister():
     bpy.types.TIMELINE_HT_header.remove(add_actionlist)
     bpy.types.TIMELINE_HT_header.remove(add_timeline_action_tools)
@@ -115,6 +134,7 @@ def unregister():
         bpy.utils.unregister_class(cls)
 
     print("❌ Combined Animation & Gizmo Tools Unregistered")
+
 
 if __name__ == "__main__":
     register()
