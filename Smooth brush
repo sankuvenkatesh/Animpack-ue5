@@ -1,10 +1,10 @@
 bl_info = {
     "name": "FCurve Smooth Brush Pro",
     "author": "Venkatesh sanku",
-    "version": (2, 1, 2),
+    "version": (2, 2, 0),
     "blender": (5, 0, 0),
     "location": "Graph Editor > Sidebar > Tool",
-    "description": "Stable FCurve smoothing brush for Blender 5.x",
+    "description": "Stable FCurve smoothing brush with ON/OFF toggle (Blender 5.x)",
     "category": "Animation",
 }
 
@@ -48,15 +48,15 @@ def channel_allowed(fc, mode):
     return False
 
 # --------------------------------------------------
-# Draw helpers
+# Draw cursor
 # --------------------------------------------------
 
 def draw_cursor(self, context):
-    if not context.area:
+    props = context.scene.fcurve_brush
+    if not props.enabled:
         return
 
-    p = context.scene.fcurve_brush
-    r = p.brush_size
+    r = props.brush_size
     cx, cy = self.mx, self.my
 
     shader = gpu.shader.from_builtin('UNIFORM_COLOR')
@@ -76,6 +76,13 @@ def draw_cursor(self, context):
 # --------------------------------------------------
 
 class FCurveBrushProps(bpy.types.PropertyGroup):
+
+    enabled: BoolProperty(
+        name="Brush Enabled",
+        description="Enable / Disable brush without exiting",
+        default=True
+    )
+
     brush_size: FloatProperty(default=50, min=1, max=600)
     strength: FloatProperty(default=0.6, min=0, max=1)
 
@@ -98,6 +105,7 @@ class FCurveBrushProps(bpy.types.PropertyGroup):
     )
 
     filter_radius: IntProperty(default=3, min=1, max=10)
+
     channel_filter: EnumProperty(
         items=[('ALL',"All",""), ('LOC',"Loc",""),
                ('ROT',"Rot",""), ('SCALE',"Scale",""),
@@ -110,7 +118,7 @@ class FCurveBrushProps(bpy.types.PropertyGroup):
     active: BoolProperty(default=False)
 
 # --------------------------------------------------
-# Operator (NO __init__)
+# Operator
 # --------------------------------------------------
 
 class GRAPH_OT_fcurve_brush(bpy.types.Operator):
@@ -124,13 +132,15 @@ class GRAPH_OT_fcurve_brush(bpy.types.Operator):
         self.h_cursor = None
 
     def modal(self, context, event):
+        props = context.scene.fcurve_brush
+
         self.mx = event.mouse_region_x
         self.my = event.mouse_region_y
         self.mouse = Vector((self.mx, self.my))
 
         if event.type == 'ESC':
             self.cleanup()
-            context.scene.fcurve_brush.active = False
+            props.active = False
             context.window.cursor_set('DEFAULT')
             return {'CANCELLED'}
 
@@ -142,16 +152,19 @@ class GRAPH_OT_fcurve_brush(bpy.types.Operator):
                 self.painting = False
 
         if event.type == 'MOUSEMOVE':
-            if (
-                context.scene.fcurve_brush.pressure_enabled
+            self.pressure = (
+                event.pressure
+                if props.pressure_enabled
                 and event.pressure is not None
                 and event.pressure > 0
-            ):
-                self.pressure = event.pressure
-            else:
-                self.pressure = 1.0
+                else 1.0
+            )
 
-            if self.painting and time.time() - self.last_time > 0.03:
+            if (
+                props.enabled
+                and self.painting
+                and time.time() - self.last_time > 0.03
+            ):
                 self.apply(context)
                 self.last_time = time.time()
 
@@ -160,15 +173,15 @@ class GRAPH_OT_fcurve_brush(bpy.types.Operator):
         return {'RUNNING_MODAL'}
 
     def apply(self, context):
-        p = context.scene.fcurve_brush
+        props = context.scene.fcurve_brush
         view = context.region.view2d
-        strength = p.strength * self.pressure
+        strength = props.strength * self.pressure
 
         for fc in context.selected_editable_fcurves:
-            if not channel_allowed(fc, p.channel_filter):
+            if not channel_allowed(fc, props.channel_filter):
                 continue
 
-            keys = list(fc.keyframe_points)[::p.sample_rate]
+            keys = list(fc.keyframe_points)[::props.sample_rate]
 
             for i, k in enumerate(keys):
                 coord = view.view_to_region(k.co[0], k.co[1], clip=False)
@@ -180,31 +193,31 @@ class GRAPH_OT_fcurve_brush(bpy.types.Operator):
                 dy = sy - self.mouse.y
                 dist = (dx*dx + dy*dy) ** 0.5
 
-                if dist > p.brush_size:
+                if dist > props.brush_size:
                     continue
 
-                f = (1 - dist/p.brush_size) * strength
+                f = (1 - dist/props.brush_size) * strength
 
-                # ---- Y axis ----
-                if p.axis in {'Y','BOTH'}:
-                    if p.mode == 'SMOOTH' and 0 < i < len(keys)-1:
+                # ---- Y AXIS ----
+                if props.axis in {'Y','BOTH'}:
+                    if props.mode == 'SMOOTH' and 0 < i < len(keys)-1:
                         avg = (keys[i-1].co[1] + keys[i+1].co[1]) * 0.5
                         k.co[1] += (avg - k.co[1]) * f
 
-                    elif p.mode in {'GAUSSIAN','BUTTER'}:
-                        r = p.filter_radius
+                    elif props.mode in {'GAUSSIAN','BUTTER'}:
+                        r = props.filter_radius
                         if i < r or i >= len(keys)-r:
                             continue
                         vals = [x.co[1] for x in keys[i-r:i+r+1]]
                         target = (
                             sum(v*w for v,w in zip(vals, gaussian_weights(r)))
-                            if p.mode == 'GAUSSIAN'
+                            if props.mode == 'GAUSSIAN'
                             else butterworth(vals)[r]
                         )
                         k.co[1] += (target - k.co[1]) * f
 
-                # ---- X axis ----
-                if p.axis in {'X','BOTH'} and p.mode == 'RELAX' and 0 < i < len(keys)-1:
+                # ---- X AXIS ----
+                if props.axis in {'X','BOTH'} and props.mode == 'RELAX' and 0 < i < len(keys)-1:
                     avgx = (keys[i-1].co[0] + keys[i+1].co[0]) * 0.5
                     k.co[0] += (avgx - k.co[0]) * f
 
@@ -214,7 +227,7 @@ class GRAPH_OT_fcurve_brush(bpy.types.Operator):
         if context.area.type != 'GRAPH_EDITOR':
             return {'CANCELLED'}
 
-        # SAFE INIT HERE
+        # SAFE INIT
         self.mouse = Vector((0, 0))
         self.mx = self.my = 0
         self.painting = False
@@ -233,7 +246,7 @@ class GRAPH_OT_fcurve_brush(bpy.types.Operator):
         return {'RUNNING_MODAL'}
 
 # --------------------------------------------------
-# UI
+# UI Panel
 # --------------------------------------------------
 
 class GRAPH_PT_fcurve_brush(bpy.types.Panel):
@@ -246,6 +259,14 @@ class GRAPH_PT_fcurve_brush(bpy.types.Panel):
         p = context.scene.fcurve_brush
         l = self.layout
 
+        row = l.row()
+        row.prop(
+            p,
+            "enabled",
+            toggle=True,
+            icon='HIDE_OFF' if p.enabled else 'HIDE_ON'
+        )
+
         if not p.active:
             l.operator("graph.fcurve_brush", icon='BRUSH_DATA')
         else:
@@ -256,8 +277,10 @@ class GRAPH_PT_fcurve_brush(bpy.types.Panel):
         l.prop(p, "channel_filter")
         l.prop(p, "brush_size")
         l.prop(p, "strength")
+
         if p.mode in {'GAUSSIAN','BUTTER'}:
             l.prop(p, "filter_radius")
+
         l.prop(p, "pressure_enabled")
         l.prop(p, "sample_rate")
 
