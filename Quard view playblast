@@ -1,4 +1,8 @@
-import bpy, os, shutil, platform, subprocess
+import bpy
+import os
+import shutil
+import platform
+import subprocess
 from bpy.props import StringProperty, BoolProperty
 
 bl_info = {
@@ -12,7 +16,7 @@ bl_info = {
 }
 
 # ------------------------------------------------------------------------
-# Property Group
+# Properties
 # ------------------------------------------------------------------------
 
 class QP_Props(bpy.types.PropertyGroup):
@@ -79,16 +83,15 @@ class QP_OT_screenshot_quadview(bpy.types.Operator):
         region = next(r for r in area.regions if r.type == 'WINDOW')
         space = area.spaces.active
 
-        # Hide UI for clean screenshot
-        _ui = space.show_region_ui
-        _toolbar = space.show_region_toolbar
+        # Hide UI
+        ui = space.show_region_ui
+        toolbar = space.show_region_toolbar
+        gizmo = getattr(space, "show_gizmo", None)
+
         space.show_region_ui = False
         space.show_region_toolbar = False
-        if hasattr(space, "show_gizmo"):
-            _gizmo = space.show_gizmo
+        if gizmo is not None:
             space.show_gizmo = False
-        else:
-            _gizmo = None
 
         filepath = bpy.path.abspath(context.scene.qp_props.render_filepath)
         filepath = os.path.splitext(filepath)[0] + ".png"
@@ -98,14 +101,18 @@ class QP_OT_screenshot_quadview(bpy.types.Operator):
             bpy.ops.screen.screenshot_area(filepath=filepath)
 
         # Restore UI
-        space.show_region_ui = _ui
-        space.show_region_toolbar = _toolbar
-        if _gizmo is not None:
-            space.show_gizmo = _gizmo
+        space.show_region_ui = ui
+        space.show_region_toolbar = toolbar
+        if gizmo is not None:
+            space.show_gizmo = gizmo
 
         self.report({'INFO'}, f"Saved: {filepath}")
         return {'FINISHED'}
 
+
+# ------------------------------------------------------------------------
+# Animation Screenshot (Modal)
+# ------------------------------------------------------------------------
 
 class QP_OT_screenshot_quadview_anim(bpy.types.Operator):
     bl_idname = "qp.screenshot_quadview_anim"
@@ -128,16 +135,15 @@ class QP_OT_screenshot_quadview_anim(bpy.types.Operator):
         self.temp_dir = os.path.splitext(base)[0] + "_temp"
         os.makedirs(self.temp_dir, exist_ok=True)
 
-        # Hide UI for clean screenshots
+        # Hide UI
         self._ui = self.space.show_region_ui
         self._toolbar = self.space.show_region_toolbar
+        self._gizmo = getattr(self.space, "show_gizmo", None)
+
         self.space.show_region_ui = False
         self.space.show_region_toolbar = False
-        if hasattr(self.space, "show_gizmo"):
-            self._gizmo = self.space.show_gizmo
+        if self._gizmo is not None:
             self.space.show_gizmo = False
-        else:
-            self._gizmo = None
 
         wm = context.window_manager
         self._timer = wm.event_timer_add(0.05, window=context.window)
@@ -156,7 +162,12 @@ class QP_OT_screenshot_quadview_anim(bpy.types.Operator):
                 self.space.show_gizmo = self._gizmo
 
             context.window_manager.event_timer_remove(self._timer)
-            bpy.ops.qp.combine_images_to_video()
+
+            # Combine video AFTER modal exits
+            bpy.app.timers.register(
+                lambda: bpy.ops.qp.combine_images_to_video(),
+                first_interval=0.1
+            )
             return {'FINISHED'}
 
         self.scene.frame_set(self._frame)
@@ -169,6 +180,10 @@ class QP_OT_screenshot_quadview_anim(bpy.types.Operator):
         return {'RUNNING_MODAL'}
 
 
+# ------------------------------------------------------------------------
+# Combine Images to Video
+# ------------------------------------------------------------------------
+
 class QP_OT_combine_images_to_video(bpy.types.Operator):
     bl_idname = "qp.combine_images_to_video"
     bl_label = "Combine Images to Video"
@@ -180,7 +195,7 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
 
         images = sorted(f for f in os.listdir(temp) if f.endswith(".png"))
         if not images:
-            self.report({'ERROR'}, "No images found to create video")
+            self.report({'ERROR'}, "No images found")
             return {'CANCELLED'}
 
         img = bpy.data.images.load(os.path.join(temp, images[0]))
@@ -188,38 +203,50 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
         bpy.data.images.remove(img)
 
         video_scene = bpy.data.scenes.new("QP_Video")
+
         video_scene.render.resolution_x = w + w % 2
         video_scene.render.resolution_y = h + h % 2
         video_scene.render.fps = scene.render.fps
         video_scene.render.filepath = base
         video_scene.render.image_settings.file_format = 'FFMPEG'
-        video_scene.render.ffmpeg.codec = 'H264'
         video_scene.render.ffmpeg.format = 'MPEG4'
+        video_scene.render.ffmpeg.codec = 'H264'
+        video_scene.render.ffmpeg.constant_rate_factor = 'MEDIUM'
+        video_scene.render.ffmpeg.ffmpeg_preset = 'GOOD'
+        video_scene.render.ffmpeg.gopsize = 12
+        video_scene.render.ffmpeg.use_max_b_frames = False
 
-        video_scene.sequence_editor_create()
-        frame_number = 1
+        if not video_scene.sequence_editor:
+            video_scene.sequence_editor_create()
+
+        frame = 1
         for img_name in images:
             video_scene.sequence_editor.sequences.new_image(
                 name=img_name,
                 filepath=os.path.join(temp, img_name),
                 channel=1,
-                frame_start=frame_number
+                frame_start=frame
             )
-            frame_number += 1
+            frame += 1
 
         video_scene.frame_start = 1
         video_scene.frame_end = len(images)
 
-        original = context.window.scene
+        original_scene = context.window.scene
         context.window.scene = video_scene
         bpy.ops.render.render(animation=True)
-        context.window.scene = original
+        context.window.scene = original_scene
 
         shutil.rmtree(temp)
         bpy.data.scenes.remove(video_scene)
-        self.report({'INFO'}, f"Video saved to {base}")
+
+        self.report({'INFO'}, f"Video saved: {base}")
         return {'FINISHED'}
 
+
+# ------------------------------------------------------------------------
+# One Click Playblast
+# ------------------------------------------------------------------------
 
 class QP_OT_one_click_playblast(bpy.types.Operator):
     bl_idname = "qp.one_click_playblast"
@@ -231,7 +258,7 @@ class QP_OT_one_click_playblast(bpy.types.Operator):
     def execute(self, context):
         self._step = 0
         wm = context.window_manager
-        self._timer = wm.event_timer_add(0.2, window=context.window)
+        self._timer = wm.event_timer_add(0.3, window=context.window)
         wm.modal_handler_add(self)
         return {'RUNNING_MODAL'}
 
@@ -280,7 +307,6 @@ class QP_PT_panel(bpy.types.Panel):
 
         layout.separator()
         layout.operator("qp.one_click_playblast", icon='PLAY')
-
         layout.separator()
         layout.operator("qp.open_render_folder", icon='FOLDER_REDIRECT')
 
