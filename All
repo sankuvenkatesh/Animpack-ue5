@@ -3,21 +3,21 @@
 bl_info = {
     "name": "Combined Animation & Gizmo Tools",
     "author": "Venkatesh sanku",
-    "version": (1, 4, 1),
+    "version": (1, 5, 0),
     "blender": (5, 0, 1),
+    "location": "Timeline Header / 3D View Sidebar",
     "description": (
-        "Adds Action list and Undo/Redo buttons to timeline/dopesheet/graph editor headers, "
-        "Paste Connect operator to animation right-click menus, "
-        "Gizmo Size Adjuster panel with shortcuts, "
-        "and Action-to-Scene-Range button in Timeline."
+        "Action list with New Action button, Undo/Redo buttons, "
+        "Action to Scene Range tool, and Gizmo Size controller."
     ),
     "category": "Animation",
 }
 
 import bpy
+from bpy.props import FloatProperty
 
 # ---------------------------------------------------
-# New Action Operator
+# NEW ACTION
 # ---------------------------------------------------
 
 class TIMELINE_OT_new_action(bpy.types.Operator):
@@ -39,13 +39,12 @@ class TIMELINE_OT_new_action(bpy.types.Operator):
 
 
 # ---------------------------------------------------
-# Action → Scene Range Operator
+# ACTION → SCENE RANGE
 # ---------------------------------------------------
 
 class TIMELINE_OT_action_to_scene_range(bpy.types.Operator):
     bl_idname = "timeline.action_to_scene_range"
     bl_label = "Action to Scene Range"
-    bl_description = "Set Scene Frame Range to Active Action"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -55,11 +54,11 @@ class TIMELINE_OT_action_to_scene_range(bpy.types.Operator):
 
     def execute(self, context):
         action = context.active_object.animation_data.action
-        frames = []
-
-        for fc in action.fcurves:
-            for kp in fc.keyframe_points:
-                frames.append(kp.co.x)
+        frames = [
+            kp.co.x
+            for fc in action.fcurves
+            for kp in fc.keyframe_points
+        ]
 
         if not frames:
             self.report({'WARNING'}, "Action has no keyframes")
@@ -72,16 +71,17 @@ class TIMELINE_OT_action_to_scene_range(bpy.types.Operator):
 
 
 # ---------------------------------------------------
-# Timeline Header UI
+# TIMELINE HEADER UI
 # ---------------------------------------------------
 
-REGIONS = {'TIMELINE', 'DOPESHEET', 'FCURVES'}
-
-def add_actionlist(self, context):
+def draw_timeline_header(self, context):
     obj = context.active_object
     sd = context.space_data
 
-    if not obj or not sd or sd.mode not in REGIONS:
+    if not obj or not sd:
+        return
+
+    if sd.type not in {'TIMELINE', 'DOPESHEET_EDITOR', 'GRAPH_EDITOR'}:
         return
 
     anim = obj.animation_data
@@ -89,18 +89,18 @@ def add_actionlist(self, context):
         return
 
     layout = self.layout
-    layout.template_ID(
-        anim,
-        "action",
-        new="timeline.new_action"
-    )
+    layout.separator()
 
+    # Action List
+    layout.template_ID(anim, "action", new="timeline.new_action")
 
-def add_timeline_action_tools(self, context):
-    obj = context.active_object
-    if obj and obj.animation_data and obj.animation_data.action:
-        self.layout.separator()
-        self.layout.operator(
+    # Undo / Redo
+    layout.operator("ed.undo", text="", icon='LOOP_BACK')
+    layout.operator("ed.redo", text="", icon='LOOP_FORWARDS')
+
+    # Action → Scene Range
+    if anim.action:
+        layout.operator(
             "timeline.action_to_scene_range",
             text="",
             icon='TIME'
@@ -108,27 +108,82 @@ def add_timeline_action_tools(self, context):
 
 
 # ---------------------------------------------------
-# Registration
+# GIZMO SIZE PROPERTY
+# ---------------------------------------------------
+
+def update_gizmo_size(self, context):
+    context.preferences.view.gizmo_size = self.gizmo_size
+
+
+class GizmoProps(bpy.types.PropertyGroup):
+    gizmo_size: FloatProperty(
+        name="Gizmo Size",
+        description="Adjust viewport gizmo size",
+        default=75.0,
+        min=10.0,
+        max=200.0,
+        update=update_gizmo_size
+    )
+
+
+# ---------------------------------------------------
+# GIZMO RESET
+# ---------------------------------------------------
+
+class VIEW3D_OT_reset_gizmo_size(bpy.types.Operator):
+    bl_idname = "view3d.reset_gizmo_size"
+    bl_label = "Reset Gizmo Size"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        context.scene.gizmo_props.gizmo_size = 75.0
+        return {'FINISHED'}
+
+
+# ---------------------------------------------------
+# GIZMO UI PANEL
+# ---------------------------------------------------
+
+class VIEW3D_PT_gizmo_tools(bpy.types.Panel):
+    bl_label = "Gizmo Tools"
+    bl_idname = "VIEW3D_PT_gizmo_tools"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Tool"
+
+    def draw(self, context):
+        layout = self.layout
+        props = context.scene.gizmo_props
+
+        layout.prop(props, "gizmo_size")
+        layout.operator("view3d.reset_gizmo_size", icon='FILE_REFRESH')
+
+
+# ---------------------------------------------------
+# REGISTER
 # ---------------------------------------------------
 
 classes = (
     TIMELINE_OT_new_action,
     TIMELINE_OT_action_to_scene_range,
+    GizmoProps,
+    VIEW3D_OT_reset_gizmo_size,
+    VIEW3D_PT_gizmo_tools,
 )
 
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
 
-    bpy.types.TIMELINE_HT_header.append(add_actionlist)
-    bpy.types.TIMELINE_HT_header.append(add_timeline_action_tools)
+    bpy.types.Scene.gizmo_props = bpy.props.PointerProperty(type=GizmoProps)
+    bpy.types.TIMELINE_HT_header.append(draw_timeline_header)
 
-    print("✅ Combined Animation & Gizmo Tools (5.0.1) Registered")
+    print("✅ Combined Animation & Gizmo Tools 1.5.0 Registered")
 
 
 def unregister():
-    bpy.types.TIMELINE_HT_header.remove(add_actionlist)
-    bpy.types.TIMELINE_HT_header.remove(add_timeline_action_tools)
+    bpy.types.TIMELINE_HT_header.remove(draw_timeline_header)
+    del bpy.types.Scene.gizmo_props
 
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
