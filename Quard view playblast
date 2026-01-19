@@ -1,17 +1,17 @@
 import bpy
 import os
 import shutil
-import platform
 import subprocess
+import platform
 from bpy.props import StringProperty, BoolProperty
 
 bl_info = {
     "name": "Playblast Quad View",
     "author": "Venkatesh sanku",
-    "version": (1, 4),
+    "version": (1, 5),
     "blender": (5, 0, 1),
     "location": "View3D > Sidebar > Playblast",
-    "description": "True Quad View playblast (PNG → MP4) for viewport",
+    "description": "Stable Quad View playblast (PNG + MP4)",
     "category": "3D View",
 }
 
@@ -28,7 +28,7 @@ class QP_Props(bpy.types.PropertyGroup):
     is_quad_active: BoolProperty(default=False)
 
 # ------------------------------------------------------------------------
-# Quad View Switch
+# Quad View Toggle
 # ------------------------------------------------------------------------
 
 class QP_OT_switch_layout(bpy.types.Operator):
@@ -36,17 +36,22 @@ class QP_OT_switch_layout(bpy.types.Operator):
     bl_label = "Toggle Quad View"
 
     def execute(self, context):
-        for area in context.screen.areas:
+        for area in context.window.screen.areas:
             if area.type == 'VIEW_3D':
                 region = next(r for r in area.regions if r.type == 'WINDOW')
-                with context.temp_override(area=area, region=region):
+                with context.temp_override(
+                    window=context.window,
+                    screen=context.window.screen,
+                    area=area,
+                    region=region
+                ):
                     bpy.ops.screen.region_quadview()
                 context.scene.qp_props.is_quad_active ^= True
                 return {'FINISHED'}
         return {'CANCELLED'}
 
 # ------------------------------------------------------------------------
-# Quad View PNG Playblast (Modal)
+# Quad View Screenshot Animation (STABLE)
 # ------------------------------------------------------------------------
 
 class QP_OT_quad_playblast(bpy.types.Operator):
@@ -58,6 +63,13 @@ class QP_OT_quad_playblast(bpy.types.Operator):
 
     def execute(self, context):
         self.scene = context.scene
+        self.window = context.window
+        self.screen = context.window.screen
+
+        self.area = next(a for a in self.screen.areas if a.type == 'VIEW_3D')
+        self.region = next(r for r in self.area.regions if r.type == 'WINDOW')
+        self.space = self.area.spaces.active
+
         self.start = self.scene.frame_start
         self.end = self.scene.frame_end
         self._frame = self.start
@@ -65,10 +77,6 @@ class QP_OT_quad_playblast(bpy.types.Operator):
         base = bpy.path.abspath(self.scene.qp_props.render_filepath)
         self.temp_dir = os.path.splitext(base)[0] + "_temp"
         os.makedirs(self.temp_dir, exist_ok=True)
-
-        self.area = next(a for a in context.screen.areas if a.type == 'VIEW_3D')
-        self.region = next(r for r in self.area.regions if r.type == 'WINDOW')
-        self.space = self.area.spaces.active
 
         # Hide UI
         self._ui = self.space.show_region_ui
@@ -80,8 +88,13 @@ class QP_OT_quad_playblast(bpy.types.Operator):
         if self._gizmo is not None:
             self.space.show_gizmo = False
 
+        # Force redraw (CRITICAL)
+        self.scene.frame_set(self._frame)
+        bpy.context.view_layer.update()
+        bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
+
         wm = context.window_manager
-        self._timer = wm.event_timer_add(0.05, window=context.window)
+        self._timer = wm.event_timer_add(0.15, window=self.window)
         wm.modal_handler_add(self)
         return {'RUNNING_MODAL'}
 
@@ -100,35 +113,47 @@ class QP_OT_quad_playblast(bpy.types.Operator):
 
             bpy.app.timers.register(
                 lambda: bpy.ops.qp.encode_ffmpeg(),
-                first_interval=0.1
+                first_interval=0.2
             )
             return {'FINISHED'}
 
         self.scene.frame_set(self._frame)
-        path = os.path.join(self.temp_dir, f"frame_{self._frame:04d}.png")
+        bpy.context.view_layer.update()
+        bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
 
-        with context.temp_override(area=self.area, region=self.region):
-            bpy.ops.screen.screenshot_area(filepath=path)
+        filepath = os.path.join(
+            self.temp_dir,
+            f"frame_{self._frame:04d}.png"
+        )
+
+        with context.temp_override(
+            window=self.window,
+            screen=self.screen,
+            area=self.area,
+            region=self.region
+        ):
+            bpy.ops.screen.screenshot_area(filepath=filepath)
 
         self._frame += 1
         return {'RUNNING_MODAL'}
 
 # ------------------------------------------------------------------------
-# FFMPEG Encode (SAFE & FAST)
+# Encode PNG → MP4 (FFMPEG)
 # ------------------------------------------------------------------------
 
 class QP_OT_encode_ffmpeg(bpy.types.Operator):
     bl_idname = "qp.encode_ffmpeg"
-    bl_label = "Encode Quad Playblast"
+    bl_label = "Encode Quad Video"
 
     def execute(self, context):
         base = bpy.path.abspath(context.scene.qp_props.render_filepath)
         temp = os.path.splitext(base)[0] + "_temp"
 
-        if platform.system() == "Windows":
-            ffmpeg = "ffmpeg"
-        else:
-            ffmpeg = "ffmpeg"
+        if not os.path.exists(temp):
+            self.report({'ERROR'}, "No PNG frames found")
+            return {'CANCELLED'}
+
+        ffmpeg = "ffmpeg"
 
         cmd = [
             ffmpeg,
@@ -141,13 +166,9 @@ class QP_OT_encode_ffmpeg(bpy.types.Operator):
             base
         ]
 
-        try:
-            subprocess.run(cmd, check=True)
-        except Exception as e:
-            self.report({'ERROR'}, str(e))
-            return {'CANCELLED'}
-
+        subprocess.run(cmd, check=True)
         shutil.rmtree(temp)
+
         self.report({'INFO'}, f"Quad MP4 created: {base}")
         return {'FINISHED'}
 
