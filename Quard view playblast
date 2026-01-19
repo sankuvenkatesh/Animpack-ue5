@@ -1,197 +1,319 @@
-import bpy
-import os
-import shutil
-import subprocess
-import platform
+import bpy, os, shutil
 from bpy.props import StringProperty, BoolProperty
 
 bl_info = {
     "name": "Playblast Quad View",
     "author": "Venkatesh sanku",
-    "version": (1, 5),
+    "version": (1, 0),
     "blender": (5, 0, 1),
     "location": "View3D > Sidebar > Playblast",
-    "description": "Stable Quad View playblast (PNG + MP4)",
+    "description": "Playblast review screenshot and video sequences for viewport - quadview",
     "category": "3D View",
 }
 
 # ------------------------------------------------------------------------
-# Properties
+# Property Group
 # ------------------------------------------------------------------------
 
 class QP_Props(bpy.types.PropertyGroup):
     render_filepath: StringProperty(
         name="Save Path",
         subtype='FILE_PATH',
-        default="//quadview_playblast.mp4"
+        default="//quadview_render.mp4"
     )
-    is_quad_active: BoolProperty(default=False)
+    is_quad_active: BoolProperty(
+        name="Quad View Active",
+        default=False
+    )
 
 # ------------------------------------------------------------------------
-# Quad View Toggle
+# Operators
 # ------------------------------------------------------------------------
 
 class QP_OT_switch_layout(bpy.types.Operator):
+    """Switch between Quad View and original layout"""
     bl_idname = "qp.switch_layout"
-    bl_label = "Toggle Quad View"
+    bl_label = "Switch Quad Layout"
+    bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-        for area in context.window.screen.areas:
+        props = context.scene.qp_props
+        view3d_area = None
+        view3d_region = None
+
+        for area in context.screen.areas:
             if area.type == 'VIEW_3D':
-                region = next(r for r in area.regions if r.type == 'WINDOW')
-                with context.temp_override(
-                    window=context.window,
-                    screen=context.window.screen,
-                    area=area,
-                    region=region
-                ):
-                    bpy.ops.screen.region_quadview()
-                context.scene.qp_props.is_quad_active ^= True
-                return {'FINISHED'}
-        return {'CANCELLED'}
+                for region in area.regions:
+                    if region.type == 'WINDOW':
+                        view3d_area = area
+                        view3d_region = region
+                        break
+                if view3d_area:
+                    break
 
-# ------------------------------------------------------------------------
-# Quad View Screenshot Animation (STABLE)
-# ------------------------------------------------------------------------
+        if not view3d_area or not view3d_region:
+            self.report({'ERROR'}, "Could not find a View3D area with a WINDOW region.")
+            return {'CANCELLED'}
 
-class QP_OT_quad_playblast(bpy.types.Operator):
-    bl_idname = "qp.quad_playblast"
-    bl_label = "Quad View Playblast"
+        try:
+            with context.temp_override(area=view3d_area, region=view3d_region):
+                bpy.ops.screen.region_quadview()
+            props.is_quad_active = not props.is_quad_active
+        except Exception as e:
+            self.report({'ERROR'}, f"Error: {e}")
+            return {'CANCELLED'}
+
+        return {'FINISHED'}
+
+
+class QP_OT_open_render_folder(bpy.types.Operator):
+    """Open saved folder"""
+    bl_idname = "qp.open_render_folder"
+    bl_label = "Open Saved Folder"
+
+    def execute(self, context):
+        folder_path = bpy.path.abspath(
+            os.path.dirname(context.scene.qp_props.render_filepath)
+        )
+        if os.path.exists(folder_path):
+            import platform, subprocess
+            if platform.system() == 'Windows':
+                os.startfile(folder_path)
+            elif platform.system() == 'Darwin':
+                subprocess.Popen(['open', folder_path])
+            else:
+                subprocess.Popen(['xdg-open', folder_path])
+        else:
+            self.report({'ERROR'}, "Folder does not exist")
+        return {'FINISHED'}
+
+
+class QP_OT_screenshot_quadview(bpy.types.Operator):
+    """Take a screenshot of the Quad View"""
+    bl_idname = "qp.screenshot_quadview"
+    bl_label = "Screenshot Current Frame"
 
     _timer = None
-    _frame = 0
+    _view3d_area = None
+    _region_window = None
+    _ui_was_visible = False
+    _toolbar_was_visible = False
+    _file_path = ""
 
     def execute(self, context):
-        self.scene = context.scene
-        self.window = context.window
-        self.screen = context.window.screen
+        for area in context.screen.areas:
+            if area.type == 'VIEW_3D':
+                self._view3d_area = area
+                break
+        if not self._view3d_area:
+            self.report({'ERROR'}, "VIEW_3D not found")
+            return {'CANCELLED'}
 
-        self.area = next(a for a in self.screen.areas if a.type == 'VIEW_3D')
-        self.region = next(r for r in self.area.regions if r.type == 'WINDOW')
-        self.space = self.area.spaces.active
+        self._region_window = next(
+            (r for r in self._view3d_area.regions if r.type == 'WINDOW'), None
+        )
+        if not self._region_window:
+            self.report({'ERROR'}, "WINDOW region not found")
+            return {'CANCELLED'}
 
-        self.start = self.scene.frame_start
-        self.end = self.scene.frame_end
-        self._frame = self.start
+        user_filepath = bpy.path.abspath(context.scene.qp_props.render_filepath)
+        folder_path = os.path.dirname(user_filepath)
+        filename = os.path.splitext(os.path.basename(user_filepath))[0] + ".png"
+        self._file_path = os.path.join(folder_path, filename)
+        os.makedirs(folder_path, exist_ok=True)
 
-        base = bpy.path.abspath(self.scene.qp_props.render_filepath)
-        self.temp_dir = os.path.splitext(base)[0] + "_temp"
-        os.makedirs(self.temp_dir, exist_ok=True)
+        space = self._view3d_area.spaces.active
+        self._ui_was_visible = space.show_region_ui
+        self._toolbar_was_visible = space.show_region_toolbar
+        space.show_region_ui = False
+        space.show_region_toolbar = False
 
-        # Hide UI
-        self._ui = self.space.show_region_ui
-        self._toolbar = self.space.show_region_toolbar
-        self._gizmo = getattr(self.space, "show_gizmo", None)
+        if hasattr(context.space_data, 'show_gizmo'):
+            context.space_data.show_gizmo = False
 
-        self.space.show_region_ui = False
-        self.space.show_region_toolbar = False
-        if self._gizmo is not None:
-            self.space.show_gizmo = False
-
-        # Force redraw (CRITICAL)
-        self.scene.frame_set(self._frame)
         bpy.context.view_layer.update()
-        bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
 
         wm = context.window_manager
-        self._timer = wm.event_timer_add(0.15, window=self.window)
+        self._timer = wm.event_timer_add(0.2, window=context.window)
         wm.modal_handler_add(self)
+
         return {'RUNNING_MODAL'}
 
     def modal(self, context, event):
-        if event.type != 'TIMER':
-            return {'RUNNING_MODAL'}
-
-        if self._frame > self.end:
-            # Restore UI
-            self.space.show_region_ui = self._ui
-            self.space.show_region_toolbar = self._toolbar
-            if self._gizmo is not None:
-                self.space.show_gizmo = self._gizmo
-
+        if event.type == 'TIMER':
             context.window_manager.event_timer_remove(self._timer)
 
-            bpy.app.timers.register(
-                lambda: bpy.ops.qp.encode_ffmpeg(),
-                first_interval=0.2
-            )
+            with context.temp_override(area=self._view3d_area, region=self._region_window):
+                bpy.ops.screen.screenshot_area(filepath=self._file_path)
+
+            space = self._view3d_area.spaces.active
+            space.show_region_ui = self._ui_was_visible
+            space.show_region_toolbar = self._toolbar_was_visible
+
+            if hasattr(context.space_data, 'show_gizmo'):
+                context.space_data.show_gizmo = True
+
+            bpy.context.view_layer.update()
             return {'FINISHED'}
 
-        self.scene.frame_set(self._frame)
-        bpy.context.view_layer.update()
-        bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
-
-        filepath = os.path.join(
-            self.temp_dir,
-            f"frame_{self._frame:04d}.png"
-        )
-
-        with context.temp_override(
-            window=self.window,
-            screen=self.screen,
-            area=self.area,
-            region=self.region
-        ):
-            bpy.ops.screen.screenshot_area(filepath=filepath)
-
-        self._frame += 1
         return {'RUNNING_MODAL'}
 
-# ------------------------------------------------------------------------
-# Encode PNG → MP4 (FFMPEG)
-# ------------------------------------------------------------------------
 
-class QP_OT_encode_ffmpeg(bpy.types.Operator):
-    bl_idname = "qp.encode_ffmpeg"
-    bl_label = "Encode Quad Video"
+class QP_OT_screenshot_quadview_anim(bpy.types.Operator):
+    """Export the screenshot sequences of 3D viewport"""
+    bl_idname = "qp.screenshot_quadview_anim"
+    bl_label = "Playblast Animation"
+
+    _view3d_area = None
+    _region_window = None
+    _frame_current = 0
+    _frame_start = 0
+    _frame_end = 0
+    _folder_path = ""
+    _ui_was_visible = False
+    _toolbar_was_visible = False
+    _timer = None
+    _wait_frames = 2
 
     def execute(self, context):
-        base = bpy.path.abspath(context.scene.qp_props.render_filepath)
-        temp = os.path.splitext(base)[0] + "_temp"
-
-        if not os.path.exists(temp):
-            self.report({'ERROR'}, "No PNG frames found")
+        for area in context.screen.areas:
+            if area.type == 'VIEW_3D':
+                self._view3d_area = area
+                break
+        if not self._view3d_area:
+            self.report({'ERROR'}, "VIEW_3D not found")
             return {'CANCELLED'}
 
-        ffmpeg = "ffmpeg"
+        self._region_window = next(
+            (r for r in self._view3d_area.regions if r.type == 'WINDOW'), None
+        )
+        if not self._region_window:
+            self.report({'ERROR'}, "WINDOW region not found")
+            return {'CANCELLED'}
 
-        cmd = [
-            ffmpeg,
-            "-y",
-            "-framerate", str(context.scene.render.fps),
-            "-i", os.path.join(temp, "frame_%04d.png"),
-            "-c:v", "libx264",
-            "-pix_fmt", "yuv420p",
-            "-crf", "18",
-            base
-        ]
+        scene = context.scene
+        self._frame_start = scene.frame_start
+        self._frame_end = scene.frame_end
+        self._frame_current = self._frame_start
 
-        subprocess.run(cmd, check=True)
-        shutil.rmtree(temp)
+        user_filepath = bpy.path.abspath(scene.qp_props.render_filepath)
+        folder_main = os.path.dirname(user_filepath)
+        filename_base = os.path.splitext(os.path.basename(user_filepath))[0]
+        self._folder_path = os.path.join(folder_main, f"{filename_base}_temp")
+        os.makedirs(self._folder_path, exist_ok=True)
 
-        self.report({'INFO'}, f"Quad MP4 created: {base}")
-        return {'FINISHED'}
+        space = self._view3d_area.spaces.active
+        self._ui_was_visible = space.show_region_ui
+        self._toolbar_was_visible = space.show_region_toolbar
+        space.show_region_ui = False
+        space.show_region_toolbar = False
 
-# ------------------------------------------------------------------------
-# One Click
-# ------------------------------------------------------------------------
+        if hasattr(context.space_data, 'show_gizmo'):
+            context.space_data.show_gizmo = False
 
-class QP_OT_one_click(bpy.types.Operator):
-    bl_idname = "qp.one_click"
-    bl_label = "One-Click Quad Playblast"
+        bpy.context.view_layer.update()
+
+        context.window_manager.modal_handler_add(self)
+        self._timer = context.window_manager.event_timer_add(0.05, window=context.window)
+        self._wait_frames = 2
+
+        return {'RUNNING_MODAL'}
+
+    def modal(self, context, event):
+        if event.type == 'TIMER':
+            if self._wait_frames > 0:
+                self._wait_frames -= 1
+                return {'RUNNING_MODAL'}
+
+            scene = context.scene
+            if self._frame_current > self._frame_end:
+                space = self._view3d_area.spaces.active
+                space.show_region_ui = self._ui_was_visible
+                space.show_region_toolbar = self._toolbar_was_visible
+
+                if hasattr(context.space_data, 'show_gizmo'):
+                    context.space_data.show_gizmo = True
+
+                bpy.context.view_layer.update()
+                context.window_manager.event_timer_remove(self._timer)
+
+                bpy.ops.qp.combine_images_to_video()
+                return {'FINISHED'}
+
+            scene.frame_set(self._frame_current)
+            bpy.context.view_layer.update()
+
+            filename = os.path.join(
+                self._folder_path,
+                f"quadview_frame_{self._frame_current:04d}.png"
+            )
+
+            with context.temp_override(area=self._view3d_area, region=self._region_window):
+                bpy.ops.screen.screenshot_area(filepath=filename)
+
+            self._frame_current += 1
+
+        return {'RUNNING_MODAL'}
+
+
+class QP_OT_combine_images_to_video(bpy.types.Operator):
+    """Combine image sequence into an MP4 video"""
+    bl_idname = "qp.combine_images_to_video"
+    bl_label = "Combine Images to Video"
 
     def execute(self, context):
-        if not context.scene.qp_props.is_quad_active:
-            bpy.ops.qp.switch_layout()
-        bpy.ops.qp.quad_playblast()
+        scene = context.scene
+        props = scene.qp_props
+
+        user_filepath = bpy.path.abspath(props.render_filepath)
+        folder_main = os.path.dirname(user_filepath)
+        filename_base = os.path.splitext(os.path.basename(user_filepath))[0]
+        folder_temp = os.path.join(folder_main, f"{filename_base}_temp")
+
+        images = sorted(f for f in os.listdir(folder_temp) if f.endswith('.png'))
+        if not images:
+            self.report({'ERROR'}, "No images found")
+            return {'CANCELLED'}
+
+        first_image = os.path.join(folder_temp, images[0])
+        img = bpy.data.images.load(first_image)
+        w, h = img.size
+        bpy.data.images.remove(img)
+
+        video_scene = bpy.data.scenes.new("CombineVideoScene")
+        video_scene.render.resolution_x = w + w % 2
+        video_scene.render.resolution_y = h + h % 2
+        video_scene.render.fps = scene.render.fps
+        video_scene.render.image_settings.file_format = 'FFMPEG'
+        video_scene.render.ffmpeg.format = 'MPEG4'
+        video_scene.render.ffmpeg.codec = 'H264'
+        video_scene.render.filepath = user_filepath
+
+        video_scene.sequence_editor_create()
+        strip = video_scene.sequence_editor.sequences.new_image(
+            "QuadView",
+            first_image,
+            channel=1,
+            frame_start=1
+        )
+        for img_name in images[1:]:
+            strip.elements.append(img_name)
+        strip.frame_final_duration = len(images)
+
+        original = context.window.scene
+        context.window.scene = video_scene
+        bpy.ops.render.render(animation=True)
+        context.window.scene = original
+
+        shutil.rmtree(folder_temp)
+        bpy.data.scenes.remove(video_scene)
+
         return {'FINISHED'}
 
-# ------------------------------------------------------------------------
-# UI
-# ------------------------------------------------------------------------
 
 class QP_PT_panel(bpy.types.Panel):
-    bl_label = "Playblast"
+    bl_label = "Playblast Panel"
+    bl_idname = "QP_PT_panel"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Playblast"
@@ -202,9 +324,10 @@ class QP_PT_panel(bpy.types.Panel):
 
         layout.prop(props, "render_filepath")
         layout.operator("qp.switch_layout")
-        layout.separator()
-        layout.operator("qp.quad_playblast", icon='RENDER_ANIMATION')
-        layout.operator("qp.one_click", icon='PLAY')
+        layout.operator("qp.screenshot_quadview")
+        layout.operator("qp.screenshot_quadview_anim")
+        layout.operator("qp.open_render_folder", icon='FOLDER_REDIRECT')
+
 
 # ------------------------------------------------------------------------
 # Register
@@ -213,20 +336,21 @@ class QP_PT_panel(bpy.types.Panel):
 classes = (
     QP_Props,
     QP_OT_switch_layout,
-    QP_OT_quad_playblast,
-    QP_OT_encode_ffmpeg,
-    QP_OT_one_click,
-    QP_PT_panel,
+    QP_OT_open_render_folder,
+    QP_OT_screenshot_quadview,
+    QP_OT_screenshot_quadview_anim,
+    QP_OT_combine_images_to_video,
+    QP_PT_panel
 )
 
 def register():
-    for c in classes:
-        bpy.utils.register_class(c)
+    for cls in classes:
+        bpy.utils.register_class(cls)
     bpy.types.Scene.qp_props = bpy.props.PointerProperty(type=QP_Props)
 
 def unregister():
-    for c in reversed(classes):
-        bpy.utils.unregister_class(c)
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)
     del bpy.types.Scene.qp_props
 
 if __name__ == "__main__":
