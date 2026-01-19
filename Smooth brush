@@ -1,10 +1,10 @@
 bl_info = {
     "name": "FCurve Smooth Brush Pro",
     "author": "Venkatesh sanku",
-    "version": (2, 1, 1),
+    "version": (2, 1, 2),
     "blender": (5, 0, 0),
     "location": "Graph Editor > Sidebar > Tool",
-    "description": "Error-free professional FCurve smoothing brush for Blender 5.x",
+    "description": "Stable FCurve smoothing brush for Blender 5.x",
     "category": "Animation",
 }
 
@@ -14,7 +14,13 @@ import time
 import numpy as np
 from mathutils import Vector
 from gpu_extras.batch import batch_for_shader
-from bpy.props import *
+from bpy.props import (
+    FloatProperty,
+    IntProperty,
+    BoolProperty,
+    EnumProperty,
+    PointerProperty,
+)
 
 # --------------------------------------------------
 # Filters
@@ -42,11 +48,11 @@ def channel_allowed(fc, mode):
     return False
 
 # --------------------------------------------------
-# Draw
+# Draw helpers
 # --------------------------------------------------
 
 def draw_cursor(self, context):
-    if not self or not context.area:
+    if not context.area:
         return
 
     p = context.scene.fcurve_brush
@@ -62,30 +68,7 @@ def draw_cursor(self, context):
     ]
 
     batch = batch_for_shader(shader, 'LINE_LOOP', {"pos": verts})
-    shader.uniform_float("color", (1,1,1,0.9))
-    batch.draw(shader)
-
-def draw_fill(self, context):
-    if not self.painting:
-        return
-
-    p = context.scene.fcurve_brush
-    r = p.brush_size
-    cx, cy = self.mouse.x, self.mouse.y
-
-    shader = gpu.shader.from_builtin('UNIFORM_COLOR')
-    shader.bind()
-
-    verts = [(cx, cy)]
-    idx = []
-
-    for i in range(32):
-        a = 2*np.pi*i/32
-        verts.append((cx + np.cos(a)*r, cy + np.sin(a)*r))
-        idx += [0, i+1, 1 if i==31 else i+2]
-
-    batch = batch_for_shader(shader, 'TRIS', {"pos": verts}, indices=idx)
-    shader.uniform_float("color", (0.3, 0.6, 1.0, 0.12))
+    shader.uniform_float("color", (1, 1, 1, 0.9))
     batch.draw(shader)
 
 # --------------------------------------------------
@@ -97,7 +80,7 @@ class FCurveBrushProps(bpy.types.PropertyGroup):
     strength: FloatProperty(default=0.6, min=0, max=1)
 
     axis: EnumProperty(
-        items=[('Y',"Value",""),('X',"Time",""),('BOTH',"Both","")],
+        items=[('Y',"Value",""), ('X',"Time",""), ('BOTH',"Both","")],
         default='Y'
     )
 
@@ -116,8 +99,9 @@ class FCurveBrushProps(bpy.types.PropertyGroup):
 
     filter_radius: IntProperty(default=3, min=1, max=10)
     channel_filter: EnumProperty(
-        items=[('ALL',"All",""),('LOC',"Loc",""),('ROT',"Rot",""),
-               ('SCALE',"Scale",""),('CUSTOM',"Custom","")],
+        items=[('ALL',"All",""), ('LOC',"Loc",""),
+               ('ROT',"Rot",""), ('SCALE',"Scale",""),
+               ('CUSTOM',"Custom","")],
         default='ALL'
     )
 
@@ -126,7 +110,7 @@ class FCurveBrushProps(bpy.types.PropertyGroup):
     active: BoolProperty(default=False)
 
 # --------------------------------------------------
-# Operator
+# Operator (NO __init__)
 # --------------------------------------------------
 
 class GRAPH_OT_fcurve_brush(bpy.types.Operator):
@@ -134,22 +118,14 @@ class GRAPH_OT_fcurve_brush(bpy.types.Operator):
     bl_label = "FCurve Brush Pro"
     bl_options = {'REGISTER'}
 
-    def __init__(self):
-        self.mouse = Vector((0,0))
-        self.mx = self.my = 0
-        self.painting = False
-        self.pressure = 1.0
-        self.last_time = 0
-        self.h1 = self.h2 = None
-
     def cleanup(self):
-        for h in (self.h1, self.h2):
-            if h:
-                bpy.types.SpaceGraphEditor.draw_handler_remove(h, 'WINDOW')
-        self.h1 = self.h2 = None
+        if self.h_cursor:
+            bpy.types.SpaceGraphEditor.draw_handler_remove(self.h_cursor, 'WINDOW')
+        self.h_cursor = None
 
     def modal(self, context, event):
-        self.mx, self.my = event.mouse_region_x, event.mouse_region_y
+        self.mx = event.mouse_region_x
+        self.my = event.mouse_region_y
         self.mouse = Vector((self.mx, self.my))
 
         if event.type == 'ESC':
@@ -166,12 +142,16 @@ class GRAPH_OT_fcurve_brush(bpy.types.Operator):
                 self.painting = False
 
         if event.type == 'MOUSEMOVE':
-            self.pressure = event.pressure if (
-                context.scene.fcurve_brush.pressure_enabled and
-                event.pressure is not None and event.pressure > 0
-            ) else 1.0
+            if (
+                context.scene.fcurve_brush.pressure_enabled
+                and event.pressure is not None
+                and event.pressure > 0
+            ):
+                self.pressure = event.pressure
+            else:
+                self.pressure = 1.0
 
-            if self.painting and time.time()-self.last_time > 0.03:
+            if self.painting and time.time() - self.last_time > 0.03:
                 self.apply(context)
                 self.last_time = time.time()
 
@@ -191,32 +171,42 @@ class GRAPH_OT_fcurve_brush(bpy.types.Operator):
             keys = list(fc.keyframe_points)[::p.sample_rate]
 
             for i, k in enumerate(keys):
-                pos = view.view_to_region(k.co[0], k.co[1])
-                if not pos:
+                coord = view.view_to_region(k.co[0], k.co[1], clip=False)
+                if coord is None or len(coord) < 2:
                     continue
 
-                sx, sy = pos
-                dist = ((sx-self.mouse.x)**2 + (sy-self.mouse.y)**2)**0.5
+                sx, sy = coord[0], coord[1]
+                dx = sx - self.mouse.x
+                dy = sy - self.mouse.y
+                dist = (dx*dx + dy*dy) ** 0.5
+
                 if dist > p.brush_size:
                     continue
 
                 f = (1 - dist/p.brush_size) * strength
 
-                # Y-axis processing
+                # ---- Y axis ----
                 if p.axis in {'Y','BOTH'}:
-                    if p.mode in {'GAUSSIAN','BUTTER'}:
+                    if p.mode == 'SMOOTH' and 0 < i < len(keys)-1:
+                        avg = (keys[i-1].co[1] + keys[i+1].co[1]) * 0.5
+                        k.co[1] += (avg - k.co[1]) * f
+
+                    elif p.mode in {'GAUSSIAN','BUTTER'}:
                         r = p.filter_radius
-                        if i<r or i>=len(keys)-r:
+                        if i < r or i >= len(keys)-r:
                             continue
                         vals = [x.co[1] for x in keys[i-r:i+r+1]]
-                        tgt = (sum(v*w for v,w in zip(vals,gaussian_weights(r)))
-                               if p.mode=='GAUSSIAN'
-                               else butterworth(vals)[r])
-                        k.co[1] += (tgt - k.co[1]) * f
+                        target = (
+                            sum(v*w for v,w in zip(vals, gaussian_weights(r)))
+                            if p.mode == 'GAUSSIAN'
+                            else butterworth(vals)[r]
+                        )
+                        k.co[1] += (target - k.co[1]) * f
 
-                # X-axis relax
-                if p.axis in {'X','BOTH'} and p.mode=='RELAX' and 0<i<len(keys)-1:
-                    k.co[0] += ((keys[i-1].co[0]+keys[i+1].co[0])/2 - k.co[0]) * f
+                # ---- X axis ----
+                if p.axis in {'X','BOTH'} and p.mode == 'RELAX' and 0 < i < len(keys)-1:
+                    avgx = (keys[i-1].co[0] + keys[i+1].co[0]) * 0.5
+                    k.co[0] += (avgx - k.co[0]) * f
 
             fc.update()
 
@@ -224,11 +214,19 @@ class GRAPH_OT_fcurve_brush(bpy.types.Operator):
         if context.area.type != 'GRAPH_EDITOR':
             return {'CANCELLED'}
 
+        # SAFE INIT HERE
+        self.mouse = Vector((0, 0))
+        self.mx = self.my = 0
+        self.painting = False
+        self.pressure = 1.0
+        self.last_time = 0.0
+        self.h_cursor = None
+
         context.scene.fcurve_brush.active = True
-        self.h1 = bpy.types.SpaceGraphEditor.draw_handler_add(
-            draw_fill, (self, context), 'WINDOW', 'POST_PIXEL')
-        self.h2 = bpy.types.SpaceGraphEditor.draw_handler_add(
-            draw_cursor, (self, context), 'WINDOW', 'POST_PIXEL')
+
+        self.h_cursor = bpy.types.SpaceGraphEditor.draw_handler_add(
+            draw_cursor, (self, context), 'WINDOW', 'POST_PIXEL'
+        )
 
         context.window.cursor_set('NONE')
         context.window_manager.modal_handler_add(self)
@@ -239,10 +237,10 @@ class GRAPH_OT_fcurve_brush(bpy.types.Operator):
 # --------------------------------------------------
 
 class GRAPH_PT_fcurve_brush(bpy.types.Panel):
-    bl_space_type='GRAPH_EDITOR'
-    bl_region_type='UI'
-    bl_category='Tool'
-    bl_label='FCurve Brush Pro'
+    bl_space_type = 'GRAPH_EDITOR'
+    bl_region_type = 'UI'
+    bl_category = 'Tool'
+    bl_label = 'FCurve Brush Pro'
 
     def draw(self, context):
         p = context.scene.fcurve_brush
@@ -253,21 +251,25 @@ class GRAPH_PT_fcurve_brush(bpy.types.Panel):
         else:
             l.label(text="Brush Active", icon='RADIOBUT_ON')
 
-        l.prop(p,"mode")
-        l.prop(p,"axis")
-        l.prop(p,"channel_filter")
-        l.prop(p,"brush_size")
-        l.prop(p,"strength")
+        l.prop(p, "mode")
+        l.prop(p, "axis")
+        l.prop(p, "channel_filter")
+        l.prop(p, "brush_size")
+        l.prop(p, "strength")
         if p.mode in {'GAUSSIAN','BUTTER'}:
-            l.prop(p,"filter_radius")
-        l.prop(p,"pressure_enabled")
-        l.prop(p,"sample_rate")
+            l.prop(p, "filter_radius")
+        l.prop(p, "pressure_enabled")
+        l.prop(p, "sample_rate")
 
 # --------------------------------------------------
 # Register
 # --------------------------------------------------
 
-classes = (FCurveBrushProps, GRAPH_OT_fcurve_brush, GRAPH_PT_fcurve_brush)
+classes = (
+    FCurveBrushProps,
+    GRAPH_OT_fcurve_brush,
+    GRAPH_PT_fcurve_brush,
+)
 
 def register():
     for c in classes:
