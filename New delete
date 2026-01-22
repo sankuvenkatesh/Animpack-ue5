@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Keyframe Tools Interval",
     "author": "Venkatesh Sanku",
-    "version": (2, 8, 5),
+    "version": (2, 8, 1),
     "blender": (5, 0, 1),
     "location": "View3D > Sidebar > Item",
     "description": "Delete or bake keyframes by interval on transforms and bone custom properties",
@@ -13,7 +13,7 @@ from bpy.types import Operator, Panel, PropertyGroup
 
 
 # ------------------------------------------------------------------------
-# Properties (UNCHANGED)
+# Properties
 # ------------------------------------------------------------------------
 
 class DelKeyProperties(PropertyGroup):
@@ -40,6 +40,7 @@ class DelKeyProperties(PropertyGroup):
     pos: bpy.props.BoolProperty(name="Position", default=True)
     rot: bpy.props.BoolProperty(name="Rotation", default=True)
     scl: bpy.props.BoolProperty(name="Scale", default=True)
+
     custom_props: bpy.props.BoolProperty(
         name="Custom Properties",
         description="Bone custom properties only",
@@ -57,10 +58,7 @@ class DelKeyProperties(PropertyGroup):
 
     def _all_channels_update(self, context):
         if self.all_channels:
-            self.pos = True
-            self.rot = True
-            self.scl = True
-            self.custom_props = True
+            self.pos = self.rot = self.scl = self.custom_props = True
         self._update_preview(context)
 
     def _update_preview(self, context):
@@ -71,7 +69,7 @@ class DelKeyProperties(PropertyGroup):
 
 
 # ------------------------------------------------------------------------
-# Live Preview (UNCHANGED)
+# Live Preview
 # ------------------------------------------------------------------------
 
 def update_live_preview(scene, props):
@@ -81,10 +79,7 @@ def update_live_preview(scene, props):
         props.preview_count = 0
         return
 
-    start = props.start_frame
-    end = props.end_frame
-    interval = props.interval
-
+    start, end, interval = props.start_frame, props.end_frame, props.interval
     all_frames = range(start, end)
     key_frames = set(range(start, end, interval + 1)) if interval > 0 else set()
 
@@ -110,14 +105,27 @@ def update_live_preview(scene, props):
 # Utilities
 # ------------------------------------------------------------------------
 
+def get_selected_pose_bones(context, obj):
+    if obj.type != 'ARMATURE' or not obj.pose:
+        return []
+    return context.selected_pose_bones or []
+
+
 def frame_allowed(frame, interval, key_frames, inverse):
     if interval == 0:
         return not inverse
     return frame in key_frames if inverse else frame not in key_frames
 
 
+def refresh_animation_editors(context):
+    for window in context.window_manager.windows:
+        for area in window.screen.areas:
+            if area.type in {'GRAPH_EDITOR', 'DOPESHEET_EDITOR', 'TIMELINE'}:
+                area.tag_redraw()
+
+
 # ------------------------------------------------------------------------
-# DELETE OPERATOR (BULLETPROOF)
+# Delete Operator
 # ------------------------------------------------------------------------
 
 class DeleteKeyframeOperator(Operator):
@@ -127,63 +135,68 @@ class DeleteKeyframeOperator(Operator):
 
     def execute(self, context):
         props = context.scene.del_keyframe_props
-        obj = context.active_object
+        objects = context.selected_objects
 
-        if not obj or obj.type != 'ARMATURE':
-            self.report({'WARNING'}, "Select Armature and Pose Bones")
+        if not objects:
+            self.report({'WARNING'}, "No objects selected")
             return {'CANCELLED'}
 
-        original_mode = obj.mode
-        if original_mode != 'POSE':
-            bpy.ops.object.mode_set(mode='POSE')
-
-        bones = list(context.selected_pose_bones)
-        if not bones:
-            self.report({'WARNING'}, "No pose bones selected")
-            return {'CANCELLED'}
+        paths = []
+        if props.pos:
+            paths.append("location")
+        if props.rot:
+            paths.extend(["rotation_euler", "rotation_quaternion"])
+        if props.scl:
+            paths.append("scale")
 
         frames = range(props.start_frame, props.end_frame)
-        key_frames = (
-            set(range(props.start_frame, props.end_frame, props.interval + 1))
-            if props.interval > 0 else set()
-        )
+        key_frames = set(range(props.start_frame, props.end_frame, props.interval + 1)) if props.interval > 0 else set()
 
-        for frame in frames:
-            if not frame_allowed(frame, props.interval, key_frames, props.inverse_interval):
-                continue
+        for obj in objects:
 
-            for pb in bones:
+            # Object keys
+            for frame in frames:
+                if not frame_allowed(frame, props.interval, key_frames, props.inverse_interval):
+                    continue
 
-                if props.pos:
-                    pb.keyframe_delete("location", frame=frame)
+                for path in paths:
+                    try:
+                        obj.keyframe_delete(data_path=path, frame=frame)
+                    except:
+                        pass
 
-                if props.rot:
-                    pb.keyframe_delete("rotation_euler", frame=frame)
-                    pb.keyframe_delete("rotation_quaternion", frame=frame)
+            # Bone keys
+            if obj.type == 'ARMATURE' and obj.animation_data and obj.animation_data.action:
 
-                if props.scl:
-                    pb.keyframe_delete("scale", frame=frame)
+                action = obj.animation_data.action
+                bones = get_selected_pose_bones(context, obj)
 
-                # ✅ SAFE custom property delete
-                if props.custom_props:
-                    for k in pb.keys():
-                        if k != "_RNA_UI":
-                            try:
-                                obj.keyframe_delete(
-                                    data_path=f'pose.bones["{pb.name}"]["{k}"]',
-                                    frame=frame
-                                )
-                            except:
-                                pass
+                for frame in frames:
+                    if not frame_allowed(frame, props.interval, key_frames, props.inverse_interval):
+                        continue
 
-        if original_mode != 'POSE':
-            bpy.ops.object.mode_set(mode=original_mode)
+                    for pb in bones:
+                        bone_path = f'pose.bones["{pb.name}"]'
 
+                        for fc in list(action.fcurves):
+
+                            if not fc.data_path.startswith(bone_path):
+                                continue
+
+                            # Transform channels
+                            if not props.custom_props and '["' in fc.data_path:
+                                continue
+
+                            for kp in list(fc.keyframe_points):
+                                if int(kp.co.x) == frame:
+                                    fc.keyframe_points.remove(kp)
+
+        refresh_animation_editors(context)
         return {'FINISHED'}
 
 
 # ------------------------------------------------------------------------
-# BAKE OPERATOR (SAFE)
+# Bake Operator
 # ------------------------------------------------------------------------
 
 class BakeKeyframeOperator(Operator):
@@ -195,63 +208,44 @@ class BakeKeyframeOperator(Operator):
         props = context.scene.del_keyframe_props
         scene = context.scene
 
-        obj = context.active_object
-        if not obj or obj.type != 'ARMATURE':
-            return {'CANCELLED'}
-
-        original_mode = obj.mode
-        if original_mode != 'POSE':
-            bpy.ops.object.mode_set(mode='POSE')
-
-        bones = list(context.selected_pose_bones)
-        if not bones:
-            return {'CANCELLED'}
-
-        if not obj.animation_data:
-            obj.animation_data_create()
-        if not obj.animation_data.action:
-            obj.animation_data.action = bpy.data.actions.new(
-                name=f"{obj.name}_Baked"
-            )
-
         frames = range(props.start_frame, props.end_frame)
-        key_frames = (
-            set(range(props.start_frame, props.end_frame, props.interval + 1))
-            if props.interval > 0 else set()
-        )
+        key_frames = set(range(props.start_frame, props.end_frame, props.interval + 1)) if props.interval > 0 else set()
 
         bake_frames = [
             f for f in frames
             if frame_allowed(f, props.interval, key_frames, props.inverse_interval)
         ]
 
-        for frame in bake_frames:
-            scene.frame_set(frame)
+        for obj in context.selected_objects:
+            if obj.type != 'ARMATURE':
+                continue
 
-            for pb in bones:
-                if props.pos:
-                    pb.keyframe_insert("location", frame=frame)
-                if props.rot:
-                    pb.keyframe_insert(
-                        "rotation_quaternion" if pb.rotation_mode == 'QUATERNION'
-                        else "rotation_euler",
-                        frame=frame
-                    )
-                if props.scl:
-                    pb.keyframe_insert("scale", frame=frame)
-                if props.custom_props:
-                    for k in pb.keys():
-                        if k != "_RNA_UI":
-                            pb.keyframe_insert(f'["{k}"]', frame=frame)
+            for frame in bake_frames:
+                scene.frame_set(frame)
 
-        if original_mode != 'POSE':
-            bpy.ops.object.mode_set(mode=original_mode)
+                for pb in get_selected_pose_bones(context, obj):
+                    if props.pos:
+                        pb.keyframe_insert(data_path="location")
+                    if props.rot:
+                        pb.keyframe_insert(data_path="rotation_euler")
+                        pb.keyframe_insert(data_path="rotation_quaternion")
+                    if props.scl:
+                        pb.keyframe_insert(data_path="scale")
 
+                    if props.custom_props:
+                        for k in pb.keys():
+                            if k != "_RNA_UI":
+                                try:
+                                    pb.keyframe_insert(data_path=f'["{k}"]')
+                                except:
+                                    pass
+
+        refresh_animation_editors(context)
         return {'FINISHED'}
 
 
 # ------------------------------------------------------------------------
-# UI PANEL (UNCHANGED)
+# UI Panel (UNCHANGED)
 # ------------------------------------------------------------------------
 
 class KeyframeIntervalPanel(Panel):
@@ -307,15 +301,14 @@ classes = (
 )
 
 def register():
-    for c in classes:
-        bpy.utils.register_class(c)
+    for cls in classes:
+        bpy.utils.register_class(cls)
     bpy.types.Scene.del_keyframe_props = bpy.props.PointerProperty(type=DelKeyProperties)
 
 def unregister():
-    for c in reversed(classes):
-        bpy.utils.unregister_class(c)
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)
     del bpy.types.Scene.del_keyframe_props
-
 
 if __name__ == "__main__":
     register()
