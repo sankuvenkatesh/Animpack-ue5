@@ -107,7 +107,7 @@ def update_live_preview(scene, props):
 
 
 # ------------------------------------------------------------------------
-# Utilities (ADDED ONLY)
+# Utilities (INTERNAL ONLY)
 # ------------------------------------------------------------------------
 
 def frame_allowed(frame, interval, key_frames, inverse):
@@ -123,12 +123,19 @@ def refresh_animation_editors(context):
                 area.tag_redraw()
 
 
-def status_message(text):
-    bpy.context.workspace.status_text_set(text)
+def status_message(text, clear_after=3.0):
+    ws = bpy.context.workspace
+    ws.status_text_set(text)
+
+    def clear():
+        ws.status_text_set(None)
+        return None
+
+    bpy.app.timers.register(clear, first_interval=clear_after)
 
 
 # ------------------------------------------------------------------------
-# DELETE OPERATOR (OBJECT + BONE, SAFE)
+# DELETE OPERATOR (OBJECT + BONE)
 # ------------------------------------------------------------------------
 
 class DeleteKeyframeOperator(Operator):
@@ -138,7 +145,6 @@ class DeleteKeyframeOperator(Operator):
 
     def execute(self, context):
         props = context.scene.del_keyframe_props
-        scene = context.scene
         objs = context.selected_objects
 
         if not objs:
@@ -156,28 +162,24 @@ class DeleteKeyframeOperator(Operator):
         for obj in objs:
             original_modes[obj] = obj.mode
 
-            # ---------- OBJECT ----------
-            if obj.animation_data and obj.animation_data.action:
-                for frame in frames:
-                    if not frame_allowed(frame, props.interval, key_frames, props.inverse_interval):
-                        continue
+            for frame in frames:
+                if not frame_allowed(frame, props.interval, key_frames, props.inverse_interval):
+                    continue
 
-                    if props.pos:
-                        deleted += obj.keyframe_delete("location", frame=frame) or 0
-                    if props.rot:
-                        deleted += obj.keyframe_delete("rotation_euler", frame=frame) or 0
-                        deleted += obj.keyframe_delete("rotation_quaternion", frame=frame) or 0
-                    if props.scl:
-                        deleted += obj.keyframe_delete("scale", frame=frame) or 0
+                if props.pos:
+                    deleted += obj.keyframe_delete("location", frame=frame) or 0
+                if props.rot:
+                    deleted += obj.keyframe_delete("rotation_euler", frame=frame) or 0
+                    deleted += obj.keyframe_delete("rotation_quaternion", frame=frame) or 0
+                if props.scl:
+                    deleted += obj.keyframe_delete("scale", frame=frame) or 0
 
-            # ---------- BONES ----------
             if obj.type == 'ARMATURE':
                 context.view_layer.objects.active = obj
                 if obj.mode != 'POSE':
                     bpy.ops.object.mode_set(mode='POSE')
 
-                bones = context.selected_pose_bones or []
-                for pb in bones:
+                for pb in context.selected_pose_bones or []:
                     for frame in frames:
                         if not frame_allowed(frame, props.interval, key_frames, props.inverse_interval):
                             continue
@@ -202,7 +204,6 @@ class DeleteKeyframeOperator(Operator):
                                     except:
                                         pass
 
-        # Restore modes
         for obj, mode in original_modes.items():
             if obj.mode != mode:
                 bpy.ops.object.mode_set(mode=mode)
@@ -248,9 +249,9 @@ class BakeKeyframeOperator(Operator):
             if not obj.animation_data.action:
                 obj.animation_data.action = bpy.data.actions.new(obj.name + "_Baked")
 
-            # ---------- OBJECT ----------
             for frame in bake_frames:
                 scene.frame_set(frame)
+
                 if props.pos:
                     obj.keyframe_insert("location", frame=frame); baked += 1
                 if props.rot:
@@ -258,16 +259,14 @@ class BakeKeyframeOperator(Operator):
                 if props.scl:
                     obj.keyframe_insert("scale", frame=frame); baked += 1
 
-            # ---------- BONES ----------
             if obj.type == 'ARMATURE':
                 context.view_layer.objects.active = obj
                 if obj.mode != 'POSE':
                     bpy.ops.object.mode_set(mode='POSE')
 
-                bones = context.selected_pose_bones or []
                 for frame in bake_frames:
                     scene.frame_set(frame)
-                    for pb in bones:
+                    for pb in context.selected_pose_bones or []:
                         if props.pos:
                             pb.keyframe_insert("location", frame=frame); baked += 1
                         if props.rot:
