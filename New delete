@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Keyframe Tools Interval",
     "author": "Venkatesh Sanku",
-    "version": (2, 8, 0),
+    "version": (2, 8, 1),
     "blender": (5, 0, 1),
     "location": "View3D > Sidebar > Item",
     "description": "Delete or bake keyframes by interval on transforms and bone custom properties",
@@ -134,8 +134,8 @@ class DeleteKeyframeOperator(Operator):
 
     def execute(self, context):
         props = context.scene.del_keyframe_props
-
         objects = context.selected_objects
+
         if not objects:
             self.report({'WARNING'}, "No objects selected")
             return {'CANCELLED'}
@@ -158,46 +158,40 @@ class DeleteKeyframeOperator(Operator):
             for obj in objects:
 
                 # Object transforms
-                if paths:
-                    for path in paths:
-                        try:
-                            obj.keyframe_delete(data_path=path, frame=frame)
-                        except:
-                            pass
+                for path in paths:
+                    try:
+                        obj.keyframe_delete(data_path=path, frame=frame)
+                    except:
+                        pass
 
                 # Pose bones
                 if obj.type == 'ARMATURE':
-                    self._delete_on_bones(context, obj, frame, paths, props.custom_props)
+                    context.view_layer.objects.active = obj
+                    bpy.ops.object.mode_set(mode='POSE')
+
+                    for pb in get_selected_pose_bones(context, obj):
+                        for path in paths:
+                            try:
+                                pb.keyframe_delete(data_path=path, frame=frame)
+                            except:
+                                pass
+
+                        if props.custom_props:
+                            ad = pb.animation_data
+                            if ad and ad.action:
+                                for fc in ad.action.fcurves:
+                                    if fc.data_path.startswith('["'):
+                                        for kp in list(fc.keyframe_points):
+                                            if int(kp.co.x) == frame:
+                                                fc.keyframe_points.remove(kp)
+
+                    bpy.ops.object.mode_set(mode='OBJECT')
 
         return {'FINISHED'}
 
-    def _delete_on_bones(self, context, obj, frame, paths, do_custom):
-
-        context.view_layer.objects.active = obj
-        bpy.ops.object.mode_set(mode='POSE')
-
-        for pb in get_selected_pose_bones(context, obj):
-
-            for path in paths:
-                try:
-                    pb.keyframe_delete(data_path=path, frame=frame)
-                except:
-                    pass
-
-            if do_custom:
-                ad = pb.animation_data
-                if ad and ad.action:
-                    for fc in ad.action.fcurves:
-                        if fc.data_path.startswith('["'):
-                            for kp in list(fc.keyframe_points):
-                                if int(kp.co.x) == frame:
-                                    fc.keyframe_points.remove(kp)
-
-        bpy.ops.object.mode_set(mode='OBJECT')
-
 
 # ------------------------------------------------------------------------
-# Bake Operator
+# Bake Operator (FIXED)
 # ------------------------------------------------------------------------
 
 class BakeKeyframeOperator(Operator):
@@ -208,6 +202,7 @@ class BakeKeyframeOperator(Operator):
     def execute(self, context):
         props = context.scene.del_keyframe_props
         scene = context.scene
+        depsgraph = context.evaluated_depsgraph_get()
 
         objects = context.selected_objects
         if not objects:
@@ -215,7 +210,10 @@ class BakeKeyframeOperator(Operator):
             return {'CANCELLED'}
 
         all_frames = range(props.start_frame, props.end_frame)
-        key_frames = set(range(props.start_frame, props.end_frame, props.interval + 1)) if props.interval > 0 else set()
+        key_frames = (
+            set(range(props.start_frame, props.end_frame, props.interval + 1))
+            if props.interval > 0 else set()
+        )
 
         bake_frames = [
             f for f in all_frames
@@ -229,29 +227,63 @@ class BakeKeyframeOperator(Operator):
             context.view_layer.objects.active = obj
             bpy.ops.object.mode_set(mode='POSE')
 
+            # Ensure animation data & action
+            if not obj.animation_data:
+                obj.animation_data_create()
+            if not obj.animation_data.action:
+                obj.animation_data.action = bpy.data.actions.new(
+                    name=f"{obj.name}_Baked"
+                )
+
             for frame in bake_frames:
                 scene.frame_set(frame)
+                depsgraph.update()
 
                 for pb in get_selected_pose_bones(context, obj):
 
                     if props.pos:
-                        pb.keyframe_insert(data_path="location")
+                        pb.keyframe_insert(
+                            data_path="location",
+                            frame=frame,
+                            options={'INSERTKEY_NEEDED'}
+                        )
+
                     if props.rot:
-                        pb.keyframe_insert(data_path="rotation_euler")
-                        pb.keyframe_insert(data_path="rotation_quaternion")
+                        if pb.rotation_mode == 'QUATERNION':
+                            pb.keyframe_insert(
+                                data_path="rotation_quaternion",
+                                frame=frame,
+                                options={'INSERTKEY_NEEDED'}
+                            )
+                        else:
+                            pb.keyframe_insert(
+                                data_path="rotation_euler",
+                                frame=frame,
+                                options={'INSERTKEY_NEEDED'}
+                            )
+
                     if props.scl:
-                        pb.keyframe_insert(data_path="scale")
+                        pb.keyframe_insert(
+                            data_path="scale",
+                            frame=frame,
+                            options={'INSERTKEY_NEEDED'}
+                        )
 
                     if props.custom_props:
                         for k in pb.keys():
                             if k != "_RNA_UI":
                                 try:
-                                    pb.keyframe_insert(data_path=f'["{k}"]')
+                                    pb.keyframe_insert(
+                                        data_path=f'["{k}"]',
+                                        frame=frame,
+                                        options={'INSERTKEY_NEEDED'}
+                                    )
                                 except:
                                     pass
 
             bpy.ops.object.mode_set(mode='OBJECT')
 
+        self.report({'INFO'}, f"Baked {len(bake_frames)} frames")
         return {'FINISHED'}
 
 
@@ -320,6 +352,7 @@ def unregister():
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
     del bpy.types.Scene.del_keyframe_props
+
 
 if __name__ == "__main__":
     register()
