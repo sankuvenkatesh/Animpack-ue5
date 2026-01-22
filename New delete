@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Keyframe Tools Interval",
     "author": "Venkatesh Sanku",
-    "version": (2, 8, 4),
+    "version": (2, 8, 5),
     "blender": (5, 0, 1),
     "location": "View3D > Sidebar > Item",
     "description": "Delete or bake keyframes by interval on transforms and bone custom properties",
@@ -107,7 +107,7 @@ def update_live_preview(scene, props):
 
 
 # ------------------------------------------------------------------------
-# Utilities (UNCHANGED)
+# Utilities
 # ------------------------------------------------------------------------
 
 def frame_allowed(frame, interval, key_frames, inverse):
@@ -117,7 +117,7 @@ def frame_allowed(frame, interval, key_frames, inverse):
 
 
 # ------------------------------------------------------------------------
-# DELETE OPERATOR (FIXED)
+# DELETE OPERATOR (BULLETPROOF)
 # ------------------------------------------------------------------------
 
 class DeleteKeyframeOperator(Operator):
@@ -127,10 +127,10 @@ class DeleteKeyframeOperator(Operator):
 
     def execute(self, context):
         props = context.scene.del_keyframe_props
-
         obj = context.active_object
+
         if not obj or obj.type != 'ARMATURE':
-            self.report({'WARNING'}, "Select an armature in Pose Mode")
+            self.report({'WARNING'}, "Select Armature and Pose Bones")
             return {'CANCELLED'}
 
         original_mode = obj.mode
@@ -142,22 +142,11 @@ class DeleteKeyframeOperator(Operator):
             self.report({'WARNING'}, "No pose bones selected")
             return {'CANCELLED'}
 
-        paths = []
-        if props.pos:
-            paths.append("location")
-        if props.rot:
-            paths.extend(["rotation_euler", "rotation_quaternion"])
-        if props.scl:
-            paths.append("scale")
-
         frames = range(props.start_frame, props.end_frame)
         key_frames = (
             set(range(props.start_frame, props.end_frame, props.interval + 1))
             if props.interval > 0 else set()
         )
-
-        ad = obj.animation_data
-        action = ad.action if ad else None
 
         for frame in frames:
             if not frame_allowed(frame, props.interval, key_frames, props.inverse_interval):
@@ -165,21 +154,27 @@ class DeleteKeyframeOperator(Operator):
 
             for pb in bones:
 
-                # Transform channels
-                for path in paths:
-                    try:
-                        pb.keyframe_delete(data_path=path, frame=frame)
-                    except:
-                        pass
+                if props.pos:
+                    pb.keyframe_delete("location", frame=frame)
 
-                # Custom properties (CORRECT WAY)
-                if props.custom_props and action:
-                    bone_path = f'pose.bones["{pb.name}"]'
-                    for fc in action.fcurves:
-                        if fc.data_path.startswith(bone_path) and '["' in fc.data_path:
-                            for kp in list(fc.keyframe_points):
-                                if int(kp.co.x) == frame:
-                                    fc.keyframe_points.remove(kp)
+                if props.rot:
+                    pb.keyframe_delete("rotation_euler", frame=frame)
+                    pb.keyframe_delete("rotation_quaternion", frame=frame)
+
+                if props.scl:
+                    pb.keyframe_delete("scale", frame=frame)
+
+                # ✅ SAFE custom property delete
+                if props.custom_props:
+                    for k in pb.keys():
+                        if k != "_RNA_UI":
+                            try:
+                                obj.keyframe_delete(
+                                    data_path=f'pose.bones["{pb.name}"]["{k}"]',
+                                    frame=frame
+                                )
+                            except:
+                                pass
 
         if original_mode != 'POSE':
             bpy.ops.object.mode_set(mode=original_mode)
@@ -188,7 +183,7 @@ class DeleteKeyframeOperator(Operator):
 
 
 # ------------------------------------------------------------------------
-# BAKE OPERATOR (UNCHANGED)
+# BAKE OPERATOR (SAFE)
 # ------------------------------------------------------------------------
 
 class BakeKeyframeOperator(Operator):
@@ -199,11 +194,9 @@ class BakeKeyframeOperator(Operator):
     def execute(self, context):
         props = context.scene.del_keyframe_props
         scene = context.scene
-        depsgraph = context.evaluated_depsgraph_get()
 
         obj = context.active_object
         if not obj or obj.type != 'ARMATURE':
-            self.report({'WARNING'}, "Select an armature in Pose Mode")
             return {'CANCELLED'}
 
         original_mode = obj.mode
@@ -234,22 +227,18 @@ class BakeKeyframeOperator(Operator):
 
         for frame in bake_frames:
             scene.frame_set(frame)
-            depsgraph.update()
 
             for pb in bones:
-
                 if props.pos:
                     pb.keyframe_insert("location", frame=frame)
-
                 if props.rot:
-                    if pb.rotation_mode == 'QUATERNION':
-                        pb.keyframe_insert("rotation_quaternion", frame=frame)
-                    else:
-                        pb.keyframe_insert("rotation_euler", frame=frame)
-
+                    pb.keyframe_insert(
+                        "rotation_quaternion" if pb.rotation_mode == 'QUATERNION'
+                        else "rotation_euler",
+                        frame=frame
+                    )
                 if props.scl:
                     pb.keyframe_insert("scale", frame=frame)
-
                 if props.custom_props:
                     for k in pb.keys():
                         if k != "_RNA_UI":
@@ -318,13 +307,13 @@ classes = (
 )
 
 def register():
-    for cls in classes:
-        bpy.utils.register_class(cls)
+    for c in classes:
+        bpy.utils.register_class(c)
     bpy.types.Scene.del_keyframe_props = bpy.props.PointerProperty(type=DelKeyProperties)
 
 def unregister():
-    for cls in reversed(classes):
-        bpy.utils.unregister_class(cls)
+    for c in reversed(classes):
+        bpy.utils.unregister_class(c)
     del bpy.types.Scene.del_keyframe_props
 
 
