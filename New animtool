@@ -2,7 +2,7 @@
 bl_info = {
     "name": "Anim Tool Transfer",
     "author": "Venkatesh sanku",
-    "version": (1, 0, 3),
+    "version": (1, 1, 0),
     "blender": (5, 0, 1),
     "location": "View3D > Sidebar > Venky Anim Toolz",
     "description": "Transfer root/torso motion and batch bake actions",
@@ -30,26 +30,20 @@ def get_torso_items(self, context):
 
 def register_properties():
     bpy.types.Scene.rmt_selected_rig = bpy.props.PointerProperty(type=bpy.types.Object)
-
     bpy.types.Scene.controllers = bpy.props.CollectionProperty(type=RMT_ControllerItem)
     bpy.types.Scene.controllers_index = bpy.props.IntProperty(default=0)
-
     bpy.types.Scene.rmt_torso_controller_enum = bpy.props.EnumProperty(
         name="Torso Controller",
         items=get_torso_items
     )
-
     bpy.types.Scene.rmt_root_controller_name = bpy.props.StringProperty(name="Root Controller")
-
     bpy.types.Scene.axis_x = bpy.props.BoolProperty(name="X", default=True)
     bpy.types.Scene.axis_y = bpy.props.BoolProperty(name="Y", default=True)
     bpy.types.Scene.axis_z = bpy.props.BoolProperty(name="Z", default=False)
-
     bpy.types.Scene.keep_in_world_origin = bpy.props.BoolProperty(
         name="Keep in World Origin",
         default=False
     )
-
     bpy.types.Scene.rmt_action_items = bpy.props.CollectionProperty(type=RMT_ActionItem)
     bpy.types.Scene.rmt_batch_actions = bpy.props.CollectionProperty(type=RMT_ActionItem)
 
@@ -67,7 +61,7 @@ def unregister_properties():
     del bpy.types.Scene.rmt_batch_actions
 
 # -----------------------------
-# Controller Operators
+# Add Controllers
 # -----------------------------
 class RMT_OT_AddController(bpy.types.Operator):
     bl_idname = "rmt.add_controller"
@@ -75,7 +69,9 @@ class RMT_OT_AddController(bpy.types.Operator):
     bl_description = "Add selected pose bones as controllers"
 
     def execute(self, context):
-        rig = context.scene.rmt_selected_rig
+        scene = context.scene
+        rig = scene.rmt_selected_rig
+
         if not rig or rig.type != 'ARMATURE':
             self.report({'ERROR'}, "Select a valid Armature")
             return {'CANCELLED'}
@@ -84,23 +80,28 @@ class RMT_OT_AddController(bpy.types.Operator):
         if rig.mode != 'POSE':
             bpy.ops.object.mode_set(mode='POSE')
 
-        # FIXED: Use PoseBone.bone.select_get()
         selected_bones = [pb for pb in rig.pose.bones if pb.bone.select_get()]
         if not selected_bones:
             self.report({'WARNING'}, "No pose bones selected")
             return {'CANCELLED'}
 
-        existing = {c.name for c in context.scene.controllers}
+        existing = {c.name for c in scene.controllers}
         added = 0
         for pb in selected_bones:
             if pb.name not in existing:
-                item = context.scene.controllers.add()
+                item = scene.controllers.add()
                 item.name = pb.name
                 added += 1
+
+        if scene.controllers:
+            scene.controllers_index = len(scene.controllers) - 1
 
         self.report({'INFO'}, f"Added {added} controllers")
         return {'FINISHED'}
 
+# -----------------------------
+# Other Controller Ops
+# -----------------------------
 class RMT_OT_ClearControllers(bpy.types.Operator):
     bl_idname = "rmt.clear_controllers"
     bl_label = "Clear All Controllers"
@@ -160,7 +161,6 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
     bl_idname = "rmt.transfer_root_motion"
     bl_label = "Transfer Root Motion"
     bl_options = {'REGISTER', 'UNDO'}
-
     action_name: bpy.props.StringProperty(default="")
 
     def execute(self, context):
@@ -179,9 +179,7 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
             if action:
                 rig.animation_data.action = action
 
-        # Ensure Pose Mode
         bpy.ops.object.mode_set(mode='POSE')
-
         root_name = scene.rmt_root_controller_name
         torso_name = scene.rmt_torso_controller_enum
         root = rig.pose.bones.get(root_name)
@@ -195,14 +193,14 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
         for c in list(root.constraints):
             root.constraints.remove(c)
 
-        # Empty for world origin
+        # Create temporary empty for world origin if needed
         empty_root = None
         if scene.keep_in_world_origin:
             empty_root = bpy.data.objects.new("Empty-Root", None)
             scene.collection.objects.link(empty_root)
             empty_root.location = (0, 0, 0)
 
-        # Apply constraint
+        # Apply copy location constraint
         con = root.constraints.new('COPY_LOCATION')
         con.use_x = scene.axis_x
         con.use_y = scene.axis_y
@@ -229,7 +227,7 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
             bake_types={'POSE'}
         )
 
-        # Cleanup
+        # Cleanup temporary empty
         if empty_root:
             bpy.data.objects.remove(empty_root, do_unlink=True)
 
@@ -319,7 +317,6 @@ class RMT_PT_RootMotionPanel(bpy.types.Panel):
         scene = context.scene
 
         layout.prop(scene, "rmt_selected_rig", text="Target Object")
-
         row = layout.row(align=True)
         row.operator("rmt.add_controller", text="Add Controllers", icon='PLUS')
         row = layout.row(align=True)
