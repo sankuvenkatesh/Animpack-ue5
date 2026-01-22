@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Keyframe Tools Interval",
     "author": "Venkatesh Sanku",
-    "version": (2, 8, 3),
+    "version": (2, 8, 4),
     "blender": (5, 0, 1),
     "location": "View3D > Sidebar > Item",
     "description": "Delete or bake keyframes by interval on transforms and bone custom properties",
@@ -110,12 +110,6 @@ def update_live_preview(scene, props):
 # Utilities (UNCHANGED)
 # ------------------------------------------------------------------------
 
-def get_selected_pose_bones(context, obj):
-    if obj.type != 'ARMATURE' or not obj.pose:
-        return []
-    return context.selected_pose_bones or []
-
-
 def frame_allowed(frame, interval, key_frames, inverse):
     if interval == 0:
         return not inverse
@@ -123,7 +117,7 @@ def frame_allowed(frame, interval, key_frames, inverse):
 
 
 # ------------------------------------------------------------------------
-# DELETE OPERATOR (FIXED, UI NOT TOUCHED)
+# DELETE OPERATOR (FIXED)
 # ------------------------------------------------------------------------
 
 class DeleteKeyframeOperator(Operator):
@@ -133,18 +127,16 @@ class DeleteKeyframeOperator(Operator):
 
     def execute(self, context):
         props = context.scene.del_keyframe_props
-        scene = context.scene
 
         obj = context.active_object
         if not obj or obj.type != 'ARMATURE':
-            self.report({'WARNING'}, "Select an armature and pose bones")
+            self.report({'WARNING'}, "Select an armature in Pose Mode")
             return {'CANCELLED'}
 
         original_mode = obj.mode
         if original_mode != 'POSE':
             bpy.ops.object.mode_set(mode='POSE')
 
-        # IMPORTANT: cache bones once
         bones = list(context.selected_pose_bones)
         if not bones:
             self.report({'WARNING'}, "No pose bones selected")
@@ -164,29 +156,31 @@ class DeleteKeyframeOperator(Operator):
             if props.interval > 0 else set()
         )
 
+        ad = obj.animation_data
+        action = ad.action if ad else None
+
         for frame in frames:
             if not frame_allowed(frame, props.interval, key_frames, props.inverse_interval):
                 continue
 
             for pb in bones:
 
+                # Transform channels
                 for path in paths:
                     try:
                         pb.keyframe_delete(data_path=path, frame=frame)
                     except:
                         pass
 
-                # Custom properties
-                if props.custom_props:
-                    ad = pb.animation_data
-                    if ad and ad.action:
-                        for fc in ad.action.fcurves:
-                            if fc.data_path.startswith('["'):
-                                for kp in list(fc.keyframe_points):
-                                    if int(kp.co.x) == frame:
-                                        fc.keyframe_points.remove(kp)
+                # Custom properties (CORRECT WAY)
+                if props.custom_props and action:
+                    bone_path = f'pose.bones["{pb.name}"]'
+                    for fc in action.fcurves:
+                        if fc.data_path.startswith(bone_path) and '["' in fc.data_path:
+                            for kp in list(fc.keyframe_points):
+                                if int(kp.co.x) == frame:
+                                    fc.keyframe_points.remove(kp)
 
-        # Restore original mode
         if original_mode != 'POSE':
             bpy.ops.object.mode_set(mode=original_mode)
 
@@ -194,7 +188,7 @@ class DeleteKeyframeOperator(Operator):
 
 
 # ------------------------------------------------------------------------
-# BAKE OPERATOR (UNCHANGED LOGIC)
+# BAKE OPERATOR (UNCHANGED)
 # ------------------------------------------------------------------------
 
 class BakeKeyframeOperator(Operator):
@@ -209,7 +203,7 @@ class BakeKeyframeOperator(Operator):
 
         obj = context.active_object
         if not obj or obj.type != 'ARMATURE':
-            self.report({'WARNING'}, "Select an armature and pose bones")
+            self.report({'WARNING'}, "Select an armature in Pose Mode")
             return {'CANCELLED'}
 
         original_mode = obj.mode
