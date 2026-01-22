@@ -2,7 +2,7 @@
 bl_info = {
     "name": "Anim Tool Transfer",
     "author": "Venkatesh sanku",
-    "version": (1, 0, 1),
+    "version": (1, 0, 2),
     "blender": (5, 0, 1),
     "location": "View3D > Sidebar > Venky Anim Toolz",
     "description": "Transfer root/torso motion and batch bake actions",
@@ -84,7 +84,8 @@ class RMT_OT_AddController(bpy.types.Operator):
             self.report({'ERROR'}, "Switch to Pose Mode to select bones")
             return {'CANCELLED'}
 
-        selected_bones = [pb for pb in rig.pose.bones if pb.bone.select]
+        # FIXED: use select_get() in Blender 5.0.1
+        selected_bones = [pb for pb in rig.pose.bones if pb.bone.select_get()]
         if not selected_bones:
             self.report({'WARNING'}, "No pose bones selected")
             return {'CANCELLED'}
@@ -136,7 +137,7 @@ class RMT_OT_SelectAllControllers(bpy.types.Operator):
         for ctrl in context.scene.controllers:
             pb = rig.pose.bones.get(ctrl.name)
             if pb:
-                pb.bone.select = True
+                pb.bone.select_set(True)
         return {'FINISHED'}
 
 # -----------------------------
@@ -217,7 +218,7 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
 
         # Bake
         bpy.ops.pose.select_all(action='DESELECT')
-        root.bone.select = True
+        root.bone.select_set(True)
         rig.data.bones.active = root.bone
 
         bpy.ops.nla.bake(
