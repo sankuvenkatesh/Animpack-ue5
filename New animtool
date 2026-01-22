@@ -2,19 +2,18 @@
 bl_info = {
     "name": "Anim Tool Transfer",
     "author": "Venkatesh sanku",
-    "version": (1, 0, 0),
+    "version": (1, 0, 1),
     "blender": (5, 0, 1),
-    "location": "View3D > Sidebar > Anim Tool Transfer",
-    "description": "Transfer torso/root motion and batch bake actions",
+    "location": "View3D > Sidebar > Venky Anim Toolz",
+    "description": "Transfer root/torso motion and batch bake actions",
     "category": "Animation",
 }
 
 import bpy
 
-# --------------------------------------------------
+# -----------------------------
 # Property Groups
-# --------------------------------------------------
-
+# -----------------------------
 class RMT_ControllerItem(bpy.types.PropertyGroup):
     name: bpy.props.StringProperty()
 
@@ -23,10 +22,9 @@ class RMT_ActionItem(bpy.types.PropertyGroup):
     action: bpy.props.PointerProperty(type=bpy.types.Action)
     is_selected: bpy.props.BoolProperty(default=False)
 
-# --------------------------------------------------
+# -----------------------------
 # Scene Properties
-# --------------------------------------------------
-
+# -----------------------------
 def get_torso_items(self, context):
     return [(c.name, c.name, "") for c in context.scene.controllers]
 
@@ -34,16 +32,14 @@ def register_properties():
     bpy.types.Scene.rmt_selected_rig = bpy.props.PointerProperty(type=bpy.types.Object)
 
     bpy.types.Scene.controllers = bpy.props.CollectionProperty(type=RMT_ControllerItem)
-    bpy.types.Scene.controllers_index = bpy.props.IntProperty()
+    bpy.types.Scene.controllers_index = bpy.props.IntProperty(default=0)
 
     bpy.types.Scene.rmt_torso_controller_enum = bpy.props.EnumProperty(
         name="Torso Controller",
         items=get_torso_items
     )
 
-    bpy.types.Scene.rmt_root_controller_name = bpy.props.StringProperty(
-        name="Root Controller"
-    )
+    bpy.types.Scene.rmt_root_controller_name = bpy.props.StringProperty(name="Root Controller")
 
     bpy.types.Scene.axis_x = bpy.props.BoolProperty(name="X", default=True)
     bpy.types.Scene.axis_y = bpy.props.BoolProperty(name="Y", default=True)
@@ -70,10 +66,9 @@ def unregister_properties():
     del bpy.types.Scene.rmt_action_items
     del bpy.types.Scene.rmt_batch_actions
 
-# --------------------------------------------------
-# Operators
-# --------------------------------------------------
-
+# -----------------------------
+# Controller Operators
+# -----------------------------
 class RMT_OT_AddController(bpy.types.Operator):
     bl_idname = "rmt.add_controller"
     bl_label = "Add Controllers"
@@ -81,43 +76,41 @@ class RMT_OT_AddController(bpy.types.Operator):
 
     def execute(self, context):
         rig = context.scene.rmt_selected_rig
-
         if not rig or rig.type != 'ARMATURE':
-            self.report({'ERROR'}, "Select an Armature")
+            self.report({'ERROR'}, "Select a valid Armature")
             return {'CANCELLED'}
 
         if rig.mode != 'POSE':
-            self.report({'ERROR'}, "Must be in Pose Mode")
+            self.report({'ERROR'}, "Switch to Pose Mode to select bones")
             return {'CANCELLED'}
 
         selected_bones = [pb for pb in rig.pose.bones if pb.bone.select]
-
         if not selected_bones:
             self.report({'WARNING'}, "No pose bones selected")
             return {'CANCELLED'}
 
         existing = {c.name for c in context.scene.controllers}
-
+        added = 0
         for pb in selected_bones:
             if pb.name not in existing:
                 item = context.scene.controllers.add()
                 item.name = pb.name
+                added += 1
 
+        self.report({'INFO'}, f"Added {added} controllers")
         return {'FINISHED'}
 
 class RMT_OT_ClearControllers(bpy.types.Operator):
     bl_idname = "rmt.clear_controllers"
-    bl_label = "Clear Controllers"
+    bl_label = "Clear All Controllers"
 
     def execute(self, context):
         context.scene.controllers.clear()
-
         col = bpy.data.collections.get("RootMotionRefs")
         if col:
             for o in list(col.objects):
                 bpy.data.objects.remove(o, do_unlink=True)
             bpy.data.collections.remove(col)
-
         return {'FINISHED'}
 
 class RMT_OT_RemoveController(bpy.types.Operator):
@@ -129,36 +122,67 @@ class RMT_OT_RemoveController(bpy.types.Operator):
         context.scene.controllers.remove(self.index)
         return {'FINISHED'}
 
-# --------------------------------------------------
-# Root Motion Transfer
-# --------------------------------------------------
+class RMT_OT_SelectAllControllers(bpy.types.Operator):
+    bl_idname = "rmt.select_all_controllers"
+    bl_label = "Select All Controllers"
 
+    def execute(self, context):
+        rig = context.scene.rmt_selected_rig
+        if not rig or rig.type != 'ARMATURE':
+            self.report({'WARNING'}, "Select a valid Armature")
+            return {'CANCELLED'}
+
+        bpy.ops.object.mode_set(mode='POSE')
+        for ctrl in context.scene.controllers:
+            pb = rig.pose.bones.get(ctrl.name)
+            if pb:
+                pb.bone.select = True
+        return {'FINISHED'}
+
+# -----------------------------
+# Utility
+# -----------------------------
+def action_contains_rig_animation(action, rig):
+    if not rig or rig.type != 'ARMATURE':
+        return False
+    for fcurve in action.fcurves:
+        if fcurve.data_path.startswith('pose.bones["'):
+            bone_name = fcurve.data_path.split('["')[1].split('"]')[0]
+            if bone_name in rig.data.bones:
+                return True
+    return False
+
+# -----------------------------
+# Root Motion Operator
+# -----------------------------
 class RMT_OT_TransferRootMotion(bpy.types.Operator):
     bl_idname = "rmt.transfer_root_motion"
     bl_label = "Transfer Root Motion"
+    bl_options = {'REGISTER', 'UNDO'}
 
     action_name: bpy.props.StringProperty(default="")
 
     def execute(self, context):
         scene = context.scene
         rig = scene.rmt_selected_rig
-
         if not rig or rig.type != 'ARMATURE':
             self.report({'ERROR'}, "No valid rig")
             return {'CANCELLED'}
 
-        if self.action_name:
-            act = bpy.data.actions.get(self.action_name)
-            if act:
-                rig.animation_data_create()
-                rig.animation_data.action = act
+        if rig.animation_data is None:
+            rig.animation_data_create()
 
-        prev_mode = rig.mode
+        prev_action = rig.animation_data.action
+        if self.action_name:
+            action = bpy.data.actions.get(self.action_name)
+            if action:
+                rig.animation_data.action = action
+
+        # Ensure in Pose Mode
         bpy.ops.object.mode_set(mode='POSE')
 
         root_name = scene.rmt_root_controller_name
         torso_name = scene.rmt_torso_controller_enum
-
         root = rig.pose.bones.get(root_name)
         torso = rig.pose.bones.get(torso_name)
 
@@ -166,37 +190,35 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
             self.report({'ERROR'}, "Root controller not found")
             return {'CANCELLED'}
 
+        # Clear constraints
         for c in list(root.constraints):
             root.constraints.remove(c)
 
-        col = bpy.data.collections.get("RootMotionRefs")
-        if not col:
-            col = bpy.data.collections.new("RootMotionRefs")
-            scene.collection.children.link(col)
+        # Create empty for world origin
+        empty_root = None
+        if scene.keep_in_world_origin:
+            empty_root = bpy.data.objects.new("Empty-Root", None)
+            scene.collection.objects.link(empty_root)
+            empty_root.location = (0, 0, 0)
 
-        empty = bpy.data.objects.new("Empty-Root", None)
-        col.objects.link(empty)
-        empty.location = (0, 0, 0)
-
+        # Apply constraint
         con = root.constraints.new('COPY_LOCATION')
         con.use_x = scene.axis_x
         con.use_y = scene.axis_y
         con.use_z = scene.axis_z
         con.owner_space = 'WORLD'
         con.target_space = 'WORLD'
-
         if scene.keep_in_world_origin:
-            con.target = empty
+            con.target = empty_root
         else:
-            if not torso:
-                self.report({'ERROR'}, "Torso controller not found")
-                return {'CANCELLED'}
-            con.target = rig
-            con.subtarget = torso.name
+            if torso:
+                con.target = rig
+                con.subtarget = torso.name
 
+        # Bake
         bpy.ops.pose.select_all(action='DESELECT')
-        rig.data.bones[root.name].select = True
-        rig.data.bones.active = rig.data.bones[root.name]
+        root.bone.select = True
+        rig.data.bones.active = root.bone
 
         bpy.ops.nla.bake(
             frame_start=scene.frame_start,
@@ -207,99 +229,155 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
             bake_types={'POSE'}
         )
 
-        bpy.data.objects.remove(empty, do_unlink=True)
-        bpy.data.collections.remove(col)
+        # Cleanup
+        if empty_root:
+            bpy.data.objects.remove(empty_root, do_unlink=True)
 
-        bpy.ops.object.mode_set(mode=prev_mode)
+        if prev_action:
+            rig.animation_data.action = prev_action
+
         return {'FINISHED'}
 
-# --------------------------------------------------
-# Batch Transfer
-# --------------------------------------------------
-
-class RMT_OT_BatchTransfer(bpy.types.Operator):
-    bl_idname = "rmt.batch_transfer"
+# -----------------------------
+# Batch Operators
+# -----------------------------
+class RMT_OT_BatchTransferRootMotionContinue(bpy.types.Operator):
+    bl_idname = "rmt.batch_transfer_root_motion_continue"
     bl_label = "Batch Transfer Root Motion"
+    bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
         scene = context.scene
         rig = scene.rmt_selected_rig
-
-        if not rig or not rig.animation_data:
-            return {'CANCELLED'}
-
-        current_action = rig.animation_data.action
+        current_action = rig.animation_data.action if rig.animation_data else None
 
         for item in scene.rmt_batch_actions:
-            bpy.ops.rmt.transfer_root_motion(
-                'EXEC_DEFAULT',
-                action_name=item.name
-            )
+            bpy.ops.rmt.transfer_root_motion('INVOKE_DEFAULT', action_name=item.name)
 
-        rig.animation_data.action = current_action
+        if current_action:
+            rig.animation_data.action = current_action
+        self.report({'INFO'}, f"Processed {len(scene.rmt_batch_actions)} actions")
         return {'FINISHED'}
 
-# --------------------------------------------------
-# UI
-# --------------------------------------------------
+class RMT_OT_SelectActionsPopup(bpy.types.Operator):
+    bl_idname = "rmt.batch_transfer_root_motion"
+    bl_label = "Batch Transfer"
+    bl_options = {'REGISTER', 'UNDO'}
 
+    def invoke(self, context, event):
+        scene = context.scene
+        scene.rmt_action_items.clear()
+        rig = scene.rmt_selected_rig
+        if not rig or rig.type != 'ARMATURE':
+            self.report({'WARNING'}, "No rig selected")
+            return {'CANCELLED'}
+
+        for act in bpy.data.actions:
+            if act.users > 0 and action_contains_rig_animation(act, rig):
+                item = scene.rmt_action_items.add()
+                item.name = act.name
+                item.action = act
+                item.is_selected = False
+
+        return context.window_manager.invoke_props_dialog(self, width=400)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text="Select actions to process:")
+        for item in context.scene.rmt_action_items:
+            layout.prop(item, "is_selected", text=item.name)
+
+    def execute(self, context):
+        scene = context.scene
+        scene.rmt_batch_actions.clear()
+        selected = [i for i in scene.rmt_action_items if i.is_selected]
+        if not selected:
+            self.report({'WARNING'}, "No actions selected")
+            return {'CANCELLED'}
+
+        for item in selected:
+            new_item = scene.rmt_batch_actions.add()
+            new_item.name = item.name
+            new_item.action = item.action
+
+        bpy.ops.rmt.batch_transfer_root_motion_continue()
+        self.report({'INFO'}, f"Transferred {len(selected)} actions")
+        return {'FINISHED'}
+
+# -----------------------------
+# UI Panel
+# -----------------------------
 class RMT_PT_RootMotionPanel(bpy.types.Panel):
     bl_label = "Anim Tool Transfer"
+    bl_idname = "RMT_PT_root_motion_transfer"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
     bl_category = "Venky Anim Toolz"
 
     def draw(self, context):
-        l = self.layout
-        s = context.scene
+        layout = self.layout
+        scene = context.scene
 
-        l.prop(s, "rmt_selected_rig")
-        l.operator("rmt.add_controller", icon='PLUS')
-        l.operator("rmt.clear_controllers", icon='TRASH')
+        layout.prop(scene, "rmt_selected_rig", text="Target Object")
 
-        for i, c in enumerate(s.controllers):
-            r = l.row(align=True)
-            r.label(text=c.name, icon='BONE_DATA')
-            op = r.operator("rmt.remove_controller", text="", icon='X')
-            op.index = i
+        row = layout.row(align=True)
+        row.operator("rmt.add_controller", text="Add Controllers", icon='PLUS')
+        row = layout.row(align=True)
+        row.operator("rmt.clear_controllers", text="Clear All", icon='TRASH')
+        row.operator("rmt.select_all_controllers", text="Select All", icon='RESTRICT_SELECT_OFF')
 
-        l.separator()
-        l.prop(s, "rmt_torso_controller_enum")
-        l.prop_search(s, "rmt_root_controller_name", s.rmt_selected_rig.pose, "bones")
+        box = layout.box()
+        for index, item in enumerate(scene.controllers):
+            row = box.row(align=True)
+            row.label(text=item.name, icon='BONE_DATA')
+            op = row.operator("rmt.remove_controller", text="", icon='X')
+            op.index = index
 
-        l.prop(s, "keep_in_world_origin")
-        if not s.keep_in_world_origin:
-            row = l.row(align=True)
-            row.prop(s, "axis_x")
-            row.prop(s, "axis_y")
-            row.prop(s, "axis_z")
+        layout.separator()
+        layout.label(text="Target Controller (usually torso - COG):")
+        layout.prop(scene, "rmt_torso_controller_enum", text="")
+        layout.label(text="Master Controller (root):")
+        if scene.rmt_selected_rig:
+            layout.prop_search(scene, "rmt_root_controller_name", scene.rmt_selected_rig.pose, "bones", text="")
+        else:
+            layout.label(text="No rig selected!", icon='ERROR')
 
-        l.operator("rmt.transfer_root_motion", icon='PLAY')
+        layout.prop(scene, "keep_in_world_origin", text="Keep in World Origin")
+        if not scene.keep_in_world_origin:
+            row = layout.row(align=True)
+            row.label(text="Transfer Axes:")
+            row.prop(scene, "axis_x", text="X")
+            row.prop(scene, "axis_y", text="Y")
+            row.prop(scene, "axis_z", text="Z")
 
-# --------------------------------------------------
+        layout.operator("rmt.transfer_root_motion", text="Apply Root Motion", icon='PLAY')
+        layout.operator("rmt.batch_transfer_root_motion", icon="ACTION")
+
+# -----------------------------
 # Register
-# --------------------------------------------------
-
+# -----------------------------
 classes = [
     RMT_ControllerItem,
     RMT_ActionItem,
     RMT_OT_AddController,
     RMT_OT_ClearControllers,
     RMT_OT_RemoveController,
+    RMT_OT_SelectAllControllers,
     RMT_OT_TransferRootMotion,
-    RMT_OT_BatchTransfer,
+    RMT_OT_BatchTransferRootMotionContinue,
+    RMT_OT_SelectActionsPopup,
     RMT_PT_RootMotionPanel,
 ]
 
 def register():
-    for c in classes:
-        bpy.utils.register_class(c)
+    for cls in classes:
+        bpy.utils.register_class(cls)
     register_properties()
 
 def unregister():
     unregister_properties()
-    for c in reversed(classes):
-        bpy.utils.unregister_class(c)
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)
 
 if __name__ == "__main__":
     register()
