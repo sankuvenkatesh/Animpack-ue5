@@ -2,7 +2,7 @@
 bl_info = {
     "name": "Anim Tool Transfer",
     "author": "Venkatesh sanku",
-    "version": (1, 0, 2),
+    "version": (1, 0, 3),
     "blender": (5, 0, 1),
     "location": "View3D > Sidebar > Venky Anim Toolz",
     "description": "Transfer root/torso motion and batch bake actions",
@@ -80,11 +80,11 @@ class RMT_OT_AddController(bpy.types.Operator):
             self.report({'ERROR'}, "Select a valid Armature")
             return {'CANCELLED'}
 
+        # Ensure Pose Mode
         if rig.mode != 'POSE':
-            self.report({'ERROR'}, "Switch to Pose Mode to select bones")
-            return {'CANCELLED'}
+            bpy.ops.object.mode_set(mode='POSE')
 
-        # FIXED: use select_get() in Blender 5.0.1
+        # FIXED: Use PoseBone.bone.select_get()
         selected_bones = [pb for pb in rig.pose.bones if pb.bone.select_get()]
         if not selected_bones:
             self.report({'WARNING'}, "No pose bones selected")
@@ -179,7 +179,7 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
             if action:
                 rig.animation_data.action = action
 
-        # Ensure in Pose Mode
+        # Ensure Pose Mode
         bpy.ops.object.mode_set(mode='POSE')
 
         root_name = scene.rmt_root_controller_name
@@ -195,7 +195,7 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
         for c in list(root.constraints):
             root.constraints.remove(c)
 
-        # Create empty for world origin
+        # Empty for world origin
         empty_root = None
         if scene.keep_in_world_origin:
             empty_root = bpy.data.objects.new("Empty-Root", None)
@@ -216,11 +216,10 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
                 con.target = rig
                 con.subtarget = torso.name
 
-        # Bake
+        # Bake root motion
         bpy.ops.pose.select_all(action='DESELECT')
         root.bone.select_set(True)
         rig.data.bones.active = root.bone
-
         bpy.ops.nla.bake(
             frame_start=scene.frame_start,
             frame_end=scene.frame_end,
