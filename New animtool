@@ -2,7 +2,7 @@
 bl_info = {
     "name": "Anim Tool Transfer",
     "author": "Venkatesh sanku",
-    "version": (1, 1, 0),
+    "version": (1, 2, 0),
     "blender": (5, 0, 1),
     "location": "View3D > Sidebar > Venky Anim Toolz",
     "description": "Transfer root/torso motion and batch bake actions",
@@ -76,27 +76,29 @@ class RMT_OT_AddController(bpy.types.Operator):
             self.report({'ERROR'}, "Select a valid Armature")
             return {'CANCELLED'}
 
-        # Ensure Pose Mode
+        # Make active and switch to POSE mode
+        context.view_layer.objects.active = rig
         if rig.mode != 'POSE':
             bpy.ops.object.mode_set(mode='POSE')
 
+        # Only selected pose bones
         selected_bones = [pb for pb in rig.pose.bones if pb.bone.select_get()]
         if not selected_bones:
             self.report({'WARNING'}, "No pose bones selected")
             return {'CANCELLED'}
 
         existing = {c.name for c in scene.controllers}
-        added = 0
+        count = 0
         for pb in selected_bones:
             if pb.name not in existing:
                 item = scene.controllers.add()
                 item.name = pb.name
-                added += 1
+                count += 1
 
         if scene.controllers:
             scene.controllers_index = len(scene.controllers) - 1
 
-        self.report({'INFO'}, f"Added {added} controllers")
+        self.report({'INFO'}, f"Added {count} controllers")
         return {'FINISHED'}
 
 # -----------------------------
@@ -134,11 +136,14 @@ class RMT_OT_SelectAllControllers(bpy.types.Operator):
             self.report({'WARNING'}, "Select a valid Armature")
             return {'CANCELLED'}
 
+        context.view_layer.objects.active = rig
         bpy.ops.object.mode_set(mode='POSE')
+
         for ctrl in context.scene.controllers:
             pb = rig.pose.bones.get(ctrl.name)
             if pb:
                 pb.bone.select_set(True)
+
         return {'FINISHED'}
 
 # -----------------------------
@@ -179,7 +184,9 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
             if action:
                 rig.animation_data.action = action
 
+        context.view_layer.objects.active = rig
         bpy.ops.object.mode_set(mode='POSE')
+
         root_name = scene.rmt_root_controller_name
         torso_name = scene.rmt_torso_controller_enum
         root = rig.pose.bones.get(root_name)
@@ -193,14 +200,14 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
         for c in list(root.constraints):
             root.constraints.remove(c)
 
-        # Create temporary empty for world origin if needed
+        # Optional temporary empty for world origin
         empty_root = None
         if scene.keep_in_world_origin:
             empty_root = bpy.data.objects.new("Empty-Root", None)
             scene.collection.objects.link(empty_root)
             empty_root.location = (0, 0, 0)
 
-        # Apply copy location constraint
+        # Apply constraint
         con = root.constraints.new('COPY_LOCATION')
         con.use_x = scene.axis_x
         con.use_y = scene.axis_y
@@ -227,7 +234,6 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
             bake_types={'POSE'}
         )
 
-        # Cleanup temporary empty
         if empty_root:
             bpy.data.objects.remove(empty_root, do_unlink=True)
 
