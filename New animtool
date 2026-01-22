@@ -42,11 +42,14 @@ def register_properties():
 
     bpy.types.Scene.rmt_root_controller_name = bpy.props.StringProperty(name="Root Controller")
 
-    bpy.types.Scene.axis_x = bpy.props.BoolProperty(default=True)
-    bpy.types.Scene.axis_y = bpy.props.BoolProperty(default=True)
-    bpy.types.Scene.axis_z = bpy.props.BoolProperty(default=False)
+    bpy.types.Scene.axis_x = bpy.props.BoolProperty(name="X", default=True)
+    bpy.types.Scene.axis_y = bpy.props.BoolProperty(name="Y", default=True)
+    bpy.types.Scene.axis_z = bpy.props.BoolProperty(name="Z", default=False)
 
-    bpy.types.Scene.keep_in_world_origin = bpy.props.BoolProperty(default=False)
+    bpy.types.Scene.keep_in_world_origin = bpy.props.BoolProperty(
+        name="Keep in World Origin",
+        default=False
+    )
 
     bpy.types.Scene.rmt_action_items = bpy.props.CollectionProperty(type=RMT_ActionItem)
     bpy.types.Scene.rmt_batch_actions = bpy.props.CollectionProperty(type=RMT_ActionItem)
@@ -77,8 +80,7 @@ class RMT_OT_AddController(bpy.types.Operator):
         if not rig or rig.type != 'ARMATURE':
             return {'CANCELLED'}
 
-        if rig.mode != 'POSE':
-            bpy.ops.object.mode_set(mode='POSE')
+        bpy.ops.object.mode_set(mode='POSE')
 
         for pb in context.selected_pose_bones:
             if not any(c.name == pb.name for c in context.scene.controllers):
@@ -108,21 +110,6 @@ class RMT_OT_RemoveController(bpy.types.Operator):
         context.scene.controllers.remove(self.index)
         return {'FINISHED'}
 
-class RMT_OT_SelectAllControllers(bpy.types.Operator):
-    bl_idname = "rmt.select_all_controllers"
-    bl_label = "Select All Controllers"
-
-    def execute(self, context):
-        rig = context.scene.rmt_selected_rig
-        if rig.mode != 'POSE':
-            bpy.ops.object.mode_set(mode='POSE')
-
-        bpy.ops.pose.select_all(action='DESELECT')
-        for c in context.scene.controllers:
-            if c.name in rig.data.bones:
-                rig.data.bones[c.name].select = True
-        return {'FINISHED'}
-
 # --------------------------------------------------
 # Root Motion Transfer
 # --------------------------------------------------
@@ -131,8 +118,6 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
     bl_idname = "rmt.transfer_root_motion"
     bl_label = "Transfer Root Motion"
 
-    action_name: bpy.props.StringProperty(default="")
-
     def execute(self, context):
         scene = context.scene
         rig = scene.rmt_selected_rig
@@ -140,96 +125,52 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
             return {'CANCELLED'}
 
         prev_mode = rig.mode
-
-        if self.action_name:
-            rig.animation_data.action = bpy.data.actions.get(self.action_name)
-
-        self.create_reference(context, rig)
-        self.bake_reference(context, rig)
-        self.apply_constraints(context, rig)
-        self.final_bake(context, rig)
-        self.cleanup()
-
-        if rig.mode != prev_mode:
-            bpy.ops.object.mode_set(mode=prev_mode)
-
-        return {'FINISHED'}
-
-    def create_reference(self, context, rig):
-        col = bpy.data.collections.new("RootMotionRefs")
-        context.scene.collection.children.link(col)
-
-        for c in context.scene.controllers:
-            e = bpy.data.objects.new(c.name + "_ref", None)
-            col.objects.link(e)
-            e.parent = rig
-            e.matrix_world = rig.matrix_world @ rig.pose.bones[c.name].matrix
-            con = e.constraints.new('COPY_TRANSFORMS')
-            con.target = rig
-            con.subtarget = c.name
-
-    def bake_reference(self, context, rig):
-        col = bpy.data.collections.get("RootMotionRefs")
-        if not col or not col.objects:
-            return
-
-        prev_mode = rig.mode
-        bpy.ops.object.mode_set(mode='OBJECT')
-
-        bpy.ops.object.select_all(action='DESELECT')
-        for o in col.objects:
-            o.select_set(True)
-
-        context.view_layer.objects.active = col.objects[0]
-
-        bpy.ops.nla.bake(
-            frame_start=context.scene.frame_start,
-            frame_end=context.scene.frame_end,
-            only_selected=True,
-            visual_keying=True,
-            clear_constraints=True,
-            clear_parents=False,
-            bake_types={'OBJECT'}
-        )
-
-        bpy.ops.object.select_all(action='DESELECT')
-        bpy.ops.object.mode_set(mode=prev_mode)
-
-    def apply_constraints(self, context, rig):
-        scene = context.scene
         bpy.ops.object.mode_set(mode='POSE')
 
-        for c in scene.controllers:
-            pb = rig.pose.bones.get(c.name)
-            ref = bpy.data.objects.get(c.name + "_ref")
-            if pb and ref:
-                con = pb.constraints.new('COPY_TRANSFORMS')
-                con.target = ref
+        root_name = scene.rmt_root_controller_name
+        torso_name = scene.rmt_torso_controller_enum
 
-        root = rig.pose.bones.get(scene.rmt_root_controller_name)
-        torso = rig.pose.bones.get(scene.rmt_torso_controller_enum)
+        root = rig.pose.bones.get(root_name)
+        torso = rig.pose.bones.get(torso_name)
 
-        if root and torso:
-            con = root.constraints.new('COPY_LOCATION')
+        if not root:
+            self.report({'ERROR'}, "Root controller not found")
+            return {'CANCELLED'}
+
+        # Remove old constraints
+        for c in list(root.constraints):
+            root.constraints.remove(c)
+
+        # Create reference empty
+        col = bpy.data.collections.get("RootMotionRefs")
+        if not col:
+            col = bpy.data.collections.new("RootMotionRefs")
+            scene.collection.children.link(col)
+
+        empty = bpy.data.objects.new("Empty-Root", None)
+        col.objects.link(empty)
+        empty.location = (0, 0, 0)
+
+        con = root.constraints.new('COPY_LOCATION')
+        con.use_x = scene.axis_x
+        con.use_y = scene.axis_y
+        con.use_z = scene.axis_z
+        con.owner_space = 'WORLD'
+        con.target_space = 'WORLD'
+
+        if scene.keep_in_world_origin:
+            con.target = empty
+        else:
+            if not torso:
+                self.report({'ERROR'}, "Torso controller not found")
+                return {'CANCELLED'}
             con.target = rig
             con.subtarget = torso.name
-            con.use_x = scene.axis_x
-            con.use_y = scene.axis_y
-            con.use_z = scene.axis_z
 
-    def final_bake(self, context, rig):
-        scene = context.scene
-        prev_mode = rig.mode
-
-        bpy.ops.object.mode_set(mode='POSE')
+        # Bake root
         bpy.ops.pose.select_all(action='DESELECT')
-
-        bone = rig.data.bones.get(scene.rmt_root_controller_name)
-        if not bone:
-            return
-
-        bone.select = True
-        rig.data.bones.active = bone
+        rig.data.bones[root.name].select = True
+        rig.data.bones.active = rig.data.bones[root.name]
 
         bpy.ops.nla.bake(
             frame_start=scene.frame_start,
@@ -237,64 +178,16 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
             only_selected=True,
             visual_keying=True,
             clear_constraints=True,
-            clear_parents=True,
             bake_types={'POSE'}
         )
 
         bpy.ops.pose.select_all(action='DESELECT')
+
+        # Cleanup
+        bpy.data.objects.remove(empty, do_unlink=True)
+        bpy.data.collections.remove(col)
+
         bpy.ops.object.mode_set(mode=prev_mode)
-
-    def cleanup(self):
-        col = bpy.data.collections.get("RootMotionRefs")
-        if col:
-            for o in list(col.objects):
-                bpy.data.objects.remove(o, do_unlink=True)
-            bpy.data.collections.remove(col)
-
-# --------------------------------------------------
-# Batch
-# --------------------------------------------------
-
-def action_contains_rig_animation(action, rig):
-    return any("pose.bones" in f.data_path for f in action.fcurves)
-
-class RMT_OT_BatchTransferRootMotionContinue(bpy.types.Operator):
-    bl_idname = "rmt.batch_transfer_root_motion_continue"
-    bl_label = "Batch Transfer Continue"
-
-    def execute(self, context):
-        for item in context.scene.rmt_batch_actions:
-            bpy.ops.rmt.transfer_root_motion(action_name=item.name)
-        return {'FINISHED'}
-
-class RMT_OT_SelectActionsPopup(bpy.types.Operator):
-    bl_idname = "rmt.batch_transfer_root_motion"
-    bl_label = "Batch Transfer"
-
-    def invoke(self, context, event):
-        scene = context.scene
-        rig = scene.rmt_selected_rig
-        scene.rmt_action_items.clear()
-
-        for act in bpy.data.actions:
-            if action_contains_rig_animation(act, rig):
-                i = scene.rmt_action_items.add()
-                i.name = act.name
-                i.action = act
-        return context.window_manager.invoke_props_dialog(self)
-
-    def draw(self, context):
-        for i in context.scene.rmt_action_items:
-            self.layout.prop(i, "is_selected", text=i.name)
-
-    def execute(self, context):
-        scene = context.scene
-        scene.rmt_batch_actions.clear()
-        for i in scene.rmt_action_items:
-            if i.is_selected:
-                a = scene.rmt_batch_actions.add()
-                a.name = i.name
-        bpy.ops.rmt.batch_transfer_root_motion_continue()
         return {'FINISHED'}
 
 # --------------------------------------------------
@@ -324,12 +217,13 @@ class RMT_PT_RootMotionPanel(bpy.types.Panel):
         l.prop(s, "rmt_torso_controller_enum")
         l.prop_search(s, "rmt_root_controller_name", s.rmt_selected_rig.pose, "bones")
 
-        l.prop(s, "axis_x")
-        l.prop(s, "axis_y")
-        l.prop(s, "axis_z")
+        l.prop(s, "keep_in_world_origin")
+        if not s.keep_in_world_origin:
+            l.prop(s, "axis_x")
+            l.prop(s, "axis_y")
+            l.prop(s, "axis_z")
 
         l.operator("rmt.transfer_root_motion")
-        l.operator("rmt.batch_transfer_root_motion")
 
 # --------------------------------------------------
 # Register
@@ -341,10 +235,7 @@ classes = [
     RMT_OT_AddController,
     RMT_OT_ClearControllers,
     RMT_OT_RemoveController,
-    RMT_OT_SelectAllControllers,
     RMT_OT_TransferRootMotion,
-    RMT_OT_BatchTransferRootMotionContinue,
-    RMT_OT_SelectActionsPopup,
     RMT_PT_RootMotionPanel,
 ]
 
