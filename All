@@ -3,7 +3,7 @@
 bl_info = {
     "name": "Combined Animation & Gizmo Tools",
     "author": "Venkatesh Sanku",
-    "version": (1, 6, 5),
+    "version": (1, 6, 7),
     "blender": (5, 0, 0),
     "location": "Timeline / Dopesheet / Graph / 3D View",
     "description": "Animation tools + working gizmo controls",
@@ -21,9 +21,10 @@ def get_active_object(context):
 
 
 # --------------------------------------------------
-# NEW ACTION OPERATOR
+# NEW ACTION
 # --------------------------------------------------
 class ANIM_OT_new_action(bpy.types.Operator):
+
     bl_idname = "anim.new_action"
     bl_label = "New Action"
     bl_options = {'REGISTER', 'UNDO'}
@@ -65,15 +66,14 @@ class ANIM_OT_action_to_scene_range(bpy.types.Operator):
 
         start, end = action.frame_range
 
-        scene = context.scene
-        scene.frame_start = int(start)
-        scene.frame_end = int(end)
+        context.scene.frame_start = int(start)
+        context.scene.frame_end = int(end)
 
         return {'FINISHED'}
 
 
 # --------------------------------------------------
-# PASTE CONNECT OPERATOR
+# PASTE CONNECT
 # --------------------------------------------------
 class ANIM_OT_paste_connect(bpy.types.Operator):
 
@@ -83,13 +83,14 @@ class ANIM_OT_paste_connect(bpy.types.Operator):
 
     def execute(self, context):
 
-        try:
+        if context.area.type == 'DOPESHEET_EDITOR':
             bpy.ops.action.paste(merge='MIX', connect=True)
-        except:
-            try:
-                bpy.ops.graph.paste(merge='MIX', connect=True)
-            except:
-                pass
+
+        elif context.area.type == 'GRAPH_EDITOR':
+            bpy.ops.graph.paste(merge='MIX', connect=True)
+
+        elif context.area.type == 'TIMELINE':
+            bpy.ops.action.paste(merge='MIX', connect=True)
 
         return {'FINISHED'}
 
@@ -123,6 +124,7 @@ def draw_anim_header(self, context):
         return
 
     anim = obj.animation_data
+
     layout = self.layout
 
     layout.separator()
@@ -142,7 +144,6 @@ def draw_anim_header(self, context):
 def draw_key_context_menu(self, context):
 
     layout = self.layout
-
     layout.separator()
     layout.operator("anim.paste_connect", icon='CON_TRACKTO')
 
@@ -241,8 +242,9 @@ def register():
     bpy.types.DOPESHEET_HT_header.append(draw_anim_header)
     bpy.types.GRAPH_HT_header.append(draw_anim_header)
 
-    bpy.types.DOPESHEET_MT_key.append(draw_key_context_menu)
-    bpy.types.GRAPH_MT_key.append(draw_key_context_menu)
+    bpy.types.DOPESHEET_MT_context_menu.append(draw_key_context_menu)
+    bpy.types.GRAPH_MT_context_menu.append(draw_key_context_menu)
+    bpy.types.TIME_MT_context_menu.append(draw_key_context_menu)
 
     print("Combined Animation & Gizmo Tools Loaded")
 
@@ -253,8 +255,9 @@ def unregister():
     bpy.types.DOPESHEET_HT_header.remove(draw_anim_header)
     bpy.types.GRAPH_HT_header.remove(draw_anim_header)
 
-    bpy.types.DOPESHEET_MT_key.remove(draw_key_context_menu)
-    bpy.types.GRAPH_MT_key.remove(draw_key_context_menu)
+    bpy.types.DOPESHEET_MT_context_menu.remove(draw_key_context_menu)
+    bpy.types.GRAPH_MT_context_menu.remove(draw_key_context_menu)
+    bpy.types.TIME_MT_context_menu.remove(draw_key_context_menu)
 
     for c in reversed(classes):
         bpy.utils.unregister_class(c)
