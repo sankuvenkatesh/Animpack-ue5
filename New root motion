@@ -2,7 +2,7 @@
 bl_info = {
     "name": "Anim Tool Transfer",
     "author": "Venkatesh sanku",
-    "version": (1, 0, 3),
+    "version": (1, 0, 4),
     "blender": (5, 0, 1),
     "location": "View3D > Sidebar > Venky Anim Toolz",
     "description": "Transfer Root Motion and Batch Process Actions",
@@ -110,11 +110,12 @@ class RMT_OT_AddController(bpy.types.Operator):
             self.report({'WARNING'}, "Select Armature")
             return {'CANCELLED'}
 
-        if context.mode != 'POSE':
-            self.report({'WARNING'}, "Switch to Pose Mode")
-            return {'CANCELLED'}
+        context.view_layer.objects.active = rig
 
-        selected = context.selected_pose_bones_from_active_object
+        if rig.mode != 'POSE':
+            bpy.ops.object.mode_set(mode='POSE')
+
+        selected = context.selected_pose_bones
 
         if not selected:
             self.report({'WARNING'}, "No bones selected")
@@ -143,7 +144,6 @@ class RMT_OT_ClearControllers(bpy.types.Operator):
     def execute(self, context):
 
         context.scene.controllers.clear()
-
         return {'FINISHED'}
 
 
@@ -157,7 +157,6 @@ class RMT_OT_RemoveController(bpy.types.Operator):
     def execute(self, context):
 
         context.scene.controllers.remove(self.index)
-
         return {'FINISHED'}
 
 
@@ -206,11 +205,16 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
         scene = context.scene
         rig = scene.rmt_selected_rig
 
-        if not rig:
-            self.report({'ERROR'}, "No rig selected")
+        if not rig or rig.type != 'ARMATURE':
+            self.report({'ERROR'}, "No valid rig selected")
             return {'CANCELLED'}
 
-        # change action if called from batch
+        context.view_layer.objects.active = rig
+
+        if rig.mode != 'POSE':
+            bpy.ops.object.mode_set(mode='POSE')
+
+        # set action if batch
         if self.action_name:
 
             action = bpy.data.actions.get(self.action_name)
@@ -234,11 +238,6 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
             return {'CANCELLED'}
 
         root = rig.pose.bones[root_name]
-
-        context.view_layer.objects.active = rig
-
-        if rig.mode != 'POSE':
-            bpy.ops.object.mode_set(mode='POSE')
 
         # remove old constraints
         for c in list(root.constraints):
@@ -268,8 +267,8 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
             con.use_y = scene.axis_y
             con.use_z = scene.axis_z
 
-        con.target_space = 'WORLD'
-        con.owner_space = 'WORLD'
+        con.target_space = 'POSE'
+        con.owner_space = 'POSE'
 
         frame_start = scene.frame_start
         frame_end = scene.frame_end
@@ -277,7 +276,7 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
         bpy.ops.pose.select_all(action='DESELECT')
 
         root.bone.select = True
-        rig.data.bones.active = root.bone
+        context.object.data.bones.active = root.bone
 
         bpy.ops.nla.bake(
             frame_start=frame_start,
@@ -344,7 +343,6 @@ class RMT_OT_SelectActionsPopup(bpy.types.Operator):
         layout = self.layout
 
         for item in context.scene.rmt_action_items:
-
             layout.prop(item, "is_selected", text=item.name)
 
     def execute(self, context):
