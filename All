@@ -2,16 +2,15 @@
 
 bl_info = {
     "name": "Combined Animation & Gizmo Tools",
-    "author": "Venkatesh sanku",
-    "version": (1, 6, 3),
-    "blender": (5, 0, 1),
+    "author": "Venkatesh Sanku",
+    "version": (1, 6, 4),
+    "blender": (5, 0, 0),
     "location": "Timeline / Dopesheet / Graph / 3D View",
     "description": "Animation tools + working gizmo controls",
     "category": "Animation",
 }
 
 import bpy
-from bpy.props import PointerProperty
 
 
 # --------------------------------------------------
@@ -31,6 +30,7 @@ class ANIM_OT_new_action(bpy.types.Operator):
 
     def execute(self, context):
         obj = get_active_object(context)
+
         if not obj:
             return {'CANCELLED'}
 
@@ -38,11 +38,12 @@ class ANIM_OT_new_action(bpy.types.Operator):
             obj.animation_data_create()
 
         obj.animation_data.action = bpy.data.actions.new(name="Action")
+
         return {'FINISHED'}
 
 
 # --------------------------------------------------
-# ACTION → SCENE RANGE OPERATOR
+# ACTION → SCENE RANGE
 # --------------------------------------------------
 class ANIM_OT_action_to_scene_range(bpy.types.Operator):
     bl_idname = "anim.action_to_scene_range"
@@ -68,30 +69,41 @@ class ANIM_OT_action_to_scene_range(bpy.types.Operator):
 
 
 # --------------------------------------------------
-# TIMELINE HEADER (Undo/Redo + Action→Scene Range)
+# TIMELINE HEADER
 # --------------------------------------------------
 def draw_timeline_header(self, context):
+
     layout = self.layout
+
     layout.separator()
+
     layout.operator("ed.undo", text="", icon='LOOP_BACK')
     layout.operator("ed.redo", text="", icon='LOOP_FORWARDS')
 
-    if ANIM_OT_action_to_scene_range.poll(context):
+    obj = get_active_object(context)
+
+    if obj and obj.animation_data and obj.animation_data.action:
         layout.operator("anim.action_to_scene_range", text="", icon='TIME')
 
 
 # --------------------------------------------------
-# DOPESHEET / GRAPH HEADER (Action List + Undo/Redo + Action→Range)
+# DOPESHEET / GRAPH HEADER
 # --------------------------------------------------
 def draw_anim_header(self, context):
+
     obj = get_active_object(context)
+
     if not obj or not obj.animation_data:
         return
 
     anim = obj.animation_data
+
     layout = self.layout
+
     layout.separator()
+
     layout.template_ID(anim, "action", new="anim.new_action")
+
     layout.operator("ed.undo", text="", icon='LOOP_BACK')
     layout.operator("ed.redo", text="", icon='LOOP_FORWARDS')
 
@@ -100,15 +112,19 @@ def draw_anim_header(self, context):
 
 
 # --------------------------------------------------
-# GIZMO TOOLS
+# GIZMO OPERATORS
 # --------------------------------------------------
 class VIEW3D_OT_gizmo_bigger(bpy.types.Operator):
     bl_idname = "view3d.gizmo_bigger"
     bl_label = "Increase Gizmo Size"
 
     def execute(self, context):
+
         prefs = context.preferences.view
-        prefs.gizmo_size = min(prefs.gizmo_size + 10, 200)
+
+        if hasattr(prefs, "gizmo_size"):
+            prefs.gizmo_size = min(prefs.gizmo_size + 10, 200)
+
         return {'FINISHED'}
 
 
@@ -117,34 +133,49 @@ class VIEW3D_OT_gizmo_smaller(bpy.types.Operator):
     bl_label = "Decrease Gizmo Size"
 
     def execute(self, context):
+
         prefs = context.preferences.view
-        prefs.gizmo_size = max(prefs.gizmo_size - 10, 10)
+
+        if hasattr(prefs, "gizmo_size"):
+            prefs.gizmo_size = max(prefs.gizmo_size - 10, 10)
+
         return {'FINISHED'}
 
 
 class VIEW3D_OT_open_gizmo_prefs(bpy.types.Operator):
     bl_idname = "view3d.open_gizmo_prefs"
-    bl_label = "Gizmo Preferences"
+    bl_label = "Open Gizmo Preferences"
 
     def execute(self, context):
+
         bpy.ops.screen.userpref_show('INVOKE_DEFAULT')
         context.preferences.active_section = 'VIEWPORT'
+
         return {'FINISHED'}
 
 
+# --------------------------------------------------
+# GIZMO PANEL
+# --------------------------------------------------
 class VIEW3D_PT_gizmo_panel(bpy.types.Panel):
+
     bl_label = "Gizmo Tools"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Tool"
 
     def draw(self, context):
+
         layout = self.layout
+
         layout.label(text="Gizmo Size")
+
         row = layout.row(align=True)
         row.operator("view3d.gizmo_smaller", text="-")
         row.operator("view3d.gizmo_bigger", text="+")
+
         layout.separator()
+
         layout.operator("view3d.open_gizmo_prefs", icon='PREFERENCES')
 
 
@@ -162,16 +193,20 @@ classes = (
 
 
 def register():
+
     for c in classes:
         bpy.utils.register_class(c)
 
-    bpy.types.TIMELINE_HT_header.append(draw_timeline_header)
+    bpy.types.TIME_HT_editor_buttons.append(draw_timeline_header)
     bpy.types.DOPESHEET_HT_header.append(draw_anim_header)
     bpy.types.GRAPH_HT_header.append(draw_anim_header)
 
+    print("Combined Animation & Gizmo Tools Loaded")
+
 
 def unregister():
-    bpy.types.TIMELINE_HT_header.remove(draw_timeline_header)
+
+    bpy.types.TIME_HT_editor_buttons.remove(draw_timeline_header)
     bpy.types.DOPESHEET_HT_header.remove(draw_anim_header)
     bpy.types.GRAPH_HT_header.remove(draw_anim_header)
 
