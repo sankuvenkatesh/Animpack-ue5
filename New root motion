@@ -1,230 +1,131 @@
+# -*- coding: utf-8 -*-
+
 bl_info = {
-    "name": "Venky Root Motion Transfer Pro",
-    "author": "Venkatesh SankU",
-    "version": (2, 0),
-    "blender": (5, 0, 1),
+    "name": "Venky Root Motion Pro",
+    "author": "Venkatesh Sanku",
+    "version": (3,0,0),
+    "blender": (5,0,1),
     "location": "View3D > Sidebar > Venky Anim Toolz",
-    "description": "Professional Root Motion Transfer + Batch Actions",
+    "description": "Professional Root Motion Extractor for Rigify",
     "category": "Animation",
 }
 
 import bpy
-from bpy.props import *
+from mathutils import Vector
 
 
 # -------------------------------------------------------
-# Controller Item
-# -------------------------------------------------------
-
-class VMT_ControllerItem(bpy.types.PropertyGroup):
-    name: StringProperty()
-
-
-class VMT_ActionItem(bpy.types.PropertyGroup):
-    name: StringProperty()
-    action: PointerProperty(type=bpy.types.Action)
-    is_selected: BoolProperty(default=False)
-
-
-# -------------------------------------------------------
-# Enum for Target Controller
-# -------------------------------------------------------
-
-def get_controller_items(self, context):
-
-    items = []
-    scene = context.scene
-
-    for ctrl in scene.vmt_controllers:
-        items.append((ctrl.name, ctrl.name, ""))
-
-    if not items:
-        items.append(("None","None",""))
-
-    return items
-
-
-# -------------------------------------------------------
-# Scene Properties
+# Properties
 # -------------------------------------------------------
 
 def register_props():
 
-    bpy.types.Scene.vmt_rig = PointerProperty(
+    bpy.types.Scene.vrm_rig = bpy.props.PointerProperty(
         name="Rig",
         type=bpy.types.Object
     )
 
-    bpy.types.Scene.vmt_controllers = CollectionProperty(type=VMT_ControllerItem)
-
-    bpy.types.Scene.vmt_root = StringProperty(
+    bpy.types.Scene.vrm_root = bpy.props.StringProperty(
         name="Root Controller"
     )
 
-    bpy.types.Scene.vmt_target = EnumProperty(
-        name="Target Controller",
-        items=get_controller_items
+    bpy.types.Scene.vrm_torso = bpy.props.StringProperty(
+        name="Torso Controller"
     )
 
-    bpy.types.Scene.vmt_axis_x = BoolProperty(default=True)
-    bpy.types.Scene.vmt_axis_y = BoolProperty(default=True)
-    bpy.types.Scene.vmt_axis_z = BoolProperty(default=False)
-
-    bpy.types.Scene.vmt_keep_origin = BoolProperty(
-        name="Keep World Origin",
-        default=False
-    )
-
-    bpy.types.Scene.vmt_action_items = CollectionProperty(type=VMT_ActionItem)
-    bpy.types.Scene.vmt_batch = CollectionProperty(type=VMT_ActionItem)
+    bpy.types.Scene.vrm_axis_x = bpy.props.BoolProperty(default=True)
+    bpy.types.Scene.vrm_axis_y = bpy.props.BoolProperty(default=True)
+    bpy.types.Scene.vrm_axis_z = bpy.props.BoolProperty(default=False)
 
 
 def unregister_props():
 
-    del bpy.types.Scene.vmt_rig
-    del bpy.types.Scene.vmt_controllers
-    del bpy.types.Scene.vmt_root
-    del bpy.types.Scene.vmt_target
-    del bpy.types.Scene.vmt_axis_x
-    del bpy.types.Scene.vmt_axis_y
-    del bpy.types.Scene.vmt_axis_z
-    del bpy.types.Scene.vmt_keep_origin
-    del bpy.types.Scene.vmt_action_items
-    del bpy.types.Scene.vmt_batch
+    del bpy.types.Scene.vrm_rig
+    del bpy.types.Scene.vrm_root
+    del bpy.types.Scene.vrm_torso
+    del bpy.types.Scene.vrm_axis_x
+    del bpy.types.Scene.vrm_axis_y
+    del bpy.types.Scene.vrm_axis_z
 
 
 # -------------------------------------------------------
-# Add Controllers
+# Root Motion Algorithm
 # -------------------------------------------------------
 
-class VMT_OT_add_controller(bpy.types.Operator):
-    bl_idname = "vmt.add_controller"
-    bl_label = "Add Controllers"
+class VRM_OT_extract(bpy.types.Operator):
 
-    def execute(self, context):
-
-        rig = context.scene.vmt_rig
-
-        if not rig:
-            return {'CANCELLED'}
-
-        for bone in context.selected_pose_bones:
-
-            if not any(c.name == bone.name for c in context.scene.vmt_controllers):
-
-                item = context.scene.vmt_controllers.add()
-                item.name = bone.name
-
-        return {'FINISHED'}
-
-
-# -------------------------------------------------------
-# Root Motion Transfer
-# -------------------------------------------------------
-
-class VMT_OT_root_motion(bpy.types.Operator):
-
-    bl_idname = "vmt.root_motion"
-    bl_label = "Apply Root Motion"
+    bl_idname = "vrm.extract_root_motion"
+    bl_label = "Extract Root Motion"
     bl_options = {'REGISTER','UNDO'}
-
-    action_name: StringProperty(default="")
 
     def execute(self, context):
 
         scene = context.scene
-        rig = scene.vmt_rig
+        rig = scene.vrm_rig
 
         if not rig:
+            self.report({'ERROR'},"No rig selected")
             return {'CANCELLED'}
 
-        if self.action_name:
-
-            act = bpy.data.actions.get(self.action_name)
-
-            if act:
-                if not rig.animation_data:
-                    rig.animation_data_create()
-
-                rig.animation_data.action = act
-
-        root = rig.pose.bones.get(scene.vmt_root)
-        torso = rig.pose.bones.get(scene.vmt_target)
-
-        if not root or not torso:
-            self.report({'ERROR'},"Controllers missing")
+        if rig.type != 'ARMATURE':
+            self.report({'ERROR'},"Object must be armature")
             return {'CANCELLED'}
 
-        start = scene.frame_start
-        end = scene.frame_end
+        root_name = scene.vrm_root
+        torso_name = scene.vrm_torso
 
-        prev = None
+        if root_name not in rig.pose.bones:
+            self.report({'ERROR'},"Root not found")
+            return {'CANCELLED'}
 
-        for f in range(start,end+1):
+        if torso_name not in rig.pose.bones:
+            self.report({'ERROR'},"Torso not found")
+            return {'CANCELLED'}
+
+        root = rig.pose.bones[root_name]
+        torso = rig.pose.bones[torso_name]
+
+        context.view_layer.objects.active = rig
+
+        if rig.mode != 'POSE':
+            bpy.ops.object.mode_set(mode='POSE')
+
+        frame_start = scene.frame_start
+        frame_end = scene.frame_end
+
+        prev_loc = None
+
+        for f in range(frame_start, frame_end+1):
 
             scene.frame_set(f)
 
-            world = rig.matrix_world @ torso.matrix
-            loc = world.to_translation()
+            world_matrix = rig.matrix_world @ torso.matrix
+            loc = world_matrix.to_translation()
 
-            if prev is None:
-                prev = loc
+            if prev_loc is None:
+
+                prev_loc = loc
                 continue
 
-            delta = loc - prev
+            delta = loc - prev_loc
 
-            if scene.vmt_axis_x:
-                rig.location.x += delta.x
+            new_loc = root.location.copy()
 
-            if scene.vmt_axis_y:
-                rig.location.y += delta.y
+            if scene.vrm_axis_x:
+                new_loc.x += delta.x
 
-            if scene.vmt_axis_z:
-                rig.location.z += delta.z
+            if scene.vrm_axis_y:
+                new_loc.y += delta.y
 
-            rig.keyframe_insert("location", frame=f)
+            if scene.vrm_axis_z:
+                new_loc.z += delta.z
 
-            prev = loc
+            root.location = new_loc
+            root.keyframe_insert(data_path="location",frame=f)
 
-        self.report({'INFO'},"Root motion transferred")
+            prev_loc = loc
 
-        return {'FINISHED'}
-
-
-# -------------------------------------------------------
-# Batch Transfer
-# -------------------------------------------------------
-
-class VMT_OT_batch_transfer(bpy.types.Operator):
-
-    bl_idname = "vmt.batch_transfer"
-    bl_label = "Batch Transfer"
-
-    def invoke(self,context,event):
-
-        scene=context.scene
-        scene.vmt_action_items.clear()
-
-        for act in bpy.data.actions:
-
-            item=scene.vmt_action_items.add()
-            item.name=act.name
-            item.action=act
-
-        return context.window_manager.invoke_props_dialog(self,width=350)
-
-    def draw(self,context):
-
-        for item in context.scene.vmt_action_items:
-            self.layout.prop(item,"is_selected",text=item.name)
-
-    def execute(self,context):
-
-        for item in context.scene.vmt_action_items:
-
-            if item.is_selected:
-
-                bpy.ops.vmt.root_motion(action_name=item.name)
+        self.report({'INFO'},"Root motion extracted")
 
         return {'FINISHED'}
 
@@ -233,67 +134,58 @@ class VMT_OT_batch_transfer(bpy.types.Operator):
 # UI
 # -------------------------------------------------------
 
-class VMT_PT_panel(bpy.types.Panel):
+class VRM_PT_panel(bpy.types.Panel):
 
-    bl_label="Venky Root Motion"
-    bl_idname="VMT_PT_panel"
-    bl_space_type="VIEW_3D"
-    bl_region_type="UI"
-    bl_category="Venky Anim Toolz"
+    bl_label = "Venky Root Motion Pro"
+    bl_idname = "VRM_PT_panel"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Venky Anim Toolz"
 
     def draw(self,context):
 
-        layout=self.layout
-        scene=context.scene
+        layout = self.layout
+        scene = context.scene
 
-        layout.prop(scene,"vmt_rig")
+        layout.prop(scene,"vrm_rig")
 
-        layout.operator("vmt.add_controller")
+        if scene.vrm_rig:
 
-        box=layout.box()
-
-        for c in scene.vmt_controllers:
-            box.label(text=c.name,icon='BONE_DATA')
-
-        layout.label(text="Target Controller (COG)")
-        layout.prop(scene,"vmt_target",text="")
-
-        layout.label(text="Root Controller")
-
-        if scene.vmt_rig:
             layout.prop_search(
                 scene,
-                "vmt_root",
-                scene.vmt_rig.pose,
-                "bones"
+                "vrm_root",
+                scene.vrm_rig.pose,
+                "bones",
+                text="Root"
             )
 
-        layout.prop(scene,"vmt_keep_origin")
+            layout.prop_search(
+                scene,
+                "vrm_torso",
+                scene.vrm_rig.pose,
+                "bones",
+                text="Torso"
+            )
 
-        row=layout.row(align=True)
-        row.prop(scene,"vmt_axis_x")
-        row.prop(scene,"vmt_axis_y")
-        row.prop(scene,"vmt_axis_z")
+        layout.label(text="Transfer Axes")
 
-        layout.operator("vmt.root_motion",icon="ARMATURE_DATA")
+        row = layout.row(align=True)
+        row.prop(scene,"vrm_axis_x")
+        row.prop(scene,"vrm_axis_y")
+        row.prop(scene,"vrm_axis_z")
 
-        layout.separator()
-
-        layout.operator("vmt.batch_transfer",icon="ACTION")
+        layout.operator("vrm.extract_root_motion",icon="CONSTRAINT")
 
 
 # -------------------------------------------------------
 # Register
 # -------------------------------------------------------
 
-classes = (
-VMT_ControllerItem,
-VMT_ActionItem,
-VMT_OT_add_controller,
-VMT_OT_root_motion,
-VMT_OT_batch_transfer,
-VMT_PT_panel
-)
+classes = [
+    VRM_OT_extract,
+    VRM_PT_panel
+]
+
 
 def register():
 
@@ -311,5 +203,5 @@ def unregister():
         bpy.utils.unregister_class(c)
 
 
-if __name__=="__main__":
+if __name__ == "__main__":
     register()
