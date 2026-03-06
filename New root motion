@@ -2,7 +2,7 @@
 bl_info = {
     "name": "Anim Tool Transfer",
     "author": "Venkatesh sanku",
-    "version": (1, 0, 4),
+    "version": (1, 1, 0),
     "blender": (5, 0, 1),
     "location": "View3D > Sidebar > Venky Anim Toolz",
     "description": "Transfer Root Motion and Batch Process Actions",
@@ -10,6 +10,7 @@ bl_info = {
 }
 
 import bpy
+from mathutils import Vector
 
 
 # -------------------------------------------------------
@@ -92,7 +93,7 @@ def unregister_properties():
 
 
 # -------------------------------------------------------
-# Controller Tools
+# Controller Operators
 # -------------------------------------------------------
 
 class RMT_OT_AddController(bpy.types.Operator):
@@ -190,7 +191,7 @@ class RMT_OT_SelectAllControllers(bpy.types.Operator):
 
 
 # -------------------------------------------------------
-# ROOT MOTION (NEW STABLE ALGORITHM)
+# Root Motion Algorithm (FIXED)
 # -------------------------------------------------------
 
 class RMT_OT_TransferRootMotion(bpy.types.Operator):
@@ -206,14 +207,9 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
         scene = context.scene
         rig = scene.rmt_selected_rig
 
-        if not rig or rig.type != 'ARMATURE':
-            self.report({'ERROR'}, "Select valid rig")
+        if not rig:
+            self.report({'ERROR'}, "No rig selected")
             return {'CANCELLED'}
-
-        context.view_layer.objects.active = rig
-
-        if rig.mode != 'POSE':
-            bpy.ops.object.mode_set(mode='POSE')
 
         if self.action_name:
 
@@ -238,7 +234,7 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
             return {'CANCELLED'}
 
         root = rig.pose.bones[root_name]
-        cog = rig.pose.bones[torso_name]
+        torso = rig.pose.bones[torso_name]
 
         frame_start = scene.frame_start
         frame_end = scene.frame_end
@@ -249,8 +245,7 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
 
             scene.frame_set(f)
 
-            cog_world = rig.matrix_world @ cog.matrix
-            loc = cog_world.to_translation()
+            loc = (rig.matrix_world @ torso.matrix).translation
 
             if prev_loc is None:
                 prev_loc = loc
@@ -258,18 +253,19 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
 
             delta = loc - prev_loc
 
-            move = root.location.copy()
+            m = root.matrix.copy()
+            t = m.to_translation()
 
             if scene.axis_x:
-                move.x += delta.x
-
+                t.x += delta.x
             if scene.axis_y:
-                move.y += delta.y
-
+                t.y += delta.y
             if scene.axis_z:
-                move.z += delta.z
+                t.z += delta.z
 
-            root.location = move
+            m.translation = t
+            root.matrix = m
+
             root.keyframe_insert(data_path="location", frame=f)
 
             prev_loc = loc
@@ -309,12 +305,8 @@ class RMT_OT_SelectActionsPopup(bpy.types.Operator):
     def invoke(self, context, event):
 
         scene = context.scene
-        rig = scene.rmt_selected_rig
 
         scene.rmt_action_items.clear()
-
-        if not rig:
-            return {'CANCELLED'}
 
         for act in bpy.data.actions:
 
