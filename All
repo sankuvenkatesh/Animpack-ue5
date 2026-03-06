@@ -1,186 +1,194 @@
-import bpy
-from bpy.props import IntProperty, BoolProperty
-
+# -*- coding: utf-8 -*-
 
 bl_info = {
-    "name": "Keyframe Tools Interval",
-    "author": "Venkatesh",
-    "version": (1, 2),
-    "blender": (5, 0, 1),
-    "location": "DopeSheet > Sidebar",
+    "name": "Combined Animation & Gizmo Tools",
+    "author": "Venkatesh Sanku",
+    "version": (1, 6, 4),
+    "blender": (5, 0, 0),
+    "location": "Timeline / Dopesheet / Graph / 3D View",
+    "description": "Animation tools + working gizmo controls",
     "category": "Animation",
 }
 
-
-# -------------------------------------------------------------
-# Properties
-# -------------------------------------------------------------
-
-class KFIntervalProps(bpy.types.PropertyGroup):
-
-    step : IntProperty(
-        name="Interval",
-        default=2,
-        min=1
-    )
-
-    frame_start : IntProperty(
-        name="Start",
-        default=1
-    )
-
-    frame_end : IntProperty(
-        name="End",
-        default=250
-    )
-
-    only_selected : BoolProperty(
-        name="Only Selected",
-        default=True
-    )
+import bpy
 
 
-# -------------------------------------------------------------
-# Operators
-# -------------------------------------------------------------
+# --------------------------------------------------
+# UTILITY
+# --------------------------------------------------
+def get_active_object(context):
+    return context.view_layer.objects.active
 
-class KF_OT_AddInterval(bpy.types.Operator):
-    bl_idname = "kf.add_interval"
-    bl_label = "Add Interval Keys"
+
+# --------------------------------------------------
+# NEW ACTION OPERATOR
+# --------------------------------------------------
+class ANIM_OT_new_action(bpy.types.Operator):
+    bl_idname = "anim.new_action"
+    bl_label = "New Action"
+    bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
+        obj = get_active_object(context)
 
-        props = context.scene.kf_interval
-
-        obj = context.object
-        if not obj or not obj.animation_data:
-            self.report({'WARNING'}, "No animation")
+        if not obj:
             return {'CANCELLED'}
 
+        if not obj.animation_data:
+            obj.animation_data_create()
+
+        obj.animation_data.action = bpy.data.actions.new(name="Action")
+
+        return {'FINISHED'}
+
+
+# --------------------------------------------------
+# ACTION → SCENE RANGE
+# --------------------------------------------------
+class ANIM_OT_action_to_scene_range(bpy.types.Operator):
+    bl_idname = "anim.action_to_scene_range"
+    bl_label = "Action to Scene Range"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = get_active_object(context)
+        return obj and obj.animation_data and obj.animation_data.action
+
+    def execute(self, context):
+        obj = get_active_object(context)
         action = obj.animation_data.action
-        if not action:
-            return {'CANCELLED'}
 
-        step = props.step
+        start, end = action.frame_range
 
-        for fc in action.fcurves:
+        scene = context.scene
+        scene.frame_start = int(start)
+        scene.frame_end = int(end)
 
-            new_keys = []
-
-            for k in fc.keyframe_points:
-                frame = int(k.co.x)
-
-                if frame % step != 0:
-                    new_keys.append(frame)
-
-            for f in new_keys:
-                fc.keyframe_points.insert(f, fc.evaluate(f))
-
-        self.report({'INFO'}, "Interval Keys Added")
         return {'FINISHED'}
 
 
-class KF_OT_DeleteInterval(bpy.types.Operator):
-    bl_idname = "kf.delete_interval"
-    bl_label = "Delete Interval Keys"
+# --------------------------------------------------
+# TIMELINE HEADER
+# --------------------------------------------------
+def draw_timeline_header(self, context):
+
+    layout = self.layout
+
+    layout.separator()
+
+    layout.operator("ed.undo", text="", icon='LOOP_BACK')
+    layout.operator("ed.redo", text="", icon='LOOP_FORWARDS')
+
+    obj = get_active_object(context)
+
+    if obj and obj.animation_data and obj.animation_data.action:
+        layout.operator("anim.action_to_scene_range", text="", icon='TIME')
+
+
+# --------------------------------------------------
+# DOPESHEET / GRAPH HEADER
+# --------------------------------------------------
+def draw_anim_header(self, context):
+
+    obj = get_active_object(context)
+
+    if not obj or not obj.animation_data:
+        return
+
+    anim = obj.animation_data
+
+    layout = self.layout
+
+    layout.separator()
+
+    layout.template_ID(anim, "action", new="anim.new_action")
+
+    layout.operator("ed.undo", text="", icon='LOOP_BACK')
+    layout.operator("ed.redo", text="", icon='LOOP_FORWARDS')
+
+    if anim.action:
+        layout.operator("anim.action_to_scene_range", text="", icon='TIME')
+
+
+# --------------------------------------------------
+# GIZMO OPERATORS
+# --------------------------------------------------
+class VIEW3D_OT_gizmo_bigger(bpy.types.Operator):
+    bl_idname = "view3d.gizmo_bigger"
+    bl_label = "Increase Gizmo Size"
 
     def execute(self, context):
 
-        props = context.scene.kf_interval
+        prefs = context.preferences.view
 
-        obj = context.object
-        if not obj or not obj.animation_data:
-            return {'CANCELLED'}
+        if hasattr(prefs, "gizmo_size"):
+            prefs.gizmo_size = min(prefs.gizmo_size + 10, 200)
 
-        action = obj.animation_data.action
-        if not action:
-            return {'CANCELLED'}
-
-        step = props.step
-
-        for fc in action.fcurves:
-
-            for k in fc.keyframe_points:
-                frame = int(k.co.x)
-
-                if frame % step != 0:
-                    fc.keyframe_points.remove(k)
-
-        self.report({'INFO'}, "Interval Keys Deleted")
         return {'FINISHED'}
 
 
-class KF_OT_Undo(bpy.types.Operator):
-    bl_idname = "kf.undo"
-    bl_label = "Undo"
+class VIEW3D_OT_gizmo_smaller(bpy.types.Operator):
+    bl_idname = "view3d.gizmo_smaller"
+    bl_label = "Decrease Gizmo Size"
 
     def execute(self, context):
-        bpy.ops.ed.undo()
+
+        prefs = context.preferences.view
+
+        if hasattr(prefs, "gizmo_size"):
+            prefs.gizmo_size = max(prefs.gizmo_size - 10, 10)
+
         return {'FINISHED'}
 
 
-class KF_OT_Redo(bpy.types.Operator):
-    bl_idname = "kf.redo"
-    bl_label = "Redo"
+class VIEW3D_OT_open_gizmo_prefs(bpy.types.Operator):
+    bl_idname = "view3d.open_gizmo_prefs"
+    bl_label = "Open Gizmo Preferences"
 
     def execute(self, context):
-        bpy.ops.ed.redo()
+
+        bpy.ops.screen.userpref_show('INVOKE_DEFAULT')
+        context.preferences.active_section = 'VIEWPORT'
+
         return {'FINISHED'}
 
 
-# -------------------------------------------------------------
-# Panel (OLD UI RESTORED)
-# -------------------------------------------------------------
+# --------------------------------------------------
+# GIZMO PANEL
+# --------------------------------------------------
+class VIEW3D_PT_gizmo_panel(bpy.types.Panel):
 
-class KF_PT_Panel(bpy.types.Panel):
-
-    bl_label = "Keyframe Interval Tools"
-    bl_space_type = 'DOPESHEET_EDITOR'
+    bl_label = "Gizmo Tools"
+    bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "Key Tools"
+    bl_category = "Tool"
 
     def draw(self, context):
 
         layout = self.layout
-        props = context.scene.kf_interval
 
-        box = layout.box()
+        layout.label(text="Gizmo Size")
 
-        box.label(text="Interval Settings")
-
-        box.prop(props, "step")
-
-        box.prop(props, "frame_start")
-        box.prop(props, "frame_end")
-
-        box.prop(props, "only_selected")
+        row = layout.row(align=True)
+        row.operator("view3d.gizmo_smaller", text="-")
+        row.operator("view3d.gizmo_bigger", text="+")
 
         layout.separator()
 
-        row = layout.row()
-        row.operator("kf.add_interval", icon='KEY_HLT')
-
-        row = layout.row()
-        row.operator("kf.delete_interval", icon='KEY_DEHLT')
-
-        layout.separator()
-
-        row = layout.row()
-        row.operator("kf.undo", icon='LOOP_BACK')
-        row.operator("kf.redo", icon='LOOP_FORWARDS')
+        layout.operator("view3d.open_gizmo_prefs", icon='PREFERENCES')
 
 
-# -------------------------------------------------------------
-# Register
-# -------------------------------------------------------------
-
+# --------------------------------------------------
+# REGISTER
+# --------------------------------------------------
 classes = (
-    KFIntervalProps,
-    KF_OT_AddInterval,
-    KF_OT_DeleteInterval,
-    KF_OT_Undo,
-    KF_OT_Redo,
-    KF_PT_Panel
+    ANIM_OT_new_action,
+    ANIM_OT_action_to_scene_range,
+    VIEW3D_OT_gizmo_bigger,
+    VIEW3D_OT_gizmo_smaller,
+    VIEW3D_OT_open_gizmo_prefs,
+    VIEW3D_PT_gizmo_panel,
 )
 
 
@@ -189,15 +197,21 @@ def register():
     for c in classes:
         bpy.utils.register_class(c)
 
-    bpy.types.Scene.kf_interval = bpy.props.PointerProperty(type=KFIntervalProps)
+    bpy.types.TIME_HT_editor_buttons.append(draw_timeline_header)
+    bpy.types.DOPESHEET_HT_header.append(draw_anim_header)
+    bpy.types.GRAPH_HT_header.append(draw_anim_header)
+
+    print("Combined Animation & Gizmo Tools Loaded")
 
 
 def unregister():
 
+    bpy.types.TIME_HT_editor_buttons.remove(draw_timeline_header)
+    bpy.types.DOPESHEET_HT_header.remove(draw_anim_header)
+    bpy.types.GRAPH_HT_header.remove(draw_anim_header)
+
     for c in reversed(classes):
         bpy.utils.unregister_class(c)
-
-    del bpy.types.Scene.kf_interval
 
 
 if __name__ == "__main__":
