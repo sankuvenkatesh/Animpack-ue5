@@ -92,7 +92,7 @@ def unregister_properties():
 
 
 # -------------------------------------------------------
-# Operators
+# Controller Tools
 # -------------------------------------------------------
 
 class RMT_OT_AddController(bpy.types.Operator):
@@ -110,10 +110,9 @@ class RMT_OT_AddController(bpy.types.Operator):
             self.report({'WARNING'}, "Select Armature")
             return {'CANCELLED'}
 
-        context.view_layer.objects.active = rig
-
-        if rig.mode != 'POSE':
-            bpy.ops.object.mode_set(mode='POSE')
+        if context.mode != 'POSE':
+            self.report({'WARNING'}, "Switch to Pose Mode")
+            return {'CANCELLED'}
 
         selected = context.selected_pose_bones
 
@@ -144,6 +143,7 @@ class RMT_OT_ClearControllers(bpy.types.Operator):
     def execute(self, context):
 
         context.scene.controllers.clear()
+
         return {'FINISHED'}
 
 
@@ -157,6 +157,7 @@ class RMT_OT_RemoveController(bpy.types.Operator):
     def execute(self, context):
 
         context.scene.controllers.remove(self.index)
+
         return {'FINISHED'}
 
 
@@ -189,7 +190,7 @@ class RMT_OT_SelectAllControllers(bpy.types.Operator):
 
 
 # -------------------------------------------------------
-# Root Motion Transfer
+# ROOT MOTION (NEW STABLE ALGORITHM)
 # -------------------------------------------------------
 
 class RMT_OT_TransferRootMotion(bpy.types.Operator):
@@ -206,7 +207,7 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
         rig = scene.rmt_selected_rig
 
         if not rig or rig.type != 'ARMATURE':
-            self.report({'ERROR'}, "No valid rig selected")
+            self.report({'ERROR'}, "Select valid rig")
             return {'CANCELLED'}
 
         context.view_layer.objects.active = rig
@@ -214,7 +215,6 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
         if rig.mode != 'POSE':
             bpy.ops.object.mode_set(mode='POSE')
 
-        # set action if batch
         if self.action_name:
 
             action = bpy.data.actions.get(self.action_name)
@@ -238,55 +238,41 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
             return {'CANCELLED'}
 
         root = rig.pose.bones[root_name]
-
-        # remove old constraints
-        for c in list(root.constraints):
-            if c.name.startswith("RMT"):
-                root.constraints.remove(c)
-
-        con = root.constraints.new('COPY_LOCATION')
-        con.name = "RMT_CopyLocation"
-
-        if scene.keep_in_world_origin:
-
-            empty = bpy.data.objects.new("RMT_Origin", None)
-            context.scene.collection.objects.link(empty)
-            empty.location = (0, 0, 0)
-
-            con.target = empty
-            con.use_x = True
-            con.use_y = True
-            con.use_z = False
-
-        else:
-
-            con.target = rig
-            con.subtarget = torso_name
-
-            con.use_x = scene.axis_x
-            con.use_y = scene.axis_y
-            con.use_z = scene.axis_z
-
-        con.target_space = 'POSE'
-        con.owner_space = 'POSE'
+        cog = rig.pose.bones[torso_name]
 
         frame_start = scene.frame_start
         frame_end = scene.frame_end
 
-        bpy.ops.pose.select_all(action='DESELECT')
+        prev_loc = None
 
-        root.bone.select = True
-        context.object.data.bones.active = root.bone
+        for f in range(frame_start, frame_end + 1):
 
-        bpy.ops.nla.bake(
-            frame_start=frame_start,
-            frame_end=frame_end,
-            only_selected=True,
-            visual_keying=True,
-            clear_constraints=True,
-            use_current_action=True,
-            bake_types={'POSE'}
-        )
+            scene.frame_set(f)
+
+            cog_world = rig.matrix_world @ cog.matrix
+            loc = cog_world.to_translation()
+
+            if prev_loc is None:
+                prev_loc = loc
+                continue
+
+            delta = loc - prev_loc
+
+            move = root.location.copy()
+
+            if scene.axis_x:
+                move.x += delta.x
+
+            if scene.axis_y:
+                move.y += delta.y
+
+            if scene.axis_z:
+                move.z += delta.z
+
+            root.location = move
+            root.keyframe_insert(data_path="location", frame=f)
+
+            prev_loc = loc
 
         self.report({'INFO'}, "Root Motion transferred")
 
@@ -294,7 +280,7 @@ class RMT_OT_TransferRootMotion(bpy.types.Operator):
 
 
 # -------------------------------------------------------
-# Batch Transfer
+# Batch Processing
 # -------------------------------------------------------
 
 class RMT_OT_BatchTransferRootMotionContinue(bpy.types.Operator):
@@ -343,6 +329,7 @@ class RMT_OT_SelectActionsPopup(bpy.types.Operator):
         layout = self.layout
 
         for item in context.scene.rmt_action_items:
+
             layout.prop(item, "is_selected", text=item.name)
 
     def execute(self, context):
