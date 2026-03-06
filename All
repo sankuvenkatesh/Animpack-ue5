@@ -1,12 +1,10 @@
-# -*- coding: utf-8 -*-
-
 bl_info = {
-    "name": "Combined Animation & Gizmo Tools",
+    "name": "Animation Utility Tools",
     "author": "Venkatesh Sanku",
-    "version": (1, 6, 5),
-    "blender": (5, 0, 0),
-    "location": "Timeline / Dopesheet / Graph / 3D View",
-    "description": "Animation tools + working gizmo controls",
+    "version": (1, 0, 0),
+    "blender": (4, 0, 0),
+    "location": "View3D > N Panel > Animation",
+    "description": "Simple animation helper tools",
     "category": "Animation",
 }
 
@@ -16,6 +14,7 @@ import bpy
 # --------------------------------------------------
 # UTILITY
 # --------------------------------------------------
+
 def get_active_object(context):
     return context.view_layer.objects.active
 
@@ -23,16 +22,17 @@ def get_active_object(context):
 # --------------------------------------------------
 # NEW ACTION
 # --------------------------------------------------
+
 class ANIM_OT_new_action(bpy.types.Operator):
-    bl_idname = "anim.new_action"
+    bl_idname = "anim.create_new_action"
     bl_label = "New Action"
-    bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
 
         obj = get_active_object(context)
 
         if not obj:
+            self.report({'WARNING'}, "No active object")
             return {'CANCELLED'}
 
         if not obj.animation_data:
@@ -44,23 +44,21 @@ class ANIM_OT_new_action(bpy.types.Operator):
 
 
 # --------------------------------------------------
-# ACTION → SCENE RANGE
+# ACTION RANGE → SCENE
 # --------------------------------------------------
+
 class ANIM_OT_action_to_scene_range(bpy.types.Operator):
-
-    bl_idname = "anim.action_to_scene_range"
-    bl_label = "Action to Scene Range"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    @classmethod
-    def poll(cls, context):
-
-        obj = get_active_object(context)
-        return obj and obj.animation_data and obj.animation_data.action
+    bl_idname = "anim.action_range_to_scene"
+    bl_label = "Action → Scene Range"
 
     def execute(self, context):
 
         obj = get_active_object(context)
+
+        if not obj or not obj.animation_data or not obj.animation_data.action:
+            self.report({'WARNING'}, "No Action Found")
+            return {'CANCELLED'}
+
         action = obj.animation_data.action
 
         start, end = action.frame_range
@@ -72,107 +70,59 @@ class ANIM_OT_action_to_scene_range(bpy.types.Operator):
 
 
 # --------------------------------------------------
-# TIMELINE HEADER
+# GIZMO SIZE
 # --------------------------------------------------
-def draw_timeline_header(self, context):
 
-    layout = self.layout
-
-    layout.separator()
-
-    layout.operator("ed.undo", text="", icon='LOOP_BACK')
-    layout.operator("ed.redo", text="", icon='LOOP_FORWARDS')
-
-    obj = get_active_object(context)
-
-    if obj and obj.animation_data and obj.animation_data.action:
-        layout.operator("anim.action_to_scene_range", text="", icon='TIME')
-
-
-# --------------------------------------------------
-# DOPESHEET / GRAPH HEADER
-# --------------------------------------------------
-def draw_anim_header(self, context):
-
-    obj = get_active_object(context)
-
-    if not obj or not obj.animation_data:
-        return
-
-    anim = obj.animation_data
-
-    layout = self.layout
-
-    layout.separator()
-
-    layout.template_ID(anim, "action", new="anim.new_action")
-
-    layout.operator("ed.undo", text="", icon='LOOP_BACK')
-    layout.operator("ed.redo", text="", icon='LOOP_FORWARDS')
-
-    if anim.action:
-        layout.operator("anim.action_to_scene_range", text="", icon='TIME')
-
-
-# --------------------------------------------------
-# GIZMO OPERATORS
-# --------------------------------------------------
 class VIEW3D_OT_gizmo_bigger(bpy.types.Operator):
-
     bl_idname = "view3d.gizmo_bigger"
-    bl_label = "Increase Gizmo Size"
+    bl_label = "Increase Gizmo"
 
     def execute(self, context):
 
         prefs = context.preferences.view
 
         if hasattr(prefs, "gizmo_size"):
-            prefs.gizmo_size = min(prefs.gizmo_size + 10, 200)
+            prefs.gizmo_size += 10
 
         return {'FINISHED'}
 
 
 class VIEW3D_OT_gizmo_smaller(bpy.types.Operator):
-
     bl_idname = "view3d.gizmo_smaller"
-    bl_label = "Decrease Gizmo Size"
+    bl_label = "Decrease Gizmo"
 
     def execute(self, context):
 
         prefs = context.preferences.view
 
         if hasattr(prefs, "gizmo_size"):
-            prefs.gizmo_size = max(prefs.gizmo_size - 10, 10)
-
-        return {'FINISHED'}
-
-
-class VIEW3D_OT_open_gizmo_prefs(bpy.types.Operator):
-
-    bl_idname = "view3d.open_gizmo_prefs"
-    bl_label = "Open Gizmo Preferences"
-
-    def execute(self, context):
-
-        bpy.ops.screen.userpref_show('INVOKE_DEFAULT')
-        context.preferences.active_section = 'VIEWPORT'
+            prefs.gizmo_size -= 10
 
         return {'FINISHED'}
 
 
 # --------------------------------------------------
-# GIZMO PANEL
+# PANEL
 # --------------------------------------------------
-class VIEW3D_PT_gizmo_panel(bpy.types.Panel):
 
-    bl_label = "Gizmo Tools"
+class VIEW3D_PT_animation_tools(bpy.types.Panel):
+
+    bl_label = "Animation Tools"
+    bl_idname = "VIEW3D_PT_animation_tools"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "Tool"
+    bl_category = "Animation"
 
     def draw(self, context):
 
         layout = self.layout
+
+        layout.label(text="Actions")
+
+        layout.operator("anim.create_new_action")
+        layout.operator("anim.action_range_to_scene")
+
+        layout.separator()
 
         layout.label(text="Gizmo Size")
 
@@ -180,50 +130,29 @@ class VIEW3D_PT_gizmo_panel(bpy.types.Panel):
         row.operator("view3d.gizmo_smaller", text="-")
         row.operator("view3d.gizmo_bigger", text="+")
 
-        layout.separator()
-
-        layout.operator("view3d.open_gizmo_prefs", icon='PREFERENCES')
-
-
-# --------------------------------------------------
-# CLASSES
-# --------------------------------------------------
-classes = (
-
-    ANIM_OT_new_action,
-    ANIM_OT_action_to_scene_range,
-
-    VIEW3D_OT_gizmo_bigger,
-    VIEW3D_OT_gizmo_smaller,
-    VIEW3D_OT_open_gizmo_prefs,
-
-    VIEW3D_PT_gizmo_panel,
-)
-
 
 # --------------------------------------------------
 # REGISTER
 # --------------------------------------------------
+
+classes = (
+    ANIM_OT_new_action,
+    ANIM_OT_action_to_scene_range,
+    VIEW3D_OT_gizmo_bigger,
+    VIEW3D_OT_gizmo_smaller,
+    VIEW3D_PT_animation_tools,
+)
+
+
 def register():
 
     for c in classes:
         bpy.utils.register_class(c)
 
-    bpy.types.TIME_HT_header.append(draw_timeline_header)
-    bpy.types.DOPESHEET_HT_header.append(draw_anim_header)
-    bpy.types.GRAPH_HT_header.append(draw_anim_header)
-
-    print("Combined Animation & Gizmo Tools Loaded")
+    print("Animation Utility Tools Loaded")
 
 
-# --------------------------------------------------
-# UNREGISTER
-# --------------------------------------------------
 def unregister():
-
-    bpy.types.TIME_HT_header.remove(draw_timeline_header)
-    bpy.types.DOPESHEET_HT_header.remove(draw_anim_header)
-    bpy.types.GRAPH_HT_header.remove(draw_anim_header)
 
     for c in reversed(classes):
         bpy.utils.unregister_class(c)
