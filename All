@@ -3,7 +3,7 @@
 bl_info = {
     "name": "Combined Animation & Gizmo Tools",
     "author": "Venkatesh Sanku",
-    "version": (1, 6, 7),
+    "version": (1, 7, 0),
     "blender": (5, 0, 0),
     "location": "Timeline / Dopesheet / Graph / 3D View",
     "description": "Animation tools + working gizmo controls",
@@ -16,6 +16,7 @@ import bpy
 # --------------------------------------------------
 # UTILITY
 # --------------------------------------------------
+
 def get_active_object(context):
     return context.view_layer.objects.active
 
@@ -23,6 +24,7 @@ def get_active_object(context):
 # --------------------------------------------------
 # NEW ACTION
 # --------------------------------------------------
+
 class ANIM_OT_new_action(bpy.types.Operator):
 
     bl_idname = "anim.new_action"
@@ -45,8 +47,9 @@ class ANIM_OT_new_action(bpy.types.Operator):
 
 
 # --------------------------------------------------
-# ACTION → SCENE RANGE
+# ACTION RANGE TO SCENE
 # --------------------------------------------------
+
 class ANIM_OT_action_to_scene_range(bpy.types.Operator):
 
     bl_idname = "anim.action_to_scene_range"
@@ -75,22 +78,94 @@ class ANIM_OT_action_to_scene_range(bpy.types.Operator):
 # --------------------------------------------------
 # PASTE CONNECT
 # --------------------------------------------------
-class ANIM_OT_paste_connect(bpy.types.Operator):
 
-    bl_idname = "anim.paste_connect"
-    bl_label = "Paste + Connect"
-    bl_options = {'REGISTER', 'UNDO'}
+def add_pasteconnect(self, context):
+    layout = self.layout
+    row = layout.row()
+    row.operator(PASTE_CONNECT.bl_idname, icon="PASTEDOWN")
+
+
+def valid_check():
+
+    obj = bpy.context.active_object
+    if not obj:
+        return False
+
+    anim_data = obj.animation_data
+    if not anim_data:
+        return False
+
+    action = anim_data.action
+    if not action:
+        return False
+
+    fcurves = action.fcurves
+    if not fcurves:
+        return False
+
+    return fcurves
+
+
+class PASTE_CONNECT(bpy.types.Operator):
+
+    bl_idname = "pasteconnect.pasteconnect"
+    bl_label = "Paste Connect"
+    bl_description = "Paste Connect"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return context.active_object is not None
 
     def execute(self, context):
 
-        if context.area.type == 'DOPESHEET_EDITOR':
-            bpy.ops.action.paste(merge='MIX', connect=True)
+        if (3, 6, 0) > bpy.app.version:
 
-        elif context.area.type == 'GRAPH_EDITOR':
-            bpy.ops.graph.paste(merge='MIX', connect=True)
+            fcurves = valid_check()
 
-        elif context.area.type == 'TIMELINE':
-            bpy.ops.action.paste(merge='MIX', connect=True)
+            if not fcurves:
+                self.report({'WARNING'}, "No valid F-curves found")
+                return {'CANCELLED'}
+
+            frame_current = context.scene.frame_current
+
+            neighbours = []
+
+            for curve in fcurves:
+                val = curve.evaluate(frame_current)
+                neighbours.append(val)
+
+            bpy.ops.graph.paste(
+                offset='START',
+                merge='OVER_RANGE',
+                flipped=False
+            )
+
+            for i, curve in enumerate(fcurves):
+
+                neighbour = neighbours[i]
+                first_key = None
+
+                for key in curve.keyframe_points:
+
+                    if key.select_control_point:
+
+                        if not first_key:
+                            first_key = key.co_ui.y
+
+                        key.co_ui.y = neighbour
+
+                    else:
+                        key.co_ui.y = neighbour + key.co_ui.y - first_key
+
+        else:
+
+            bpy.ops.graph.paste(
+                offset='START',
+                value_offset='CURRENT_FRAME',
+                merge='OVER_RANGE',
+                flipped=False
+            )
 
         return {'FINISHED'}
 
@@ -98,6 +173,7 @@ class ANIM_OT_paste_connect(bpy.types.Operator):
 # --------------------------------------------------
 # TIMELINE HEADER
 # --------------------------------------------------
+
 def draw_timeline_header(self, context):
 
     layout = self.layout
@@ -116,6 +192,7 @@ def draw_timeline_header(self, context):
 # --------------------------------------------------
 # DOPESHEET / GRAPH HEADER
 # --------------------------------------------------
+
 def draw_anim_header(self, context):
 
     obj = get_active_object(context)
@@ -139,18 +216,9 @@ def draw_anim_header(self, context):
 
 
 # --------------------------------------------------
-# RIGHT CLICK MENU
-# --------------------------------------------------
-def draw_key_context_menu(self, context):
-
-    layout = self.layout
-    layout.separator()
-    layout.operator("anim.paste_connect", icon='CON_TRACKTO')
-
-
-# --------------------------------------------------
 # GIZMO OPERATORS
 # --------------------------------------------------
+
 class VIEW3D_OT_gizmo_bigger(bpy.types.Operator):
 
     bl_idname = "view3d.gizmo_bigger"
@@ -197,6 +265,7 @@ class VIEW3D_OT_open_gizmo_prefs(bpy.types.Operator):
 # --------------------------------------------------
 # GIZMO PANEL
 # --------------------------------------------------
+
 class VIEW3D_PT_gizmo_panel(bpy.types.Panel):
 
     bl_label = "Gizmo Tools"
@@ -222,10 +291,11 @@ class VIEW3D_PT_gizmo_panel(bpy.types.Panel):
 # --------------------------------------------------
 # REGISTER
 # --------------------------------------------------
+
 classes = (
     ANIM_OT_new_action,
     ANIM_OT_action_to_scene_range,
-    ANIM_OT_paste_connect,
+    PASTE_CONNECT,
     VIEW3D_OT_gizmo_bigger,
     VIEW3D_OT_gizmo_smaller,
     VIEW3D_OT_open_gizmo_prefs,
@@ -242,9 +312,9 @@ def register():
     bpy.types.DOPESHEET_HT_header.append(draw_anim_header)
     bpy.types.GRAPH_HT_header.append(draw_anim_header)
 
-    bpy.types.DOPESHEET_MT_context_menu.append(draw_key_context_menu)
-    bpy.types.GRAPH_MT_context_menu.append(draw_key_context_menu)
-    bpy.types.TIME_MT_context_menu.append(draw_key_context_menu)
+    bpy.types.DOPESHEET_MT_context_menu.append(add_pasteconnect)
+    bpy.types.GRAPH_MT_context_menu.append(add_pasteconnect)
+    bpy.types.TIME_MT_context_menu.append(add_pasteconnect)
 
     print("Combined Animation & Gizmo Tools Loaded")
 
@@ -255,9 +325,9 @@ def unregister():
     bpy.types.DOPESHEET_HT_header.remove(draw_anim_header)
     bpy.types.GRAPH_HT_header.remove(draw_anim_header)
 
-    bpy.types.DOPESHEET_MT_context_menu.remove(draw_key_context_menu)
-    bpy.types.GRAPH_MT_context_menu.remove(draw_key_context_menu)
-    bpy.types.TIME_MT_context_menu.remove(draw_key_context_menu)
+    bpy.types.DOPESHEET_MT_context_menu.remove(add_pasteconnect)
+    bpy.types.GRAPH_MT_context_menu.remove(add_pasteconnect)
+    bpy.types.TIME_MT_context_menu.remove(add_pasteconnect)
 
     for c in reversed(classes):
         bpy.utils.unregister_class(c)
