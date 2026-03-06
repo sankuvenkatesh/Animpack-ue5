@@ -3,7 +3,7 @@
 bl_info = {
     "name": "Combined Animation & Gizmo Tools",
     "author": "Venkatesh Sanku",
-    "version": (1, 6, 4),
+    "version": (1, 6, 5),
     "blender": (5, 0, 0),
     "location": "Timeline / Dopesheet / Graph / 3D View",
     "description": "Animation tools + working gizmo controls",
@@ -21,7 +21,7 @@ def get_active_object(context):
 
 
 # --------------------------------------------------
-# NEW ACTION OPERATOR
+# NEW ACTION
 # --------------------------------------------------
 class ANIM_OT_new_action(bpy.types.Operator):
     bl_idname = "anim.new_action"
@@ -29,6 +29,7 @@ class ANIM_OT_new_action(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
+
         obj = get_active_object(context)
 
         if not obj:
@@ -46,24 +47,26 @@ class ANIM_OT_new_action(bpy.types.Operator):
 # ACTION → SCENE RANGE
 # --------------------------------------------------
 class ANIM_OT_action_to_scene_range(bpy.types.Operator):
+
     bl_idname = "anim.action_to_scene_range"
     bl_label = "Action to Scene Range"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
     def poll(cls, context):
+
         obj = get_active_object(context)
         return obj and obj.animation_data and obj.animation_data.action
 
     def execute(self, context):
+
         obj = get_active_object(context)
         action = obj.animation_data.action
 
         start, end = action.frame_range
 
-        scene = context.scene
-        scene.frame_start = int(start)
-        scene.frame_end = int(end)
+        context.scene.frame_start = int(start)
+        context.scene.frame_end = int(end)
 
         return {'FINISHED'}
 
@@ -115,6 +118,7 @@ def draw_anim_header(self, context):
 # GIZMO OPERATORS
 # --------------------------------------------------
 class VIEW3D_OT_gizmo_bigger(bpy.types.Operator):
+
     bl_idname = "view3d.gizmo_bigger"
     bl_label = "Increase Gizmo Size"
 
@@ -129,6 +133,7 @@ class VIEW3D_OT_gizmo_bigger(bpy.types.Operator):
 
 
 class VIEW3D_OT_gizmo_smaller(bpy.types.Operator):
+
     bl_idname = "view3d.gizmo_smaller"
     bl_label = "Decrease Gizmo Size"
 
@@ -143,6 +148,7 @@ class VIEW3D_OT_gizmo_smaller(bpy.types.Operator):
 
 
 class VIEW3D_OT_open_gizmo_prefs(bpy.types.Operator):
+
     bl_idname = "view3d.open_gizmo_prefs"
     bl_label = "Open Gizmo Preferences"
 
@@ -180,33 +186,42 @@ class VIEW3D_PT_gizmo_panel(bpy.types.Panel):
 
 
 # --------------------------------------------------
-# REGISTER
+# CLASSES
 # --------------------------------------------------
 classes = (
+
     ANIM_OT_new_action,
     ANIM_OT_action_to_scene_range,
+
     VIEW3D_OT_gizmo_bigger,
     VIEW3D_OT_gizmo_smaller,
     VIEW3D_OT_open_gizmo_prefs,
+
     VIEW3D_PT_gizmo_panel,
 )
 
 
+# --------------------------------------------------
+# REGISTER
+# --------------------------------------------------
 def register():
 
     for c in classes:
         bpy.utils.register_class(c)
 
-    bpy.types.TIME_HT_editor_buttons.append(draw_timeline_header)
+    bpy.types.TIME_HT_header.append(draw_timeline_header)
     bpy.types.DOPESHEET_HT_header.append(draw_anim_header)
     bpy.types.GRAPH_HT_header.append(draw_anim_header)
 
     print("Combined Animation & Gizmo Tools Loaded")
 
 
+# --------------------------------------------------
+# UNREGISTER
+# --------------------------------------------------
 def unregister():
 
-    bpy.types.TIME_HT_editor_buttons.remove(draw_timeline_header)
+    bpy.types.TIME_HT_header.remove(draw_timeline_header)
     bpy.types.DOPESHEET_HT_header.remove(draw_anim_header)
     bpy.types.GRAPH_HT_header.remove(draw_anim_header)
 
