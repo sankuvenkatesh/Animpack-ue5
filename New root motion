@@ -1,260 +1,398 @@
+# -*- coding: utf-8 -*-
+
 bl_info = {
-    "name": "Root Motion Studio Tools",
-    "author": "Venkatesh Sanku",
+    "name": "Anim Tool Transfer",
+    "author": "Venkatesh sanku",
     "version": (1, 0, 0),
     "blender": (5, 0, 1),
-    "location": "View3D > Sidebar > Root Motion",
-    "description": "Advanced root motion extraction and controller tools",
-    "category": "Animation",
+    "location": "View3D > Sidebar > Anim Tool Transfer",
+    "description": "Root Motion Transfer Tool with Batch Processing",
+    "category": "Animation"
 }
 
 import bpy
 
-# ---------------------------------------------------
-# Property Groups
-# ---------------------------------------------------
+# ---------------------------------------------------------
+# Compatibility helpers
+# ---------------------------------------------------------
 
-class RMS_ControllerItem(bpy.types.PropertyGroup):
+def get_pose_bones_selected(context):
+    if hasattr(context, "selected_pose_bones") and context.selected_pose_bones:
+        return context.selected_pose_bones
+
+    obj = context.object
+    if obj and obj.type == 'ARMATURE':
+        return [b for b in obj.pose.bones if b.bone.select]
+
+    return []
+
+
+def ensure_animation_data(obj):
+    if not obj.animation_data:
+        obj.animation_data_create()
+    return obj.animation_data
+
+
+def safe_mode_set(mode):
+    obj = bpy.context.object
+    if obj and obj.mode != mode:
+        bpy.ops.object.mode_set(mode=mode)
+
+
+def safe_delete_object(obj):
+    if obj and obj.name in bpy.data.objects:
+        bpy.data.objects.remove(obj, do_unlink=True)
+
+
+def safe_delete_collection(col):
+    if not col:
+        return
+    for obj in list(col.objects):
+        safe_delete_object(obj)
+    bpy.data.collections.remove(col)
+
+
+def safe_constraint_remove(pbone, con):
+    try:
+        pbone.constraints.remove(con)
+    except:
+        pass
+
+
+# ---------------------------------------------------------
+# Properties
+# ---------------------------------------------------------
+
+class RMT_ControllerItem(bpy.types.PropertyGroup):
     name: bpy.props.StringProperty()
 
-class RMS_ActionItem(bpy.types.PropertyGroup):
+
+class RMT_ActionItem(bpy.types.PropertyGroup):
     name: bpy.props.StringProperty()
     action: bpy.props.PointerProperty(type=bpy.types.Action)
-    use: bpy.props.BoolProperty(default=False)
+    is_selected: bpy.props.BoolProperty(default=False)
 
-# ---------------------------------------------------
-# Scene Properties
-# ---------------------------------------------------
 
-def register_props():
+def get_torso_items(self, context):
+    scene = context.scene
+    return [(ctrl.name, ctrl.name, "") for ctrl in scene.controllers]
 
-    bpy.types.Scene.rms_rig = bpy.props.PointerProperty(
-        name="Rig",
-        type=bpy.types.Object
-    )
 
-    bpy.types.Scene.rms_controllers = bpy.props.CollectionProperty(
-        type=RMS_ControllerItem
-    )
+# ---------------------------------------------------------
+# Operators
+# ---------------------------------------------------------
 
-    bpy.types.Scene.rms_root = bpy.props.StringProperty(name="Root Bone")
-    bpy.types.Scene.rms_target = bpy.props.StringProperty(name="Target Bone")
-
-    bpy.types.Scene.rms_axis_x = bpy.props.BoolProperty(default=True)
-    bpy.types.Scene.rms_axis_y = bpy.props.BoolProperty(default=True)
-    bpy.types.Scene.rms_axis_z = bpy.props.BoolProperty(default=False)
-
-    bpy.types.Scene.rms_actions = bpy.props.CollectionProperty(type=RMS_ActionItem)
-
-def unregister_props():
-
-    del bpy.types.Scene.rms_rig
-    del bpy.types.Scene.rms_controllers
-    del bpy.types.Scene.rms_root
-    del bpy.types.Scene.rms_target
-    del bpy.types.Scene.rms_axis_x
-    del bpy.types.Scene.rms_axis_y
-    del bpy.types.Scene.rms_axis_z
-    del bpy.types.Scene.rms_actions
-
-# ---------------------------------------------------
-# Auto Detect Rigify Bones
-# ---------------------------------------------------
-
-class RMS_OT_AutoDetect(bpy.types.Operator):
-
-    bl_idname = "rms.auto_detect"
-    bl_label = "Auto Detect Rigify"
+class RMT_OT_AddController(bpy.types.Operator):
+    bl_idname = "rmt.add_controller"
+    bl_label = "Add Controllers"
+    bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-
         scene = context.scene
-        rig = scene.rms_rig
+        rig = scene.rmt_selected_rig
 
-        if not rig:
-            self.report({'ERROR'}, "Select rig first")
+        if not rig or rig.type != 'ARMATURE':
+            self.report({'WARNING'}, "Please select a valid rig.")
             return {'CANCELLED'}
 
-        bones = rig.pose.bones.keys()
+        if context.mode != 'POSE':
+            self.report({'WARNING'}, "Switch to Pose Mode.")
+            return {'CANCELLED'}
 
-        root_candidates = ["root", "ROOT", "Root"]
-        torso_candidates = ["torso", "hips", "spine", "spine.001"]
+        selected_bones = get_pose_bones_selected(context)
 
-        for r in root_candidates:
-            if r in bones:
-                scene.rms_root = r
-                break
+        if not selected_bones:
+            self.report({'WARNING'}, "No bones selected.")
+            return {'CANCELLED'}
 
-        for t in torso_candidates:
-            if t in bones:
-                scene.rms_target = t
-                break
+        added = 0
 
-        self.report({'INFO'}, "Auto detection finished")
+        for bone in selected_bones:
+            if not any(item.name == bone.name for item in scene.controllers):
+                new_ctrl = scene.controllers.add()
+                new_ctrl.name = bone.name
+                added += 1
+
+        scene.controllers_index = len(scene.controllers) - 1
+        self.report({'INFO'}, f"Added {added} controllers.")
 
         return {'FINISHED'}
 
-# ---------------------------------------------------
-# Add Controllers
-# ---------------------------------------------------
 
-class RMS_OT_AddControllers(bpy.types.Operator):
-
-    bl_idname = "rms.add_controllers"
-    bl_label = "Add Selected Controllers"
+class RMT_OT_ClearControllers(bpy.types.Operator):
+    bl_idname = "rmt.clear_controllers"
+    bl_label = "Clear All Controllers"
+    bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-
         scene = context.scene
-        rig = scene.rms_rig
+        scene.controllers.clear()
 
-        context.view_layer.objects.active = rig
-
-        if rig.mode != 'POSE':
-            bpy.ops.object.mode_set(mode='POSE')
-
-        selected = context.selected_pose_bones_from_active_object
-
-        if not selected:
-            return {'CANCELLED'}
-
-        for bone in selected:
-
-            if bone.name not in [c.name for c in scene.rms_controllers]:
-
-                item = scene.rms_controllers.add()
-                item.name = bone.name
+        collection = bpy.data.collections.get("RootMotionRefs")
+        if collection:
+            safe_delete_collection(collection)
 
         return {'FINISHED'}
 
-# ---------------------------------------------------
-# Root Motion Transfer
-# ---------------------------------------------------
 
-class RMS_OT_Transfer(bpy.types.Operator):
+class RMT_OT_RemoveController(bpy.types.Operator):
+    bl_idname = "rmt.remove_controller"
+    bl_label = "Remove Controller"
 
-    bl_idname = "rms.transfer"
-    bl_label = "Transfer Root Motion"
+    index: bpy.props.IntProperty()
+
+    def execute(self, context):
+        scene = context.scene
+        if 0 <= self.index < len(scene.controllers):
+            scene.controllers.remove(self.index)
+        return {'FINISHED'}
+
+
+class RMT_OT_SelectAllControllers(bpy.types.Operator):
+    bl_idname = "rmt.select_all_controllers"
+    bl_label = "Select All Controllers"
 
     def execute(self, context):
 
         scene = context.scene
-        rig = scene.rms_rig
+        rig = scene.rmt_selected_rig
 
         if not rig:
             return {'CANCELLED'}
 
-        context.view_layer.objects.active = rig
+        bpy.context.view_layer.objects.active = rig
 
         if rig.mode != 'POSE':
-            bpy.ops.object.mode_set(mode='POSE')
-
-        root = rig.pose.bones.get(scene.rms_root)
-        target = rig.pose.bones.get(scene.rms_target)
-
-        if not root or not target:
-            self.report({'ERROR'}, "Invalid bones")
-            return {'CANCELLED'}
-
-        # remove old constraints
-        for c in list(root.constraints):
-            if "RMS" in c.name:
-                root.constraints.remove(c)
-
-        con = root.constraints.new('COPY_LOCATION')
-        con.name = "RMS_Copy"
-        con.target = rig
-        con.subtarget = target.name
-
-        con.use_x = scene.rms_axis_x
-        con.use_y = scene.rms_axis_y
-        con.use_z = scene.rms_axis_z
+            safe_mode_set('POSE')
 
         bpy.ops.pose.select_all(action='DESELECT')
 
-        root.bone.select = True
-        rig.data.bones.active = root.bone
+        for ctrl in scene.controllers:
+            if ctrl.name in rig.pose.bones:
+                rig.pose.bones[ctrl.name].bone.select = True
+
+        return {'FINISHED'}
+
+
+# ---------------------------------------------------------
+# Root Motion Transfer
+# ---------------------------------------------------------
+
+class RMT_OT_TransferRootMotion(bpy.types.Operator):
+
+    bl_idname = "rmt.transfer_root_motion"
+
+    bl_label = "Transfer Root Motion"
+
+    bl_options = {'REGISTER', 'UNDO'}
+
+    action_name: bpy.props.StringProperty(default="")
+
+    def execute(self, context):
+
+        scene = context.scene
+        rig = scene.rmt_selected_rig
+
+        if not rig:
+            self.report({'WARNING'}, "No rig selected.")
+            return {'CANCELLED'}
+
+        if self.action_name:
+            action = bpy.data.actions.get(self.action_name)
+            if action:
+                anim_data = ensure_animation_data(rig)
+                anim_data.action = action
+
+        root_controller = scene.rmt_root_controller_name
+
+        if not root_controller:
+            self.report({'WARNING'}, "Root controller not set.")
+            return {'CANCELLED'}
+
+        safe_mode_set('POSE')
+
+        pb_root = rig.pose.bones.get(root_controller)
+
+        if not pb_root:
+            return {'CANCELLED'}
+
+        bpy.ops.pose.select_all(action='DESELECT')
+
+        pb_root.bone.select = True
+
+        rig.data.bones.active = pb_root.bone
 
         bpy.ops.nla.bake(
-            frame_start=context.scene.frame_start,
-            frame_end=context.scene.frame_end,
+            frame_start=scene.frame_start,
+            frame_end=scene.frame_end,
             only_selected=True,
             visual_keying=True,
             clear_constraints=True,
+            clear_parents=True,
             use_current_action=True,
             bake_types={'POSE'}
         )
 
-        self.report({'INFO'}, "Root motion transferred")
+        self.report({'INFO'}, "Root motion transferred.")
 
         return {'FINISHED'}
 
-# ---------------------------------------------------
+
+# ---------------------------------------------------------
+# Batch Transfer
+# ---------------------------------------------------------
+
+class RMT_OT_BatchTransferRootMotionContinue(bpy.types.Operator):
+
+    bl_idname = "rmt.batch_transfer_root_motion_continue"
+
+    bl_label = "Batch Transfer Root Motion"
+
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+
+        scene = context.scene
+
+        selected_actions = scene.rmt_batch_actions
+
+        if not selected_actions:
+            self.report({'WARNING'}, "No actions selected.")
+            return {'CANCELLED'}
+
+        rig = scene.rmt_selected_rig
+
+        current_action = rig.animation_data.action if rig.animation_data else None
+
+        for item in selected_actions:
+            bpy.ops.rmt.transfer_root_motion(action_name=item.name)
+
+        if current_action:
+            ensure_animation_data(rig).action = current_action
+
+        self.report({'INFO'}, "Batch transfer completed.")
+
+        return {'FINISHED'}
+
+
+# ---------------------------------------------------------
 # UI Panel
-# ---------------------------------------------------
+# ---------------------------------------------------------
 
-class RMS_PT_Panel(bpy.types.Panel):
+class RMT_PT_RootMotionPanel(bpy.types.Panel):
 
-    bl_label = "Root Motion Studio"
-    bl_idname = "RMS_PT_panel"
+    bl_label = "Anim Tool Transfer"
+
+    bl_idname = "RMT_PT_root_motion_transfer"
+
     bl_space_type = "VIEW_3D"
+
     bl_region_type = "UI"
-    bl_category = "Root Motion"
+
+    bl_category = "Venky Anim Toolz"
 
     def draw(self, context):
 
         layout = self.layout
         scene = context.scene
 
-        layout.prop(scene, "rms_rig")
+        layout.prop(scene, "rmt_selected_rig", text="Rig")
 
-        layout.operator("rms.auto_detect", icon="VIEWZOOM")
+        row = layout.row()
+        row.operator("rmt.add_controller", icon='PLUS')
+        row.operator("rmt.clear_controllers", icon='TRASH')
 
-        layout.prop(scene, "rms_root")
-        layout.prop(scene, "rms_target")
-
-        layout.label(text="Axes")
-
-        row = layout.row(align=True)
-        row.prop(scene, "rms_axis_x")
-        row.prop(scene, "rms_axis_y")
-        row.prop(scene, "rms_axis_z")
-
-        layout.operator("rms.add_controllers", icon="PLUS")
+        layout.operator("rmt.select_all_controllers")
 
         box = layout.box()
 
-        for c in scene.rms_controllers:
-            box.label(text=c.name)
+        for index, item in enumerate(scene.controllers):
+            row = box.row()
+            row.label(text=item.name, icon='BONE_DATA')
 
-        layout.operator("rms.transfer", icon="PLAY")
+            op = row.operator("rmt.remove_controller", text="", icon='X')
+            op.index = index
 
-# ---------------------------------------------------
+        layout.prop(scene, "rmt_torso_controller_enum")
+
+        if scene.rmt_selected_rig:
+            layout.prop_search(
+                scene,
+                "rmt_root_controller_name",
+                scene.rmt_selected_rig.pose,
+                "bones",
+                text="Root Controller"
+            )
+
+        layout.operator("rmt.transfer_root_motion", icon='PLAY')
+
+
+# ---------------------------------------------------------
 # Register
-# ---------------------------------------------------
+# ---------------------------------------------------------
 
 classes = [
-    RMS_ControllerItem,
-    RMS_ActionItem,
-    RMS_OT_AutoDetect,
-    RMS_OT_AddControllers,
-    RMS_OT_Transfer,
-    RMS_PT_Panel
+
+    RMT_ControllerItem,
+    RMT_ActionItem,
+
+    RMT_OT_AddController,
+    RMT_OT_ClearControllers,
+    RMT_OT_RemoveController,
+    RMT_OT_SelectAllControllers,
+
+    RMT_OT_TransferRootMotion,
+    RMT_OT_BatchTransferRootMotionContinue,
+
+    RMT_PT_RootMotionPanel
 ]
+
 
 def register():
 
-    for c in classes:
-        bpy.utils.register_class(c)
+    for cls in classes:
+        bpy.utils.register_class(cls)
 
-    register_props()
+    bpy.types.Scene.rmt_selected_rig = bpy.props.PointerProperty(type=bpy.types.Object)
+
+    bpy.types.Scene.controllers = bpy.props.CollectionProperty(type=RMT_ControllerItem)
+
+    bpy.types.Scene.controllers_index = bpy.props.IntProperty()
+
+    bpy.types.Scene.axis_x = bpy.props.BoolProperty(default=True)
+
+    bpy.types.Scene.axis_y = bpy.props.BoolProperty(default=True)
+
+    bpy.types.Scene.axis_z = bpy.props.BoolProperty(default=False)
+
+    bpy.types.Scene.keep_in_world_origin = bpy.props.BoolProperty(default=False)
+
+    bpy.types.Scene.rmt_torso_controller_enum = bpy.props.EnumProperty(items=get_torso_items)
+
+    bpy.types.Scene.rmt_root_controller_name = bpy.props.StringProperty()
+
+    bpy.types.Scene.rmt_action_items = bpy.props.CollectionProperty(type=RMT_ActionItem)
+
+    bpy.types.Scene.rmt_batch_actions = bpy.props.CollectionProperty(type=RMT_ActionItem)
+
 
 def unregister():
 
-    unregister_props()
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)
 
-    for c in reversed(classes):
-        bpy.utils.unregister_class(c)
+    del bpy.types.Scene.rmt_selected_rig
+    del bpy.types.Scene.controllers
+    del bpy.types.Scene.controllers_index
+    del bpy.types.Scene.axis_x
+    del bpy.types.Scene.axis_y
+    del bpy.types.Scene.axis_z
+    del bpy.types.Scene.keep_in_world_origin
+    del bpy.types.Scene.rmt_torso_controller_enum
+    del bpy.types.Scene.rmt_root_controller_name
+    del bpy.types.Scene.rmt_action_items
+    del bpy.types.Scene.rmt_batch_actions
+
 
 if __name__ == "__main__":
     register()
