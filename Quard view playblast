@@ -10,7 +10,7 @@ from bpy.props import (
 bl_info = {
     "name": "Playblast Quad View",
     "author": "Venkatesh sanku",
-    "version": (1, 1, 0),
+    "version": (1, 2, 0),
     "blender": (5, 0, 1),
     "location": "View3D > Sidebar > Playblast",
     "description": "Playblast review screenshot and video sequences for viewport - quadview",
@@ -18,10 +18,11 @@ bl_info = {
 }
 
 # ------------------------------------------------------------------------
-# Property Group (EXTENDED – NOTHING REMOVED)
+# Property Group
 # ------------------------------------------------------------------------
 
 class QP_Props(bpy.types.PropertyGroup):
+
     render_filepath: StringProperty(
         name="Save Path",
         subtype='FILE_PATH',
@@ -30,7 +31,6 @@ class QP_Props(bpy.types.PropertyGroup):
 
     is_quad_active: BoolProperty(default=False)
 
-    # 🔹 NEW (OPTIONAL)
     use_ffmpeg: BoolProperty(
         name="Use FFMPEG Encode",
         default=False
@@ -61,29 +61,85 @@ class QP_Props(bpy.types.PropertyGroup):
         default='SOLID'
     )
 
+
 # ------------------------------------------------------------------------
-# (ALL YOUR EXISTING OPERATORS ARE UNCHANGED)
-# Only MINIMAL hooks added inside animation operator
+# Quad View Toggle
+# ------------------------------------------------------------------------
+
+class QP_OT_switch_layout(bpy.types.Operator):
+    bl_idname = "qp.switch_layout"
+    bl_label = "Toggle Quad View"
+
+    def execute(self, context):
+
+        area = next((a for a in context.screen.areas if a.type == 'VIEW_3D'), None)
+
+        if not area:
+            self.report({'ERROR'}, "No 3D Viewport found")
+            return {'CANCELLED'}
+
+        with context.temp_override(area=area):
+            bpy.ops.screen.region_quadview()
+
+        return {'FINISHED'}
+
+
+# ------------------------------------------------------------------------
+# Screenshot
+# ------------------------------------------------------------------------
+
+class QP_OT_screenshot_quadview(bpy.types.Operator):
+    bl_idname = "qp.screenshot_quadview"
+    bl_label = "Playblast Screenshot"
+
+    def execute(self, context):
+
+        props = context.scene.qp_props
+        filepath = bpy.path.abspath(props.render_filepath)
+
+        bpy.ops.screen.screenshot(filepath=filepath)
+
+        self.report({'INFO'}, "Screenshot saved")
+
+        return {'FINISHED'}
+
+
+# ------------------------------------------------------------------------
+# Playblast Animation Capture
 # ------------------------------------------------------------------------
 
 class QP_OT_screenshot_quadview_anim(bpy.types.Operator):
+
     bl_idname = "qp.screenshot_quadview_anim"
     bl_label = "Playblast Animation"
 
     _timer = None
 
     def execute(self, context):
+
         self.scene = context.scene
         props = self.scene.qp_props
 
-        self.area = next(a for a in context.screen.areas if a.type == 'VIEW_3D')
-        self.region = next(r for r in self.area.regions if r.type == 'WINDOW')
+        self.area = next((a for a in context.screen.areas if a.type == 'VIEW_3D'), None)
+
+        if not self.area:
+            self.report({'ERROR'}, "No VIEW_3D area")
+            return {'CANCELLED'}
+
+        self.region = next((r for r in self.area.regions if r.type == 'WINDOW'), None)
+
         self.space = self.area.spaces.active
 
-        # 🔹 APPLY SHADING (SAFE)
+        # Store shading
         if hasattr(self.space, "shading"):
             self._old_shading = self.space.shading.type
             self.space.shading.type = props.shading_mode
+
+        # Store overlay state
+        overlay = getattr(self.space, "overlay", None)
+        if overlay:
+            self._overlay_state = overlay.show_overlays
+            overlay.show_overlays = False
 
         self.start = self.scene.frame_start
         self.end = self.scene.frame_end
@@ -92,11 +148,13 @@ class QP_OT_screenshot_quadview_anim(bpy.types.Operator):
 
         base = bpy.path.abspath(props.render_filepath)
         self.folder = os.path.splitext(base)[0] + "_temp"
+
         os.makedirs(self.folder, exist_ok=True)
 
-        # 🔹 UI HIDE (SAFE)
+        # Hide UI
         self._ui = self.space.show_region_ui
         self._toolbar = self.space.show_region_toolbar
+
         self.space.show_region_ui = False
         self.space.show_region_toolbar = False
 
@@ -106,36 +164,58 @@ class QP_OT_screenshot_quadview_anim(bpy.types.Operator):
 
         context.window_manager.modal_handler_add(self)
         self._timer = context.window_manager.event_timer_add(0.05, window=context.window)
+
         return {'RUNNING_MODAL'}
 
     def modal(self, context, event):
+
         if event.type == 'TIMER':
+
             if self.frame > self.end:
+
                 context.window_manager.event_timer_remove(self._timer)
 
-                # 🔹 RESTORE UI
+                # Restore UI
                 self.space.show_region_ui = self._ui
                 self.space.show_region_toolbar = self._toolbar
+
                 if hasattr(self.space, "show_gizmo"):
                     self.space.show_gizmo = self._gizmo
+
                 if hasattr(self.space, "shading"):
                     self.space.shading.type = self._old_shading
 
+                overlay = getattr(self.space, "overlay", None)
+                if overlay and hasattr(self, "_overlay_state"):
+                    overlay.show_overlays = self._overlay_state
+
                 bpy.ops.qp.combine_images_to_video()
+
                 return {'FINISHED'}
 
             self.scene.frame_set(self.frame)
-            filepath = os.path.join(self.folder, f"quadview_frame_{self.frame:04d}.png")
 
-            with context.temp_override(area=self.area, region=self.region):
-                bpy.ops.screen.screenshot_area(filepath=filepath)
+            filepath = os.path.join(
+                self.folder,
+                f"quadview_frame_{self.frame:04d}.png"
+            )
+
+            # safer screenshot
+            context.view_layer.update()
+
+            try:
+                with context.temp_override(area=self.area, region=self.region):
+                    bpy.ops.screen.screenshot_area(filepath=filepath)
+            except:
+                print("Frame skipped:", self.frame)
 
             self.frame += self.step
 
         return {'RUNNING_MODAL'}
 
+
 # ------------------------------------------------------------------------
-# PNG → VIDEO (AUTO SWITCH: FFMPEG OR VSE)
+# Combine Images To Video
 # ------------------------------------------------------------------------
 
 class QP_OT_combine_images_to_video(bpy.types.Operator):
@@ -143,17 +223,38 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
     bl_label = "Combine Images to Video"
 
     def execute(self, context):
+
         props = context.scene.qp_props
         base = bpy.path.abspath(props.render_filepath)
+
+        # FAST GPU VIEWPORT PLAYBLAST
+        try:
+
+            context.scene.render.filepath = base
+
+            bpy.ops.render.opengl(
+                animation=True,
+                sequencer=False,
+                view_context=True
+            )
+
+            self.report({'INFO'}, "Fast viewport playblast finished")
+            return {'FINISHED'}
+
+        except Exception as e:
+            print("OpenGL playblast failed:", e)
+
         folder = os.path.splitext(base)[0] + "_temp"
 
         images = sorted(f for f in os.listdir(folder) if f.endswith(".png"))
+
         if not images:
             self.report({'ERROR'}, "No PNG images found")
             return {'CANCELLED'}
 
-        # 🔹 FFMPEG PATH
+        # FFMPEG Encode
         if props.use_ffmpeg:
+
             cmd = [
                 "ffmpeg",
                 "-y",
@@ -163,18 +264,23 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
                 "-pix_fmt", "yuv420p",
                 base
             ]
+
             subprocess.run(cmd)
+
             shutil.rmtree(folder)
+
             self.report({'INFO'}, "Video created with FFMPEG")
             return {'FINISHED'}
 
-        # 🔹 FALLBACK = OLD VSE (UNCHANGED LOGIC)
+        # VSE fallback
         scene = context.scene
+
         if not scene.sequence_editor:
             scene.sequence_editor_create()
 
         seq = scene.sequence_editor
-        for s in seq.sequences_all:
+
+        for s in list(seq.sequences_all):
             seq.sequences.remove(s)
 
         strip = seq.sequences.new_image(
@@ -190,31 +296,38 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
         scene.render.image_settings.file_format = 'FFMPEG'
         scene.render.ffmpeg.codec = 'H264'
         scene.render.filepath = base
+
         scene.frame_start = 1
         scene.frame_end = len(images)
 
         bpy.ops.render.render(animation=True)
+
         shutil.rmtree(folder)
 
         self.report({'INFO'}, "Video created with VSE")
+
         return {'FINISHED'}
 
+
 # ------------------------------------------------------------------------
-# UI (ONLY EXTENDED – NOTHING REMOVED)
+# UI Panel
 # ------------------------------------------------------------------------
 
 class QP_PT_panel(bpy.types.Panel):
+
     bl_label = "Playblast Panel"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Playblast"
 
     def draw(self, context):
+
         layout = self.layout
         props = context.scene.qp_props
 
         layout.operator("qp.switch_layout")
         layout.prop(props, "render_filepath")
+
         layout.operator("qp.screenshot_quadview")
         layout.operator("qp.screenshot_quadview_anim")
 
@@ -226,12 +339,15 @@ class QP_PT_panel(bpy.types.Panel):
         layout.prop(props, "resolution_scale")
         layout.prop(props, "shading_mode")
 
+
 # ------------------------------------------------------------------------
 # Register
 # ------------------------------------------------------------------------
 
 classes = (
     QP_Props,
+    QP_OT_switch_layout,
+    QP_OT_screenshot_quadview,
     QP_OT_screenshot_quadview_anim,
     QP_OT_combine_images_to_video,
     QP_PT_panel,
@@ -240,12 +356,15 @@ classes = (
 def register():
     for c in classes:
         bpy.utils.register_class(c)
+
     bpy.types.Scene.qp_props = bpy.props.PointerProperty(type=QP_Props)
 
 def unregister():
     for c in reversed(classes):
         bpy.utils.unregister_class(c)
+
     del bpy.types.Scene.qp_props
+
 
 if __name__ == "__main__":
     register()
