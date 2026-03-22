@@ -1,0 +1,255 @@
+import bpy
+import os
+from bpy.props import StringProperty, IntProperty, PointerProperty, CollectionProperty, BoolProperty
+from bpy.types import Operator, Panel, UIList, PropertyGroup
+
+bl_info = {
+    "name": "RealMotion Retarget Standalone",
+    "author": "Venkatesh Sanku",
+    "version": (1.4),
+    "blender": (5, 0, 0),
+    "location": "View3D > Sidebar > RealMotion Pro",
+    "description": "Professional Standalone Retargeting Tool",
+    "category": "Animation",
+}
+
+# --- PRESET PATH ---
+preset_path = os.path.join(bpy.utils.user_resource('CONFIG'), "realmotion_presets")
+os.makedirs(preset_path, exist_ok=True)
+
+# --- PROPERTIES ---
+
+class BoneMappingItem(PropertyGroup):
+    source_bone: StringProperty(name="Source Bone")
+    target_bone: StringProperty(name="Target Bone", default="")
+
+class RetargetProperties(PropertyGroup):
+    source_armature: PointerProperty(
+        name="Source Armature",
+        type=bpy.types.Object,
+        poll=lambda self, obj: obj.type == 'ARMATURE'
+    )
+    target_armature: PointerProperty(
+        name="Target Armature",
+        type=bpy.types.Object,
+        poll=lambda self, obj: obj.type == 'ARMATURE'
+    )
+    root_bone: StringProperty(name="Root Bone", description="Bone used for Location/Root Motion")
+    bone_mappings: CollectionProperty(type=BoneMappingItem)
+    active_bone_index: IntProperty(default=0)
+    bake_clear_constraints: BoolProperty(name="Clear Constraints", default=True)
+
+# --- OPERATORS ---
+
+class SIMPLE_RETARGET_OT_BuildBoneList(Operator):
+    bl_idname = "simple_retarget.build_bone_list"
+    bl_label = "Build Bone List"
+
+    def execute(self, context):
+        props = context.scene.simple_retarget
+        if not props.source_armature:
+            self.report({'ERROR'}, "Source armature not set.")
+            return {'CANCELLED'}
+
+        props.bone_mappings.clear()
+        target_bones = props.target_armature.data.bones if props.target_armature else []
+
+        for bone in props.source_armature.data.bones:
+            item = props.bone_mappings.add()
+            item.source_bone = bone.name
+            if props.target_armature and bone.name in target_bones:
+                item.target_bone = bone.name
+        return {'FINISHED'}
+
+class SIMPLE_RETARGET_OT_BindConstraints(Operator):
+    bl_idname = "simple_retarget.bind_constraints"
+    bl_label = "Bind Constraints"
+
+    def execute(self, context):
+        props = context.scene.simple_retarget
+        if not props.source_armature or not props.target_armature:
+            self.report({'ERROR'}, "Set both armatures.")
+            return {'CANCELLED'}
+
+        for mapping in props.bone_mappings:
+            if mapping.source_bone and mapping.target_bone:
+                target_bone = props.target_armature.pose.bones.get(mapping.target_bone)
+                if not target_bone: continue
+
+                for con in list(target_bone.constraints):
+                    if "_RM" in con.name or "Retarget" in con.name:
+                        target_bone.constraints.remove(con)
+
+                con_rot = target_bone.constraints.new('COPY_ROTATION')
+                con_rot.name = "Retarget_RM_Rot"
+                con_rot.target = props.source_armature
+                con_rot.subtarget = mapping.source_bone
+                con_rot.target_space = 'POSE'
+                con_rot.owner_space = 'POSE'
+
+                if props.root_bone and mapping.target_bone == props.root_bone:
+                    con_loc = target_bone.constraints.new('COPY_LOCATION')
+                    con_loc.name = "Retarget_RM_Loc"
+                    con_loc.target = props.source_armature
+                    con_loc.subtarget = mapping.source_bone
+                    con_loc.target_space = 'POSE'
+                    con_loc.owner_space = 'POSE'
+        return {'FINISHED'}
+
+class SIMPLE_RETARGET_OT_BakeAnimation(Operator):
+    bl_idname = "simple_retarget.bake_animation"
+    bl_label = "Bake Retargeted Animation"
+    bl_description = "Convert constraints to keyframes (Pro Level)"
+
+    def execute(self, context):
+        props = context.scene.simple_retarget
+        target = props.target_armature
+
+        if not target:
+            self.report({'ERROR'}, "No target armature to bake.")
+            return {'CANCELLED'}
+
+        if props.root_bone and props.root_bone not in target.pose.bones:
+            self.report({'WARNING'}, "Invalid root bone")
+
+        if not target.animation_data:
+            target.animation_data_create()
+
+        if not target.animation_data.action:
+            target.animation_data.action = bpy.data.actions.new(name="Retarget_Baked")
+
+        if bpy.context.object != target:
+            bpy.context.view_layer.objects.active = target
+
+        if target.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+        bpy.ops.object.select_all(action='DESELECT')
+        target.select_set(True)
+        bpy.ops.object.mode_set(mode='POSE')
+
+        bpy.ops.pose.select_all(action='DESELECT')
+        valid_bones = 0
+        for m in props.bone_mappings:
+            bone = target.pose.bones.get(m.target_bone)
+            if bone:
+                bone.bone.select = True
+                valid_bones += 1
+
+        start = context.scene.frame_start
+        end = context.scene.frame_end
+
+        bpy.ops.nla.bake(
+            frame_start=start,
+            frame_end=end,
+            step=1,
+            only_selected=True,
+            visual_keying=True,
+            clear_constraints=props.bake_clear_constraints,
+            use_current_action=True,
+            bake_types={'POSE'}
+        )
+
+        self.report({'INFO'}, f"Baked {valid_bones} bones from {start} to {end}")
+        return {'FINISHED'}
+
+# --- UI & UTILS ---
+
+class SIMPLE_RETARGET_OT_UnbindConstraints(Operator):
+    bl_idname = "simple_retarget.unbind_constraints"
+    bl_label = "Unbind"
+    def execute(self, context):
+        props = context.scene.simple_retarget
+        if props.target_armature:
+            for bone in props.target_armature.pose.bones:
+                for con in list(bone.constraints):
+                    if "Retarget" in con.name or "_RM" in con.name:
+                        bone.constraints.remove(con)
+        return {'FINISHED'}
+
+class SIMPLE_RETARGET_OT_AddMapping(Operator):
+    bl_idname = "simple_retarget.add_mapping"
+    bl_label = "Add"
+    def execute(self, context):
+        context.scene.simple_retarget.bone_mappings.add()
+        return {'FINISHED'}
+
+class SIMPLE_RETARGET_OT_RemoveMapping(Operator):
+    bl_idname = "simple_retarget.remove_mapping"
+    bl_label = "Remove"
+    def execute(self, context):
+        props = context.scene.simple_retarget
+        props.bone_mappings.remove(props.active_bone_index)
+        props.active_bone_index = max(0, props.active_bone_index - 1)
+        return {'FINISHED'}
+
+class SIMPLE_RETARGET_UL_BoneMappingList(UIList):
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        props = context.scene.simple_retarget
+        row = layout.row(align=True)
+        row.label(text=item.source_bone, icon='BONE_DATA')
+        if props.target_armature:
+            row.prop_search(item, "target_bone", props.target_armature.pose, "bones", text="")
+
+class SIMPLE_RETARGET_PT_Panel(Panel):
+    bl_label = "RealMotion Retarget Standalone"
+    bl_idname = "VIEW3D_PT_simple_retarget"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "RealMotion Pro"
+
+    def draw(self, context):
+        layout = self.layout
+        props = context.scene.simple_retarget
+
+        col = layout.column(align=True)
+        col.prop(props, "source_armature")
+        col.prop(props, "target_armature")
+        if props.target_armature:
+            layout.prop_search(props, "root_bone", props.target_armature.data, "bones")
+
+        layout.separator()
+        layout.operator("simple_retarget.build_bone_list", icon='FILE_REFRESH')
+        
+        row = layout.row()
+        row.template_list("SIMPLE_RETARGET_UL_BoneMappingList", "", props, "bone_mappings", props, "active_bone_index")
+        
+        col = row.column(align=True)
+        col.operator("simple_retarget.add_mapping", icon='ADD', text="")
+        col.operator("simple_retarget.remove_mapping", icon='REMOVE', text="")
+
+        layout.separator()
+        row = layout.row(align=True)
+        row.scale_y = 1.4
+        row.operator("simple_retarget.bind_constraints", icon='CONSTRAINT', text="Bind Rig")
+        row.operator("simple_retarget.unbind_constraints", icon='X', text="Clear")
+        
+        layout.separator()
+        box = layout.box()
+        box.label(text="Bake Final Animation", icon='REC')
+        box.prop(props, "bake_clear_constraints")
+        box.operator("simple_retarget.bake_animation", icon='ACTION', text="Bake Keyframes")
+
+        layout.separator()
+        layout.label(text="Author: Venkatesh Sanku", icon='USER')
+
+# --- REGISTRATION ---
+
+classes = (
+    BoneMappingItem, RetargetProperties, SIMPLE_RETARGET_OT_BuildBoneList,
+    SIMPLE_RETARGET_OT_BindConstraints, SIMPLE_RETARGET_OT_BakeAnimation,
+    SIMPLE_RETARGET_OT_UnbindConstraints, SIMPLE_RETARGET_OT_AddMapping,
+    SIMPLE_RETARGET_OT_RemoveMapping, SIMPLE_RETARGET_UL_BoneMappingList,
+    SIMPLE_RETARGET_PT_Panel,
+)
+
+def register():
+    for cls in classes: bpy.utils.register_class(cls)
+    bpy.types.Scene.simple_retarget = PointerProperty(type=RetargetProperties)
+
+def unregister():
+    for cls in reversed(classes): bpy.utils.unregister_class(cls)
+    del bpy.types.Scene.simple_retarget
+
+if __name__ == "__main__":
+    register()
