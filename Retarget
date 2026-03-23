@@ -1,329 +1,897 @@
 import bpy
 import os
 import mathutils
-from bpy.props import StringProperty, IntProperty, PointerProperty, CollectionProperty, BoolProperty, FloatProperty
-from bpy.types import Operator, Panel, UIList, PropertyGroup
+from math import radians
+from bpy.props import StringProperty
+from bpy.types import Operator, Panel
+from bpy_extras.io_utils import ImportHelper
 
 bl_info = {
-    "name": "RealMotion Retarget Pro Standalone",
+    "name": "RealMotion Retarget Standalone (Exact Source)",
     "author": "Venkatesh Sanku",
-    "version": (1, 7),
-    "blender": (5, 1, 0),
+    "version": (1, 57),
+    "blender": (4, 0, 0), # Works in 4.0 and 5.0
     "location": "View3D > Sidebar > RealMotion Pro",
-    "description": "Professional retargeting logic extracted from RealMotion Pro",
+    "description": "Exact 1:1 extraction of the retargeting module",
     "category": "Animation",
 }
 
-# --- PRESET FOLDER SETUP ---
-preset_path = os.path.join(bpy.utils.user_resource('CONFIG'), "realmotion_presets")
-if not os.path.exists(preset_path):
-    os.makedirs(preset_path)
+class BoneMappingItem(bpy.types.PropertyGroup):
+    source_bone: bpy.props.StringProperty(name="Source Bone")
+    target_bone: bpy.props.StringProperty(name="Target Bone", default="", description="Select target bone")
 
-# --- PROPERTIES ---
+class RetargetProperties(bpy.types.PropertyGroup):
+    source_armature: bpy.props.PointerProperty(
+        name="Source Armature", type=bpy.types.Object,
+        poll=lambda self, obj: obj.type == 'ARMATURE'
+    )
+    target_armature: bpy.props.PointerProperty(
+        name="Target Armature", type=bpy.types.Object,
+        poll=lambda self, obj: obj.type == 'ARMATURE'
+    )
+    root_bone: bpy.props.StringProperty(name="Root Bone", default="")
+    bone_mappings: bpy.props.CollectionProperty(type=BoneMappingItem)
+    active_bone_index: bpy.props.IntProperty(name="Active Bone Index", default=0)
 
-class BoneMappingItem(PropertyGroup):
-    source_bone: StringProperty(name="Source Bone")
-    target_bone: StringProperty(name="Target Bone")
+def update_target_bone_list(self, context):
+    armature = context.scene.simple_retarget.target_armature
+    if armature and armature.type == 'ARMATURE':
+        return [(bone.name, bone.name, "") for bone in armature.pose.bones]
+    return []
 
-class RetargetProperties(PropertyGroup):
-    source_armature: PointerProperty(type=bpy.types.Object, poll=lambda self, obj: obj.type == 'ARMATURE')
-    target_armature: PointerProperty(type=bpy.types.Object, poll=lambda self, obj: obj.type == 'ARMATURE')
-    root_bone: StringProperty(name="Root Bone")
-    bone_mappings: CollectionProperty(type=BoneMappingItem)
-    active_bone_index: IntProperty(default=0)
+class SIMPLE_RETARGET_UL_BoneMappingList(bpy.types.UIList):
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        row = layout.row(align=True)
+        row.prop(item, "source_bone", text="", emboss=False)
+        row.prop_search(item, "target_bone", context.scene.simple_retarget.target_armature.pose, "bones", text="")
+        
+# Define the preset directory
+preset_path = os.path.join(bpy.utils.user_resource('SCRIPTS'), "addons", "AnimationGen", "Presets")
 
-    use_current_pose: BoolProperty(name="Use Current Pose", default=True)
-    bake_clear_constraints: BoolProperty(name="Clear Constraints", default=True)
-    scale_factor: FloatProperty(name="Scale Factor", default=1.0, precision=4)
+# Ensure the directory exists
+os.makedirs(preset_path, exist_ok=True)
 
-# --- UTILS ---
+class SavePresetOperator(bpy.types.Operator):
+    bl_idname = "simple_retarget.save_preset"
+    bl_label = "Save Preset"
+    bl_description = "Save the current bone mappings as a preset"
 
-def safe_mode_set(obj, mode):
-    """Guarantees the object is active and in the correct mode without context errors"""
-    if bpy.context.view_layer.objects.active != obj:
-        bpy.context.view_layer.objects.active = obj
-    if obj.mode != mode:
-        bpy.ops.object.mode_set(mode=mode)
-
-# --- OPERATORS ---
-
-class RMP_OT_BuildBoneList(Operator):
-    bl_idname = "rmp.build_bone_list"
-    bl_label = "Fetch Bone List"
-    bl_description = "Scans source armature and matches target bones by name"
+    filepath: bpy.props.StringProperty(subtype="FILE_PATH")
 
     def execute(self, context):
-        props = context.scene.rmp_retarget
+        props = context.scene.simple_retarget
+        bone_mappings = props.bone_mappings
+
+        # Ensure the file has a .txt extension
+        if not self.filepath.endswith(".txt"):
+            self.filepath += ".txt"
+
+        # Write the bone mappings to the file
+        with open(self.filepath, 'w') as file:
+            for mapping in bone_mappings:
+                file.write(f"{mapping.source_bone},{mapping.target_bone}\n")
+
+        self.report({'INFO'}, f"Preset saved to {self.filepath}")
+        return {'FINISHED'}
+
+    def invoke(self, context, event):
+        # Set default directory and filename
+        self.filepath = os.path.join(preset_path, "preset.txt")
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+class LoadPresetOperator(bpy.types.Operator):
+    bl_idname = "simple_retarget.load_preset"
+    bl_label = "Load Preset"
+    bl_description = "Load a bone mappings preset from a file"
+
+    filepath: bpy.props.StringProperty(subtype="FILE_PATH")
+    directory: bpy.props.StringProperty(subtype="DIR_PATH")  # Directory for file browser
+
+    def execute(self, context):
+        props = context.scene.simple_retarget
+        bone_mappings = props.bone_mappings
+        source_armature = props.source_armature
+        target_armature = props.target_armature
+
+        # Clear existing bone mappings
+        bone_mappings.clear()
+
+        # Get the set of bone names from source and target armatures (if they exist)
+        source_bone_names = set(source_armature.data.bones.keys()) if source_armature else set()
+        target_bone_names = set(target_armature.data.bones.keys()) if target_armature else set()
+
+        # Read the bone mappings from the file
+        with open(self.filepath, 'r') as file:
+            for line in file:
+                source_bone, target_bone = line.strip().split(',')
+                
+                # Only add mapping if source bone exists in the current source armature
+                if source_bone in source_bone_names:
+                    new_mapping = bone_mappings.add()
+                    new_mapping.source_bone = source_bone
+                    
+                    # Map target bone only if it exists in the current target armature
+                    if target_bone in target_bone_names:
+                        new_mapping.target_bone = target_bone
+                    else:
+                        new_mapping.target_bone = ""  # Leave unmapped if target bone doesn't exist
+
+        self.report({'INFO'}, f"Preset loaded from {self.filepath} (filtered for existing bones)")
+        return {'FINISHED'}
+
+    def invoke(self, context, event):
+        # Set the directory to the 'Presets' folder (assuming preset_path is defined elsewhere)
+        self.directory = preset_path  # Ensure preset_path is defined in your script
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+class SIMPLE_RETARGET_OT_HighlightBone(bpy.types.Operator):
+    bl_idname = "simple_retarget.highlight_bone"
+    bl_label = "Highlight Selected Bone"
+    bl_description = "Highlight the selected bone in the bone mapping list (source or target)"
+
+    def execute(self, context):
+        props = context.scene.simple_retarget
+
+        # Check if in Pose Mode
+        if context.mode != 'POSE':
+            self.report({'ERROR'}, "Please enter Pose Mode to select a bone.")
+            return {'CANCELLED'}
+
+        # Get the selected bone
+        selected_bone = context.active_pose_bone
+        if not selected_bone:
+            self.report({'ERROR'}, "No bone selected. Please select a bone in Pose Mode.")
+            return {'CANCELLED'}
+
+        # Debug: Print the selected bone name
+        print(f"Selected Bone: {selected_bone.name}")
+
+        # Ensure the source and target armatures are set
         if not props.source_armature:
-            self.report({'ERROR'}, "Source Armature not assigned.")
+            self.report({'ERROR'}, "Source armature is not set.")
+            return {'CANCELLED'}
+        if not props.target_armature:
+            self.report({'ERROR'}, "Target armature is not set.")
             return {'CANCELLED'}
 
-        props.bone_mappings.clear()
-        for bone in props.source_armature.data.bones:
-            item = props.bone_mappings.add()
-            item.source_bone = bone.name
-            if props.target_armature and bone.name in props.target_armature.data.bones:
-                item.target_bone = bone.name
-
-        self.report({'INFO'}, f"Fetched {len(props.bone_mappings)} bones.")
-        return {'FINISHED'}
-
-class RMP_OT_CalculateScale(Operator):
-    bl_idname = "rmp.calculate_scale"
-    bl_label = "Match Rig Scale"
-    bl_description = "Calculates height ratio between source and target"
-
-    def execute(self, context):
-        props = context.scene.rmp_retarget
-        if not props.source_armature or not props.target_armature:
-            self.report({'ERROR'}, "Both armatures must be set.")
+        # Check if the selected bone belongs to either the source or target armature
+        if selected_bone.id_data != props.source_armature and selected_bone.id_data != props.target_armature:
+            self.report({'ERROR'}, "Selected bone does not belong to the source or target armature.")
             return {'CANCELLED'}
 
-        src_dim = props.source_armature.dimensions.z
-        trg_dim = props.target_armature.dimensions.z
+        # Iterate through the bone mappings
+        for i, mapping in enumerate(props.bone_mappings):
+            # Debug: Print the source and target bone names in the mapping
+            print(f"Mapping {i}: Source Bone = {mapping.source_bone}, Target Bone = {mapping.target_bone}")
 
-        if trg_dim > 0:
-            props.scale_factor = src_dim / trg_dim
-            # Apply absolute scale to prevent stacking
-            props.target_armature.scale = (props.scale_factor, props.scale_factor, props.scale_factor)
-            self.report({'INFO'}, f"Scale matched to Source: {props.scale_factor:.4f}")
-
-        return {'FINISHED'}
-
-class RMP_OT_HighlightBone(Operator):
-    bl_idname = "rmp.highlight_bone"
-    bl_label = "Find Selected"
-    
-    def execute(self, context):
-        props = context.scene.rmp_retarget
-        bone = context.active_pose_bone
-        if not bone:
-            self.report({'WARNING'}, "Select a bone in the viewport first.")
-            return {'CANCELLED'}
-
-        for i, m in enumerate(props.bone_mappings):
-            if m.source_bone == bone.name or m.target_bone == bone.name:
+            # Compare the selected bone name with both source and target bones in the mapping
+            if mapping.source_bone == selected_bone.name or mapping.target_bone == selected_bone.name:
                 props.active_bone_index = i
+                self.report({'INFO'}, f"Highlighted bone: {selected_bone.name}")
                 return {'FINISHED'}
 
-        self.report({'INFO'}, "Bone not found in mapping list.")
+        # If no match is found
+        self.report({'WARNING'}, "Selected bone not found in the bone mapping list.")
         return {'CANCELLED'}
 
-class RMP_OT_BindConstraints(Operator):
-    bl_idname = "rmp.bind_constraints"
-    bl_label = "Bind Constraints"
-
-    def execute(self, context):
-        props = context.scene.rmp_retarget
-        src = props.source_armature
-        targ = props.target_armature
-
-        if not src or not targ:
-            self.report({'ERROR'}, "Missing armatures.")
-            return {'CANCELLED'}
-
-        safe_mode_set(targ, 'POSE')
-
-        for mapping in props.bone_mappings:
-            if mapping.source_bone and mapping.target_bone:
-                pb = targ.pose.bones.get(mapping.target_bone)
-                if not pb: continue
-
-                pb.rotation_mode = 'XYZ'
-
-                # Professional cleanup of existing RMP constraints
-                for con in list(pb.constraints):
-                    if con.name.startswith("RMP_RETRG"):
-                        pb.constraints.remove(con)
-
-                # Rotation Binding
-                c_rot = pb.constraints.new('COPY_ROTATION')
-                c_rot.name = "RMP_RETRG_ROT"
-                c_rot.target = src
-                c_rot.subtarget = mapping.source_bone
-                c_rot.target_space = 'POSE'
-                c_rot.owner_space = 'POSE'
-
-                # Root Motion Binding (Location)
-                if props.root_bone and mapping.target_bone == props.root_bone:
-                    c_loc = pb.constraints.new('COPY_LOCATION')
-                    c_loc.name = "RMP_RETRG_LOC"
-                    c_loc.target = src
-                    c_loc.subtarget = mapping.source_bone
-                    c_loc.target_space = 'POSE'
-                    c_loc.owner_space = 'POSE'
-
-        return {'FINISHED'}
-
-class RMP_OT_BakeAnimation(Operator):
-    bl_idname = "rmp.bake_animation"
-    bl_label = "Bake Animation"
-
-    def execute(self, context):
-        props = context.scene.rmp_retarget
-        target = props.target_armature
-
-        if not target:
-            self.report({'ERROR'}, "Target armature missing.")
-            return {'CANCELLED'}
-
-        if not target.animation_data: target.animation_data_create()
-        if not target.animation_data.action:
-            target.animation_data.action = bpy.data.actions.new(name="RMP_Baked_Action")
-
-        safe_mode_set(target, 'OBJECT')
-        bpy.ops.object.select_all(action='DESELECT')
-        target.select_set(True)
-
-        safe_mode_set(target, 'POSE')
-        bpy.ops.pose.select_all(action='DESELECT')
-
-        count = 0
-        for m in props.bone_mappings:
-            bone = target.pose.bones.get(m.target_bone)
-            if bone:
-                bone.bone.select = True
-                count += 1
-
-        if count == 0:
-            self.report({'ERROR'}, "No valid mapped bones found to bake.")
-            return {'CANCELLED'}
-
-        bpy.ops.nla.bake(
-            frame_start=context.scene.frame_start,
-            frame_end=context.scene.frame_end,
-            step=1,
-            only_selected=True,
-            visual_keying=True,
-            clear_constraints=props.bake_clear_constraints,
-            use_current_action=True,
-            bake_types={'POSE'}
-        )
-
-        self.report({'INFO'}, f"Successfully baked {count} bones.")
-        return {'FINISHED'}
-
-# --- PRESET MANAGEMENT ---
-
-class RMP_OT_SavePreset(Operator):
-    bl_idname = "rmp.save_preset"
-    bl_label = "Save Preset"
-    filepath: StringProperty(subtype="FILE_PATH")
-
-    def execute(self, context):
-        if not self.filepath.endswith(".txt"): self.filepath += ".txt"
-        with open(self.filepath, 'w') as f:
-            for m in context.scene.rmp_retarget.bone_mappings:
-                f.write(f"{m.source_bone}|{m.target_bone}\n")
-        self.report({'INFO'}, "Preset Saved Successfully")
-        return {'FINISHED'}
-
-    def invoke(self, context, event):
-        context.window_manager.fileselect_add(self)
-        return {'RUNNING_MODAL'}
-
-class RMP_OT_LoadPreset(Operator):
-    bl_idname = "rmp.load_preset"
-    bl_label = "Load Preset"
-    filepath: StringProperty(subtype="FILE_PATH")
-
-    def execute(self, context):
-        props = context.scene.rmp_retarget
-        if not os.path.exists(self.filepath):
-            self.report({'ERROR'}, "Preset file not found.")
-            return {'CANCELLED'}
-
-        props.bone_mappings.clear()
-        with open(self.filepath, 'r') as f:
-            for line in f:
-                parts = line.strip().split('|')
-                if len(parts) == 2:
-                    item = props.bone_mappings.add()
-                    item.source_bone, item.target_bone = parts
-        return {'FINISHED'}
-
-    def invoke(self, context, event):
-        context.window_manager.fileselect_add(self)
-        return {'RUNNING_MODAL'}
-
-# --- UI ---
-
-class RMP_UL_BoneList(UIList):
-    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
-        props = context.scene.rmp_retarget
-        row = layout.row(align=True)
-        row.label(text=item.source_bone, icon='BONE_DATA')
-        if props.target_armature:
-            row.prop_search(item, "target_bone", props.target_armature.data, "bones", text="")
-
-class RMP_PT_MainPanel(Panel):
-    bl_label = "RealMotion Pro - Detailed Retarget"
-    bl_idname = "VIEW3D_PT_rmp_full_retarget"
+class SimpleRetargetPanel(bpy.types.Panel):
+    bl_label = "RealMotion Retarget"
+    bl_idname = "VIEW3D_PT_simple_retarget"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "RealMotion Pro"
+    bl_order = 5
+    
+    def draw(self, context):
+        layout = self.layout
+        props = context.scene.simple_retarget
+
+        layout.prop(props, "source_armature")
+        layout.prop(props, "target_armature")
+        
+        layout.operator("simple_retarget.build_bone_list", text="Build Bone List")
+        
+        row = layout.row()
+        row.template_list("SIMPLE_RETARGET_UL_BoneMappingList", "", props, "bone_mappings", props, "active_bone_index")
+
+        col = row.column(align=True)
+        col.operator("simple_retarget.add_mapping", icon='ADD', text="")
+        col.operator("simple_retarget.remove_mapping", icon='REMOVE', text="")
+        row = layout.row()
+        row.operator("simple_retarget.highlight_bone", icon='VIEWZOOM', text="Highlight Selected Bone")
+
+        # Add the "Load Preset" and "Save Preset" buttons
+        row = layout.row()
+        row.operator("simple_retarget.load_preset", text="Load Preset")
+        row.operator("simple_retarget.save_preset", text="Save Preset")
+        
+        layout.label(text="Root Bone:")
+        row = layout.row()
+        row.alert = True if props.root_bone else False
+        row.label(text=props.root_bone if props.root_bone else "None Selected", icon='BONE_DATA')
+        row = layout.row()
+        row.operator("simple_retarget.set_root_bone", text="Set Root Bone")
+        
+        row.operator("simple_retarget.calculate_scale", text="Calculate Scale")
+
+        # Add the "Bind" and "Unbind" buttons
+        row = layout.row()
+        row.operator("simple_retarget.bind_constraints", text="Bind Constraints")
+        row.operator("simple_retarget.unbind_constraints", text="Unbind Constraints")
+        #layout.operator("simple_retarget.copy_rest_pose", icon='ARMATURE_DATA')
+
+RETARGET_ID = "_RM"
+
+class BindConstraintsOperator(bpy.types.Operator):
+    bl_idname = "simple_retarget.bind_constraints"
+    bl_label = "Bind Constraints"
+    
+    def execute(self, context):
+        props = context.scene.simple_retarget
+        source_armature = props.source_armature
+        target_armature = props.target_armature
+        root_bone_name = props.root_bone
+
+        # Minimal check: Ensure source and target armatures are not None
+        if not source_armature:
+            self.report({'WARNING'}, "Source Armature is not assigned.")
+            return {'CANCELLED'}
+        if not target_armature:
+            self.report({'WARNING'}, "Target Armature is not assigned.")
+            return {'CANCELLED'}
+
+        # Ensure we're in Object mode
+        if bpy.context.mode == 'POSE':
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+        # Make the target rig active and go to Pose mode
+        bpy.context.view_layer.objects.active = target_armature
+        bpy.ops.object.mode_set(mode='POSE')
+
+        # Remove all keyframes from target armature bones
+        if target_armature.animation_data and target_armature.animation_data.action:
+            action = target_armature.animation_data.action
+            for bone in target_armature.pose.bones:
+                for fcurve in action.fcurves:
+                    if fcurve.data_path.startswith(f'pose.bones["{bone.name}"]'):
+                        action.fcurves.remove(fcurve)
+
+        # Reset the transforms of target armature bones
+        bpy.ops.pose.select_all(action='SELECT')
+        bpy.ops.pose.rot_clear()
+        bpy.ops.pose.loc_clear()
+        bpy.ops.pose.scale_clear()
+        bpy.ops.object.mode_set(mode='OBJECT')
+
+        # Check if a copy of the source armature already exists and delete it
+        helper_armature = None
+        for obj in bpy.data.objects:
+            if obj.name.startswith(source_armature.name) and obj.name.endswith(RETARGET_ID):
+                helper_armature = obj
+                break
+
+        if helper_armature:
+            bpy.data.objects.remove(helper_armature, do_unlink=True)
+
+        # Create a new copy of the source armature
+        helper_armature = copy_rest_pose(context, source_armature)
+        if not helper_armature:  # Check if duplication failed
+            self.report({'WARNING'}, "Failed to copy source armature. It may be hidden or deleted.")
+            return {'CANCELLED'}
+        helper_armature.name = source_armature.name + RETARGET_ID
+
+        # Parent the copied armature to the source armature
+        bpy.ops.object.select_all(action='DESELECT')
+        helper_armature.select_set(True)
+        source_armature.select_set(True)
+        bpy.context.view_layer.objects.active = source_armature
+        bpy.ops.object.parent_set(type='OBJECT', keep_transform=True)
+
+        # Hide the copied armature from the viewport
+        helper_armature.hide_set(True)
+
+        bpy.ops.object.mode_set(mode='OBJECT')
+        bpy.context.view_layer.objects.active = target_armature
+        bpy.ops.object.mode_set(mode='EDIT')
+
+        bone_transforms = {}
+        inv_helper = helper_armature.matrix_world.inverted()
+        for bone in target_armature.data.edit_bones:
+            bone.select = False
+            head = inv_helper @ bone.head
+            tail = inv_helper @ bone.tail
+            roll = bone.roll
+            bone_transforms[bone.name] = (head.copy(), tail.copy(), roll)
+
+        bpy.ops.object.mode_set(mode='OBJECT')
+
+        # Temporarily unhide the helper armature to enter edit mode
+        helper_armature.hide_set(False)
+        bpy.context.view_layer.objects.active = helper_armature
+        bpy.ops.object.mode_set(mode='EDIT')
+
+        for mapping in props.bone_mappings:
+            source_bone_name = mapping.source_bone
+            target_bone_name = mapping.target_bone
+            if not source_bone_name or not target_bone_name:
+                continue
+
+            source_bone = helper_armature.data.edit_bones.get(source_bone_name)
+            if not source_bone:
+                continue
+
+            if target_bone_name not in bone_transforms:
+                continue
+            head, tail, roll = bone_transforms[target_bone_name]
+
+            new_bone_name = target_bone_name + RETARGET_ID
+            if new_bone_name in helper_armature.data.edit_bones:
+                helper_armature.data.edit_bones.remove(helper_armature.data.edit_bones[new_bone_name])
+            new_bone = helper_armature.data.edit_bones.new(new_bone_name)
+            new_bone.head = head
+            new_bone.tail = tail
+            new_bone.roll = roll
+            new_bone.parent = source_bone
+
+        bpy.ops.object.mode_set(mode='OBJECT')
+        helper_armature.hide_set(True)
+
+        bpy.context.view_layer.objects.active = target_armature
+        bpy.ops.object.mode_set(mode='POSE')
+
+        for bone in target_armature.pose.bones:
+            for c in [con for con in bone.constraints if RETARGET_ID in con.name]:
+                bone.constraints.remove(c)
+
+        # Find the corresponding target bone for the root bone
+        root_target_bone_name = None
+        for mapping in props.bone_mappings:
+            if mapping.source_bone == root_bone_name:
+                root_target_bone_name = mapping.target_bone
+                break
+
+        if not root_target_bone_name:
+            self.report({'WARNING'}, "Root bone is not properly mapped to a target bone")
+            return {'CANCELLED'}
+
+        for mapping in props.bone_mappings:
+            source_bone_name = mapping.source_bone
+            target_bone_name = mapping.target_bone
+            if not source_bone_name or not target_bone_name:
+                continue
+
+            target_pose_bone = target_armature.pose.bones.get(target_bone_name)
+            if not target_pose_bone:
+                continue
+
+            # Always add COPY_ROTATION constraint
+            rot_con = target_pose_bone.constraints.new('COPY_ROTATION')
+            rot_con.name = "Copy Rotation" + RETARGET_ID
+            rot_con.target = helper_armature
+            rot_con.subtarget = target_bone_name + RETARGET_ID
+            rot_con.owner_space = 'POSE'
+            rot_con.target_space = 'POSE'
+
+            # Add COPY_LOCATION constraint only for the root bone
+            if target_bone_name == root_target_bone_name:
+                loc_con = target_pose_bone.constraints.new('COPY_LOCATION')
+                loc_con.name = "Copy Location" + RETARGET_ID
+                loc_con.target = helper_armature
+                loc_con.subtarget = source_bone_name
+                #loc_con.owner_space = 'POSE'
+                #loc_con.target_space = 'POSE'
+
+        bpy.ops.object.mode_set(mode='OBJECT')
+
+        self.report({'INFO'}, "Retarget constraints applied successfully")
+        return {'FINISHED'}
+
+def copy_rest_pose(context, source_armature):
+    bpy.ops.object.select_all(action='DESELECT')
+    try:
+        source_armature.select_set(True)
+        bpy.context.view_layer.objects.active = source_armature
+        bpy.ops.object.duplicate()
+        helper_armature = bpy.context.object
+        return helper_armature
+    except RuntimeError as e:
+        print(f"Error duplicating source armature: {e}")
+        return None
+
+class UnbindConstraintsOperator(bpy.types.Operator):
+    bl_idname = "simple_retarget.unbind_constraints"
+    bl_label = "Unbind Constraints"
+    
+    def execute(self, context):
+        props = context.scene.simple_retarget
+        target_armature = props.target_armature
+
+        if not target_armature:
+            self.report({'WARNING'}, "No Target Armature selected")
+            return {'CANCELLED'}
+
+        bpy.ops.object.mode_set(mode='OBJECT')
+        bpy.context.view_layer.objects.active = target_armature
+        bpy.ops.object.mode_set(mode='POSE')
+
+        removed_count = 0
+        for bone in target_armature.pose.bones:
+            for con in [c for c in bone.constraints if RETARGET_ID in c.name]:
+                bone.constraints.remove(con)
+                removed_count += 1
+
+        if props.source_armature:
+            helper_name = props.source_armature.name + "_RM"
+            if helper_name in bpy.data.objects:
+                helper_obj = bpy.data.objects[helper_name]
+                bpy.data.objects.remove(helper_obj, do_unlink=True)
+                self.report({'INFO'}, f"Removed helper armature and {removed_count} constraints")
+            else:
+                self.report({'INFO'}, f"{removed_count} constraints removed")
+        else:
+            self.report({'INFO'}, f"{removed_count} constraints removed")
+
+        # Switch back to Object mode after unbinding constraints
+        bpy.ops.object.mode_set(mode='OBJECT')
+
+        return {'FINISHED'}
+
+class SetRootBoneOperator(bpy.types.Operator):
+    bl_idname = "simple_retarget.set_root_bone"
+    bl_label = "Set Root Bone"
+    bl_description = "Set the selected bone as the root bone"
+
+    def execute(self, context):
+        props = context.scene.simple_retarget
+        if props.active_bone_index < len(props.bone_mappings):
+            props.root_bone = props.bone_mappings[props.active_bone_index].source_bone
+        return {'FINISHED'}
+
+class BuildBoneListOperator(bpy.types.Operator):
+    bl_idname = "simple_retarget.build_bone_list"
+    bl_label = "Build Bone List"
+    bl_description = "Automatically populate source bones from the selected source armature"
+
+    def execute(self, context):
+        props = context.scene.simple_retarget
+        source_armature = props.source_armature
+        
+        if not source_armature or source_armature.type != 'ARMATURE':
+            self.report({'WARNING'}, "Select a valid Source Armature")
+            return {'CANCELLED'}
+        
+        props.bone_mappings.clear()
+        
+        for bone in source_armature.pose.bones:
+            new_mapping = props.bone_mappings.add()
+            new_mapping.source_bone = bone.name
+        
+        return {'FINISHED'}
+
+class CalculateScaleOperator(bpy.types.Operator):
+    bl_idname = "simple_retarget.calculate_scale"
+    bl_label = "Calculate Scale"
+    bl_description = "Scale the source rig to match the target rig"
+
+    def execute(self, context):
+        props = context.scene.simple_retarget
+        source_rig = props.source_armature
+        target_rig = props.target_armature
+
+        if not source_rig or not target_rig:
+            self.report({'WARNING'}, "Select both Source and Target Armatures")
+            return {'CANCELLED'}
+
+        source_rig.data.pose_position = 'REST'
+        target_rig.data.pose_position = 'REST'
+
+        def get_armature_dim(arm_obj):
+            highest, lowest = float('-inf'), float('inf')
+            for bone in arm_obj.pose.bones:
+                z_head = (arm_obj.matrix_world @ bone.head)[2]
+                z_tail = (arm_obj.matrix_world @ bone.tail)[2]
+                highest = max(highest, z_head, z_tail)
+                lowest = min(lowest, z_head, z_tail)
+            return highest - lowest
+
+        source_dim = get_armature_dim(source_rig)
+        target_dim = get_armature_dim(target_rig)
+        scale_factor = target_dim / source_dim
+        
+        if source_rig.animation_data and source_rig.animation_data.action:
+            for fcurve in source_rig.animation_data.action.fcurves:
+                if fcurve.data_path == "scale":
+                    source_rig.animation_data.action.fcurves.remove(fcurve)
+        
+        source_rig.scale *= scale_factor * 1 
+        source_rig.data.pose_position = 'POSE'
+        target_rig.data.pose_position = 'POSE'
+        
+        return {'FINISHED'}
+
+class AddBoneMappingOperator(bpy.types.Operator):
+    bl_idname = "simple_retarget.add_mapping"
+    bl_label = "Add Bone Mapping"
+    bl_description = "Add a new bone mapping entry"
+
+    def execute(self, context):
+        props = context.scene.simple_retarget
+        props.bone_mappings.add()
+        return {'FINISHED'}
+
+class RemoveBoneMappingOperator(bpy.types.Operator):
+    bl_idname = "simple_retarget.remove_mapping"
+    bl_label = "Remove Bone Mapping"
+    bl_description = "Remove the selected bone mapping"
+
+    def execute(self, context):
+        props = context.scene.simple_retarget
+        if props.bone_mappings:
+            props.bone_mappings.remove(props.active_bone_index)
+        return {'FINISHED'}
+
+# Helper function to get F-Curve for a specific bone and axis (renamed to avoid conflict)
+def get_rm_fcurve(armature, bone_name, rotation_type, axis):
+    if not armature.animation_data or not armature.animation_data.action:
+        return None
+    
+    action = armature.animation_data.action
+    if rotation_type == 'rotation_euler':
+        data_path = f'pose.bones["{bone_name}"].rotation_euler'
+        return action.fcurves.find(data_path, index=axis)
+    elif rotation_type == 'rotation_quaternion':
+        data_path = f'pose.bones["{bone_name}"].rotation_quaternion'
+        return action.fcurves.find(data_path, index=axis)
+    return None
+
+# Helper function to get the mapped source bone from the _RM rig
+def get_mapped_rm_source_bone(context, target_bone):
+    props = context.scene.simple_retarget
+    source_rig = props.source_armature
+    target_rig = props.target_armature
+    bone_mappings = props.bone_mappings
+    
+    if not (source_rig and target_rig and target_bone.id_data == target_rig):
+        return None, None
+        
+    # Find the source bone mapped to this target bone
+    source_bone_name = None
+    for mapping in bone_mappings:
+        if mapping.target_bone == target_bone.name:
+            source_bone_name = mapping.source_bone
+            break
+    
+    if not source_bone_name:
+        return None, None
+        
+    # Get the _RM rig
+    rm_rig_name = source_rig.name + RETARGET_ID
+    rm_rig = bpy.data.objects.get(rm_rig_name)
+    
+    if not rm_rig or rm_rig.type != 'ARMATURE':
+        return None, None
+        
+    # Return the _RM rig and the pose bone with the source bone name
+    return rm_rig, rm_rig.pose.bones.get(source_bone_name)
+
+# Update function for multiple selected bones
+def update_rotation_values(context, rotation_type, axis):
+    props = context.scene.simple_retarget_spacing
+    
+    # Get all selected pose bones
+    selected_bones = context.selected_pose_bones
+    if not selected_bones:
+        return
+
+    # Get current and previous values from UI properties
+    if rotation_type == 'rotation_euler':
+        current = getattr(props, f"rotation_{'xyz'[axis]}")
+        previous = getattr(props, f"prev_rotation_{'xyz'[axis]}")
+    elif rotation_type == 'rotation_quaternion':
+        if axis == 0:
+            current = props.rotation_w
+            previous = props.prev_rotation_w
+        else:
+            suffix = ['qx', 'qy', 'qz'][axis - 1]
+            current = getattr(props, f"rotation_{suffix}")
+            previous = getattr(props, f"prev_rotation_{suffix}")
+    else:
+        return
+
+    delta = current - previous  # Calculate delta change
+
+    # Apply to all selected bones' mapped source bones in _RM rig
+    for bone in selected_bones:
+        rm_rig, rm_source_bone = get_mapped_rm_source_bone(context, bone)
+        if rm_rig and rm_source_bone:
+            # Get the F-Curve for the specified rotation type and axis
+            fcurve = get_rm_fcurve(rm_rig, rm_source_bone.name, rotation_type, axis)
+            if fcurve:
+                # Move all keyframes along Y-axis by delta
+                for kp in fcurve.keyframe_points:
+                    kp.co[1] += delta
+                fcurve.update()
+
+    # Store the current value for next delta calculation
+    if rotation_type == 'rotation_euler':
+        setattr(props, f"prev_rotation_{'xyz'[axis]}", current)
+    elif rotation_type == 'rotation_quaternion':
+        if axis == 0:
+            props.prev_rotation_w = current
+        else:
+            setattr(props, f"prev_rotation_{suffix}", current)
+
+    # Refresh the view
+    if context.area:
+        context.area.tag_redraw()
+
+# Property group storing rotation values
+class SimpleRetargetSpacingProperties(bpy.types.PropertyGroup):
+    rotation_x: bpy.props.FloatProperty(
+        name="X Rotation",
+        step=0.1,
+        update=lambda self, context: update_rotation_values(context, 'rotation_euler', 0)
+    )
+    rotation_y: bpy.props.FloatProperty(
+        name="Y Rotation",
+        step=0.1,
+        update=lambda self, context: update_rotation_values(context, 'rotation_euler', 1)
+    )
+    rotation_z: bpy.props.FloatProperty(
+        name="Z Rotation",
+        step=0.1,
+        update=lambda self, context: update_rotation_values(context, 'rotation_euler', 2)
+    )
+    rotation_w: bpy.props.FloatProperty(
+        name="W Rotation",
+        step=0.1,
+        update=lambda self, context: update_rotation_values(context, 'rotation_quaternion', 0)
+    )
+    rotation_qx: bpy.props.FloatProperty(
+        name="X Quat",
+        step=0.1,
+        update=lambda self, context: update_rotation_values(context, 'rotation_quaternion', 1)
+    )
+    rotation_qy: bpy.props.FloatProperty(
+        name="Y Quat",
+        step=0.1,
+        update=lambda self, context: update_rotation_values(context, 'rotation_quaternion', 2)
+    )
+    rotation_qz: bpy.props.FloatProperty(
+        name="Z Quat",
+        step=0.1,
+        update=lambda self, context: update_rotation_values(context, 'rotation_quaternion', 3)
+    )
+    prev_rotation_x: bpy.props.FloatProperty()
+    prev_rotation_y: bpy.props.FloatProperty()
+    prev_rotation_z: bpy.props.FloatProperty()
+    prev_rotation_w: bpy.props.FloatProperty()
+    prev_rotation_qx: bpy.props.FloatProperty()
+    prev_rotation_qy: bpy.props.FloatProperty()
+    prev_rotation_qz: bpy.props.FloatProperty()
+
+# UI Panel
+class SIMPLERETARGET_PT_SpacingPanel(bpy.types.Panel):
+    bl_label = "Spacing"
+    bl_idname = "SIMPLERETARGET_PT_SpacingPanel"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'RealMotion Pro'
+    bl_order = 1
+    bl_parent_id = "VIEW3D_PT_simple_retarget"
 
     def draw(self, context):
         layout = self.layout
-        props = context.scene.rmp_retarget
+        props = context.scene.simple_retarget_spacing
 
-        # Armature Selection
-        col = layout.column(align=True)
-        col.prop(props, "source_armature", text="Source")
-        col.prop(props, "target_armature", text="Target")
+        if not context.selected_pose_bones:
+            layout.label(text="Select target rig bones")
+            return
 
-        if props.target_armature:
-            layout.prop_search(props, "root_bone", props.target_armature.data, "bones", text="Hips/Root")
+        # Check if any selected bone has a valid mapped source bone in _RM rig
+        has_valid_mapping = False
+        rotation_modes = set()
+        for bone in context.selected_pose_bones:
+            rm_rig, rm_source_bone = get_mapped_rm_source_bone(context, bone)
+            if rm_rig and rm_source_bone:
+                has_valid_mapping = True
+                rotation_modes.add(rm_source_bone.rotation_mode)
 
-        layout.separator()
+        if not has_valid_mapping:
+            layout.label(text="No valid bone mappings found in _RM rig.")
+            return
+
+        # Display controls based on rotation modes present
+        if 'QUATERNION' in rotation_modes:
+            layout.label(text="Adjust Quaternion F-Curves for mapped _RM bones:")
+            layout.prop(props, "rotation_w")
+            layout.prop(props, "rotation_qx")
+            layout.prop(props, "rotation_qy")
+            layout.prop(props, "rotation_qz")
         
-        # Action Buttons
-        row = layout.row(align=True)
-        row.operator("rmp.calculate_scale", icon='ARROW_LEFTRIGHT', text="Match Scale")
-        row.operator("rmp.build_bone_list", icon='FILE_REFRESH', text="Build List")
+        if len(rotation_modes) > 1 or 'QUATERNION' not in rotation_modes:
+            layout.label(text="Adjust Euler F-Curves for mapped _RM bones:")
+            layout.prop(props, "rotation_x")
+            layout.prop(props, "rotation_y")
+            layout.prop(props, "rotation_z")
 
-        # Mapping List
-        layout.template_list("RMP_UL_BoneList", "", props, "bone_mappings", props, "active_bone_index")
+def get_last_keyframe(obj):
+    if obj and obj.animation_data and obj.animation_data.action:
+        return max((kp.co.x for fcurve in obj.animation_data.action.fcurves for kp in fcurve.keyframe_points), default=1)
+    return 1
 
-        # Utility Buttons
-        row = layout.row(align=True)
-        row.operator("rmp.highlight_bone", icon='VIEWZOOM', text="Find Selected")
-        row.operator("rmp.load_preset", icon='IMPORT', text="Load")
-        row.operator("rmp.save_preset", icon='EXPORT', text="Save")
+def bake_animation():
+    props = bpy.context.scene.simple_retarget
+    source_armature = props.source_armature
+    target_armature = props.target_armature
+    
+    if not source_armature or not target_armature:
+        print("Source or Target armature not set!")
+        return
+    
+    bpy.ops.object.mode_set(mode='OBJECT')
+    bpy.context.view_layer.objects.active = source_armature
+    bpy.ops.object.mode_set(mode='POSE')
+    bpy.ops.pose.select_all(action='SELECT')
+    
+    last_frame = get_last_keyframe(source_armature)
+    
+    bpy.ops.object.mode_set(mode='OBJECT')
+    bpy.context.view_layer.objects.active = target_armature
+    bpy.ops.object.mode_set(mode='POSE')
+    
+    # Deselect all bones first
+    bpy.ops.pose.select_all(action='DESELECT')
+    
+    # Select only bones with constraints ending in "_RM"
+    for bone in target_armature.pose.bones:
+        for constraint in bone.constraints:
+            if constraint.name.endswith("_RM"):
+                bone.bone.select = True
+                break  # Select the bone if it has at least one constraint ending with "_RM"
+    
+    # Bake only the selected bones
+    bpy.ops.nla.bake(frame_start=1, frame_end=int(last_frame),
+                      only_selected=True, visual_keying=True, 
+                      clear_constraints=True, clean_curves=True)
+    
+    # Rename the baked action
+    if target_armature.animation_data and target_armature.animation_data.action:
+        baked_action = target_armature.animation_data.action
+        new_action_name = f"{source_armature.name}_Bake"
+        baked_action.name = new_action_name
+        print(f"Renamed baked action to: {new_action_name}")
+    
+    # Remove only constraints that end with "_RM"
+    for bone in target_armature.pose.bones:
+        for constraint in bone.constraints:
+            if constraint.name.endswith("_RM"):
+                bone.constraints.remove(constraint)
+    
+    bpy.ops.object.mode_set(mode='OBJECT')
+    
+    for obj in bpy.data.objects:
+        if obj.type == 'ARMATURE' and obj.name.endswith("_RM"):
+            bpy.data.objects.remove(obj, do_unlink=True)
+    
+    print("Baking and cleanup complete!")
 
-        layout.separator()
-        
-        # Execution
-        col = layout.column(align=True)
-        col.scale_y = 1.3
-        col.operator("rmp.bind_constraints", icon='CONSTRAINT', text="Bind Rig")
+class SIMPLE_RETARGET_PT_BakePanel(bpy.types.Panel):
+    bl_label = "Bake Animation"
+    bl_idname = "SIMPLE_RETARGET_PT_BakePanel"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "RealMotion Pro"
+    bl_order = 2
+    bl_parent_id = "VIEW3D_PT_simple_retarget"
 
-        layout.separator()
-        
-        # Bake Box
-        box = layout.box()
-        box.label(text="Final Bake", icon='REC')
-        box.prop(props, "bake_clear_constraints", text="Auto-Remove Bindings")
-        box.operator("rmp.bake_animation", icon='ACTION', text="Bake to Keyframes")
+    def draw(self, context):
+        layout = self.layout
+        layout.operator("simple_retarget.bake_animation", text="Bake")
 
-# --- REGISTER ---
+class SIMPLE_RETARGET_OT_BakeOperator(bpy.types.Operator):
+    bl_idname = "simple_retarget.bake_animation"
+    bl_label = "Bake Animation"
+    bl_description = "Bakes animation from source to target rig"
 
-classes = (
-    BoneMappingItem, RetargetProperties,
-    RMP_OT_BuildBoneList, RMP_OT_CalculateScale,
-    RMP_OT_HighlightBone, RMP_OT_BindConstraints,
-    RMP_OT_SavePreset, RMP_OT_LoadPreset,
-    RMP_OT_BakeAnimation,
-    RMP_UL_BoneList, RMP_PT_MainPanel,
-)
+    def execute(self, context):
+        bake_animation()
+        return {'FINISHED'}
+
+class SimpleRetargetImportFbx(Operator, ImportHelper):
+    """Import mixamo FBX file, reset pose transforms, and apply object transforms for mixamo rigs"""
+    bl_idname = "simple_retarget.import_fbx"
+    bl_label = "Import FBX"
+    bl_options = {'PRESET', 'UNDO'}
+
+    # ImportHelper mixin class uses this
+    filename_ext = ".fbx"
+
+    filter_glob: StringProperty(
+        default="*.fbx",
+        options={'HIDDEN'},
+        maxlen=255,
+    )
+
+    def execute(self, context):
+        # Import the FBX file
+        bpy.ops.import_scene.fbx(filepath=self.filepath)
+
+        # Get the imported object (assuming it's the active object)
+        imported_object = context.active_object
+
+        if imported_object and imported_object.type == 'ARMATURE':
+            # Switch to Pose Mode
+            bpy.ops.object.mode_set(mode='POSE')
+
+            # Reset location, rotation, and scale in Pose Mode
+            bpy.ops.pose.loc_clear()
+            bpy.ops.pose.rot_clear()
+            bpy.ops.pose.scale_clear()
+
+            # Switch back to Object Mode
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+            # Scale animation curves to match the object's scale
+            action = imported_object.animation_data.action
+            scale = imported_object.scale
+            for curve in action.fcurves:
+                if curve.data_path.endswith('location'):
+                    for kf in curve.keyframe_points:
+                        if curve.array_index == 0:  # X axis
+                            kf.co.y *= scale.x
+                        elif curve.array_index == 1:  # Y axis
+                            kf.co.y *= scale.y
+                        elif curve.array_index == 2:  # Z axis
+                            kf.co.y *= scale.z
+
+            # Apply the transform in Object Mode
+            bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+        else:
+            self.report({'WARNING'}, "No armature found or selected. Transform not applied.")
+
+        return {'FINISHED'}
+
+def menu_func_import(self, context):
+    self.layout.operator(SimpleRetargetImportFbx.bl_idname, text="RealMotionPro FBX Import (.fbx)")
+
+classes = [
+    BoneMappingItem,
+    RetargetProperties,
+    SIMPLE_RETARGET_UL_BoneMappingList,
+    SavePresetOperator,
+    LoadPresetOperator,
+    SIMPLE_RETARGET_OT_HighlightBone,
+    SimpleRetargetPanel,
+    BindConstraintsOperator,
+    UnbindConstraintsOperator,
+    SetRootBoneOperator,
+    BuildBoneListOperator,
+    CalculateScaleOperator,
+    AddBoneMappingOperator,
+    RemoveBoneMappingOperator,
+    SimpleRetargetSpacingProperties,
+    SIMPLERETARGET_PT_SpacingPanel,
+    SIMPLE_RETARGET_PT_BakePanel,
+    SIMPLE_RETARGET_OT_BakeOperator,
+    SimpleRetargetImportFbx,
+]
 
 def register():
-    for cls in classes: bpy.utils.register_class(cls)
-    bpy.types.Scene.rmp_retarget = PointerProperty(type=RetargetProperties)
+    for cls in classes:
+        bpy.utils.register_class(cls)
+    bpy.types.Scene.simple_retarget = bpy.props.PointerProperty(type=RetargetProperties)
+    bpy.types.Scene.simple_retarget_spacing = bpy.props.PointerProperty(type=SimpleRetargetSpacingProperties)
+    bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
 
 def unregister():
-    for cls in reversed(classes): bpy.utils.unregister_class(cls)
-    del bpy.types.Scene.rmp_retarget
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)
+    del bpy.types.Scene.simple_retarget
+    del bpy.types.Scene.simple_retarget_spacing
+    bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
 
 if __name__ == "__main__":
     register()
