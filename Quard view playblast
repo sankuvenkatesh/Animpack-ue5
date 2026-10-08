@@ -19,7 +19,7 @@ from bpy.props import (
 bl_info = {
     "name": "Playblast Quad View",
     "author": "Venkatesh sanku",
-    "version": (1, 4, 1),
+    "version": (1, 4, 2),
     "blender": (5, 1, 0),
     "location": "View3D > Sidebar > Playblast",
     "description": "Playblast review screenshot and video sequences for viewport - quadview",
@@ -510,11 +510,6 @@ class QP_OT_screenshot_quadview_anim(bpy.types.Operator):
         self.frame = self.start
 
         # Sequential output index.
-        #
-        # IMPORTANT:
-        # This must NOT use the original scene frame number because
-        # frame_step can skip frames. Sequential numbering guarantees
-        # FFMPEG and VSE can read the image sequence correctly.
         # --------------------------------------------------------------
 
         self.capture_index = 1
@@ -1125,7 +1120,7 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
                 )
 
         # --------------------------------------------------------------
-        # Blender 5.1 VSE.
+        # Blender VSE.
         # --------------------------------------------------------------
 
         return self.encode_with_vse(
@@ -1275,7 +1270,7 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
                 scene.sequence_editor_create()
             seq = scene.sequence_editor
 
-            # 3. Compatibility: get strips collection (Blender 5.x uses .strips, older uses .sequences)
+            # 3. Compatibility: get strips collection
             if hasattr(seq, "strips"):
                 strips_coll = seq.strips
             else:
@@ -1296,7 +1291,7 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
             if width is None or height is None:
                 raise RuntimeError("Unable to determine image resolution")
 
-            # 5. Create image strip (use compatible collection)
+            # 5. Create image strip
             strip = strips_coll.new_image(
                 name="QuadView",
                 filepath=first_image,
@@ -1355,9 +1350,9 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
             except Exception:
                 pass
 
-            # 12. Render VSE animation
+            # 12. Render VSE animation (FIX: no 'sequencer' argument)
             print("Playblast Quad View: Rendering VSE video...")
-            result = bpy.ops.render.render(animation=True, sequencer=True)
+            result = bpy.ops.render.render(animation=True)
             if 'FINISHED' not in result:
                 raise RuntimeError("VSE render returned: {}".format(result))
 
