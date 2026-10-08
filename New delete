@@ -1,141 +1,53 @@
+"""
+Keyframe Tools Interval  -  v3.1.0  (Blender 5.1+)
+
+Delete or bake keyframes at an interval on
+  * selected bones   (Pose Mode)   : position / rotation / scale + numeric bone custom properties
+  * selected objects (Object Mode) : position / rotation / scale
+
+What changed in 3.1.0 (why Bake / Delete could silently do nothing):
+  * Keys are now edited directly on the F-Curves of the action slot that is
+    assigned to the object (Blender 4.4+/5.x slotted actions) instead of making
+    tens of thousands of keyframe_insert()/keyframe_delete() calls whose errors
+    were swallowed by "except: pass".
+  * Bake samples ALL frames first and writes the keys afterwards, so keys that
+    were just added can no longer bend the curve you are still sampling.
+  * Pose Mode only touches the selected bones (not the armature object itself),
+    all armatures in Pose Mode are handled, hidden bones are ignored.
+  * "All Channels" really means everything (custom properties used to stay off).
+  * Real errors / counts are reported in the status bar and the System Console.
+  * The timer + stored preview properties (stale-pointer hazard) are gone; the
+    preview is computed while drawing.
+"""
+
 bl_info = {
     "name": "Keyframe Tools Interval",
     "author": "Venkatesh Sanku",
-    "version": (3, 0, 0),
+    "version": (3, 1, 0),
     "blender": (5, 1, 0),
     "location": "View3D > Sidebar > Item",
     "description": "Delete or bake keyframes by interval on transforms and bone custom properties",
     "category": "Animation",
 }
 
+import traceback
+from itertools import islice
+
 import bpy
+from bpy.props import BoolProperty, IntProperty, PointerProperty
 from bpy.types import Operator, Panel, PropertyGroup
 
 
-# ============================================================================
-# PROPERTIES
-# ============================================================================
-
-class DelKeyProperties(PropertyGroup):
-
-    start_frame: bpy.props.IntProperty(
-        name="Start Frame",
-        default=1,
-        min=0,
-        update=lambda self, ctx: self._schedule_preview(ctx)
-    )
-
-    end_frame: bpy.props.IntProperty(
-        name="End Frame",
-        default=250,
-        min=1,
-        update=lambda self, ctx: self._schedule_preview(ctx)
-    )
-
-    interval: bpy.props.IntProperty(
-        name="Interval",
-        default=0,
-        min=0,
-        max=500,
-        update=lambda self, ctx: self._schedule_preview(ctx)
-    )
-
-    inverse_interval: bpy.props.BoolProperty(
-        name="Inverse Interval",
-        default=False,
-        update=lambda self, ctx: self._schedule_preview(ctx)
-    )
-
-    pos: bpy.props.BoolProperty(
-        name="Position",
-        default=True
-    )
-
-    rot: bpy.props.BoolProperty(
-        name="Rotation",
-        default=True
-    )
-
-    scl: bpy.props.BoolProperty(
-        name="Scale",
-        default=True
-    )
-
-    custom_props: bpy.props.BoolProperty(
-        name="Custom Properties",
-        description="Bone custom properties only",
-        default=False
-    )
-
-    all_channels: bpy.props.BoolProperty(
-        name="All Channels",
-        default=True,
-        update=lambda self, ctx: self._all_channels_update(ctx)
-    )
-
-    preview_keyframes: bpy.props.StringProperty(
-        default=""
-    )
-
-    preview_count: bpy.props.IntProperty(
-        default=0
-    )
-
-    _preview_timer_pending = False
-
-    def _all_channels_update(self, context):
-        if self.all_channels:
-            self.pos = True
-            self.rot = True
-            self.scl = True
-            self.custom_props = True
-
-        self._schedule_preview(context)
-
-    def _schedule_preview(self, context):
-        """
-        Schedule a preview update without creating a large number
-        of simultaneous timers while the user is dragging properties.
-        """
-
-        if self._preview_timer_pending:
-            return
-
-        self._preview_timer_pending = True
-
-        props = self
-
-        def callback():
-            props._preview_timer_pending = False
-
-            try:
-                update_live_preview(
-                    bpy.context.scene,
-                    props
-                )
-            except Exception:
-                pass
-
-            return None
-
-        try:
-            bpy.app.timers.register(
-                callback,
-                first_interval=0.05
-            )
-        except Exception:
-            self._preview_timer_pending = False
+ROTATION_PROPS = ("rotation_euler", "rotation_quaternion", "rotation_axis_angle")
+OBJECT_GROUP = "Object Transforms"
 
 
 # ============================================================================
-# FRAME / INTERVAL UTILITIES
+# FRAME / INTERVAL LOGIC  (pure python, touches no Blender data)
 # ============================================================================
 
 def get_frame_range(props):
-    """
-    End frame is treated as exclusive, matching the original addon.
-    """
-
+    """End frame is exclusive, like in the original add-on."""
     start = int(props.start_frame)
     end = int(props.end_frame)
 
@@ -145,706 +57,902 @@ def get_frame_range(props):
     return start, end
 
 
-def build_target_frames(props):
+def iter_target_frames(start, end, interval, inverse):
     """
-    Build the exact frames affected by Delete/Bake.
-
-    interval = 0:
-        Normal mode  -> every frame
-        Inverse mode -> no frames
-
-    interval > 0:
-        Example:
-            start = 1
-            interval = 2
-
-        key frames:
-            1, 4, 7, 10...
-
-        Normal:
-            everything EXCEPT those frames
-
-        Inverse:
-            only those frames
+    interval = 0 : normal -> every frame            | inverse -> no frame
+    interval = n : the frames start, start+(n+1), start+2(n+1) ... are "kept"
+                   normal  -> every OTHER frame (the in-betweens)
+                   inverse -> only the kept frames
     """
-
-    frame_range = get_frame_range(props)
-
-    if frame_range is None:
-        return []
-
-    start, end = frame_range
-    interval = int(props.interval)
-
-    if interval == 0:
-        if props.inverse_interval:
-            return []
-
-        return list(range(start, end))
+    if interval <= 0:
+        if not inverse:
+            yield from range(start, end)
+        return
 
     step = interval + 1
 
-    key_frames = set(range(start, end, step))
-
-    if props.inverse_interval:
-        return sorted(key_frames)
-
-    return [
-        frame
-        for frame in range(start, end)
-        if frame not in key_frames
-    ]
-
-
-def frame_allowed(frame, interval, key_frames, inverse):
-    """
-    Kept as a utility for compatibility with the original logic.
-    """
-
-    if interval == 0:
-        return not inverse
-
     if inverse:
-        return frame in key_frames
+        yield from range(start, end, step)
+    else:
+        for frame in range(start, end):
+            if (frame - start) % step:
+                yield frame
 
-    return frame not in key_frames
+
+def count_target_frames(start, end, interval, inverse):
+    total = end - start
+
+    if total <= 0:
+        return 0
+
+    if interval <= 0:
+        return 0 if inverse else total
+
+    kept = len(range(start, end, interval + 1))
+
+    return kept if inverse else total - kept
 
 
-# ============================================================================
-# LIVE PREVIEW
-# ============================================================================
-
-def update_live_preview(scene, props):
-
+def build_target_frames(props):
     frame_range = get_frame_range(props)
 
     if frame_range is None:
-        props.preview_keyframes = "Invalid frame range"
-        props.preview_count = 0
-        return
-
-    frames = build_target_frames(props)
-
-    props.preview_keyframes = ", ".join(
-        str(f) for f in frames[:15]
-    )
-
-    if len(frames) > 15:
-        props.preview_keyframes += "..."
-
-    props.preview_count = len(frames)
-
-
-# ============================================================================
-# ANIMATION HELPERS
-# ============================================================================
-
-def get_selected_pose_bones(obj):
-    """
-    Return selected pose bones belonging to this specific armature.
-
-    This avoids using context.selected_pose_bones, which can become
-    incorrect when multiple armatures are selected.
-    """
-
-    if obj.type != 'ARMATURE':
         return []
 
-    result = []
+    return list(
+        iter_target_frames(
+            frame_range[0],
+            frame_range[1],
+            int(props.interval),
+            bool(props.inverse_interval),
+        )
+    )
+
+
+# ============================================================================
+# PROPERTIES
+# ============================================================================
+
+def _all_channels_update(self, context):
+    # Keep the (greyed-out) individual toggles in sync with "All Channels".
+    if self.all_channels:
+        self.pos = True
+        self.rot = True
+        self.scl = True
+        self.custom_props = True
+
+
+class DelKeyProperties(PropertyGroup):
+
+    start_frame: IntProperty(
+        name="Start Frame",
+        description="First frame to process",
+        default=1,
+    )
+
+    end_frame: IntProperty(
+        name="End Frame",
+        description="Frame where processing stops (this frame itself is NOT included)",
+        default=250,
+    )
+
+    interval: IntProperty(
+        name="Interval",
+        description=(
+            "Number of frames between the frames that are kept "
+            "(0 = process every frame)"
+        ),
+        default=0,
+        min=0,
+        max=500,
+    )
+
+    inverse_interval: BoolProperty(
+        name="Inverse Interval",
+        description="Process only the kept frames instead of the in-between frames",
+        default=False,
+    )
+
+    pos: BoolProperty(name="Position", default=True)
+    rot: BoolProperty(name="Rotation", default=True)
+    scl: BoolProperty(name="Scale", default=True)
+
+    custom_props: BoolProperty(
+        name="Custom Properties",
+        description="Bone custom properties (numeric ones only)",
+        default=True,
+    )
+
+    all_channels: BoolProperty(
+        name="All Channels",
+        description="Position, rotation, scale and bone custom properties",
+        default=True,
+        update=_all_channels_update,
+    )
+
+
+def channel_flags(props):
+    """(use_pos, use_rot, use_scl, use_custom) - 'All Channels' overrides the rest."""
+    if props.all_channels:
+        return True, True, True, True
+
+    return (
+        bool(props.pos),
+        bool(props.rot),
+        bool(props.scl),
+        bool(props.custom_props),
+    )
+
+
+# ============================================================================
+# TARGETS  (what will be affected)
+# ============================================================================
+
+class Target:
+    """One animated thing: an object, or a pose bone of an armature object."""
+
+    __slots__ = ("owner", "struct", "group", "is_bone")
+
+    def __init__(self, owner, struct, group, is_bone):
+        self.owner = owner      # the Object that owns the animation data
+        self.struct = struct    # the Object itself, or its PoseBone
+        self.group = group      # F-Curve group name for newly created curves
+        self.is_bone = is_bone
+
+
+def bone_is_visible(bone):
+    visible = getattr(bone, "is_visible", None)
+
+    if visible is not None:
+        return bool(visible)
+
+    return not bone.hide
+
+
+def selected_pose_bones(obj):
+    pose = getattr(obj, "pose", None)
+
+    if obj.type != 'ARMATURE' or pose is None:
+        return []
+
+    return [
+        pb for pb in pose.bones
+        if pb.bone.select and bone_is_visible(pb.bone)
+    ]
+
+
+def collect_targets(context):
+    """
+    Pose Mode   -> selected bones of every armature that is in Pose Mode
+    Object Mode -> selected objects
+    """
+    targets = []
+
+    if context.mode == 'POSE':
+        objects = list(getattr(context, "objects_in_mode", None) or [])
+
+        if not objects and context.object is not None:
+            objects = [context.object]
+
+        seen = set()
+
+        for obj in objects:
+            if obj.type != 'ARMATURE':
+                continue
+
+            key = obj.as_pointer()
+
+            if key in seen:
+                continue
+
+            seen.add(key)
+
+            for pb in selected_pose_bones(obj):
+                targets.append(Target(obj, pb, pb.name, True))
+
+    else:
+        for obj in context.selected_objects:
+            targets.append(Target(obj, obj, OBJECT_GROUP, False))
+
+    return targets
+
+
+def group_by_owner(targets):
+    groups = {}
+
+    for target in targets:
+        key = target.owner.as_pointer()
+
+        if key not in groups:
+            groups[key] = (target.owner, [])
+
+        groups[key][1].append(target)
+
+    return list(groups.values())
+
+
+def is_editable(owner):
+    return owner.library is None or owner.override_library is not None
+
+
+def filter_usable_targets(targets, problems):
+    """Drop owners we must not touch (linked data, NLA tweak mode)."""
+    usable = []
+    rejected = set()
+
+    for target in targets:
+        owner = target.owner
+        key = owner.as_pointer()
+
+        if key in rejected:
+            continue
+
+        reason = None
+
+        if not is_editable(owner):
+            reason = "linked data is read-only"
+        else:
+            anim = owner.animation_data
+
+            if anim is not None and getattr(anim, "use_tweak_mode", False):
+                reason = "NLA tweak mode is on (leave it first)"
+
+        if reason:
+            rejected.add(key)
+            problems.append(f"{owner.name}: skipped, {reason}")
+            continue
+
+        usable.append(target)
+
+    return usable
+
+
+def describe_targets(context):
+    if context.mode == 'POSE':
+        count = len(collect_targets(context))
+
+        if count:
+            return f"Selected bones: {count}"
+
+        return "No bones selected (Pose Mode)"
+
+    if context.mode == 'OBJECT':
+        count = len(context.selected_objects)
+
+        if count:
+            return f"Selected objects: {count}"
+
+        return "No objects selected"
+
+    return "Switch to Object or Pose Mode"
+
+
+def nothing_selected_message(context):
+    if context.mode == 'POSE':
+        return "No bones selected - select bones in Pose Mode first"
+
+    return "No objects selected"
+
+
+# ============================================================================
+# ANIMATION DATA HELPERS  (slotted actions: Blender 4.4+ / 5.x)
+# ============================================================================
+
+def find_channelbag(anim, action):
+    """Channelbag (the F-Curves) of the slot assigned to this animation data."""
+    slot = getattr(anim, "action_slot", None)
+
+    if slot is None:
+        return None
 
     try:
-        for pb in obj.pose.bones:
-            if pb.bone.select:
-                result.append(pb)
-    except Exception:
+        from bpy_extras import anim_utils
+        return anim_utils.action_get_channelbag_for_slot(action, slot)
+    except (ImportError, AttributeError):
         pass
 
-    return result
+    for layer in action.layers:
+        for strip in layer.strips:
+            if strip.type == 'KEYFRAME':
+                bag = strip.channelbag(slot)
+
+                if bag is not None:
+                    return bag
+
+    return None
 
 
-def get_rotation_path(id_data):
-    """
-    Return the correct rotation RNA path.
-    """
+def get_fcurves(owner):
+    """(list of F-Curves, remove function) for the action assigned to `owner`."""
+    anim = owner.animation_data
+    action = anim.action if anim is not None else None
 
-    if id_data.rotation_mode == 'QUATERNION':
+    if action is None:
+        return [], None
+
+    if hasattr(action, "layers"):               # Blender 4.4+ / 5.x
+        bag = find_channelbag(anim, action)
+
+        if bag is None:
+            return [], None
+
+        return list(bag.fcurves), bag.fcurves.remove
+
+    return list(action.fcurves), action.fcurves.remove    # Blender <= 4.3
+
+
+def escape_identifier(name):
+    fn = getattr(bpy.utils, "escape_identifier", None)
+
+    if fn is not None:
+        return fn(name)
+
+    return name.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def rotation_prop(struct):
+    mode = struct.rotation_mode
+
+    if mode == 'QUATERNION':
         return "rotation_quaternion"
 
-    if id_data.rotation_mode == 'AXIS_ANGLE':
+    if mode == 'AXIS_ANGLE':
         return "rotation_axis_angle"
 
     return "rotation_euler"
 
 
-def get_bone_custom_property_path(pb, key):
-    """
-    Build a reliable custom-property path.
+# ============================================================================
+# DELETE
+# ============================================================================
 
-    PoseBone.path_from_id() gives us the correct bone path,
-    including Blender's required escaping for the bone name.
-    """
+def remove_keys_at_frames(fcurve, frame_set):
+    """Remove the keyframes that sit exactly on one of `frame_set`."""
+    points = fcurve.keyframe_points
+    count = len(points)
 
-    return pb.path_from_id() + '["{}"]'.format(
-        str(key).replace("\\", "\\\\").replace('"', '\\"')
+    if count == 0:
+        return 0
+
+    co = [0.0] * (count * 2)
+    points.foreach_get("co", co)
+
+    hits = []
+
+    for i in range(count):
+        x = co[i * 2]
+        frame = round(x)
+
+        if frame in frame_set and abs(x - frame) < 1e-3:
+            hits.append(i)
+
+    if not hits:
+        return 0
+
+    for i in reversed(hits):
+        points.remove(points[i], fast=True)
+
+    fcurve.update()
+
+    return len(hits)
+
+
+def delete_keys_for_owner(owner, targets, flags, frame_set):
+    """Returns (keyframes removed, F-Curves changed)."""
+    use_pos, use_rot, use_scl, use_custom = flags
+
+    fcurves, remove_fcurve = get_fcurves(owner)
+
+    if not fcurves:
+        return 0, 0
+
+    exact_paths = set()
+    custom_prefixes = []
+
+    for target in targets:
+        struct = target.struct
+
+        if use_pos:
+            exact_paths.add(struct.path_from_id("location"))
+
+        if use_rot:
+            exact_paths.update(struct.path_from_id(p) for p in ROTATION_PROPS)
+
+        if use_scl:
+            exact_paths.add(struct.path_from_id("scale"))
+
+        if use_custom and target.is_bone:
+            custom_prefixes.append(struct.path_from_id() + '["')
+
+    custom_prefixes = tuple(custom_prefixes)
+
+    removed = 0
+    changed = 0
+    emptied = []
+
+    for fcurve in fcurves:
+        path = fcurve.data_path
+
+        wanted = path in exact_paths or (
+            custom_prefixes and path.startswith(custom_prefixes)
+        )
+
+        if not wanted or fcurve.lock:
+            continue
+
+        count = remove_keys_at_frames(fcurve, frame_set)
+
+        if count:
+            removed += count
+            changed += 1
+
+            if len(fcurve.keyframe_points) == 0:
+                emptied.append(fcurve)
+
+    # Same as Blender: an F-Curve without keys is removed.
+    for fcurve in emptied:
+        remove_fcurve(fcurve)
+
+    return removed, changed
+
+
+# ============================================================================
+# BAKE
+# ============================================================================
+
+def custom_prop_info(struct, key):
+    """(count, is_array) for numeric custom properties, (0, False) otherwise."""
+    try:
+        value = struct[key]
+    except Exception:
+        return 0, False
+
+    if isinstance(value, (bool, int, float)):
+        return 1, False
+
+    if isinstance(value, (str, bytes)) or hasattr(value, "keys"):
+        return 0, False
+
+    try:
+        count = len(value)
+
+        if count and all(isinstance(v, (bool, int, float)) for v in value):
+            return count, True
+    except TypeError:
+        pass
+
+    return 0, False
+
+
+class BakeChannel:
+    """One property (e.g. a bone's location) that is sampled and then keyed."""
+
+    __slots__ = (
+        "owner", "struct", "kind", "key", "data_path",
+        "group", "count", "is_array", "values",
     )
 
+    def __init__(self, owner, struct, kind, key, data_path, group, count, is_array=True):
+        self.owner = owner
+        self.struct = struct
+        self.kind = kind            # "rna" or "custom"
+        self.key = key
+        self.data_path = data_path
+        self.group = group
+        self.count = count
+        self.is_array = is_array
+        self.values = []            # one list of `count` floats per sampled frame
 
-def has_bone_custom_property(pb, key):
+    def read(self):
+        if self.kind == "rna":
+            return list(getattr(self.struct, self.key))
+
+        value = self.struct[self.key]
+
+        if self.is_array:
+            return [float(v) for v in value]
+
+        return [float(value)]
+
+
+def build_bake_channels(targets, flags):
+    use_pos, use_rot, use_scl, use_custom = flags
+    channels = []
+
+    for target in targets:
+        struct = target.struct
+
+        rna_props = []
+
+        if use_pos:
+            rna_props.append("location")
+
+        if use_rot:
+            rna_props.append(rotation_prop(struct))
+
+        if use_scl:
+            rna_props.append("scale")
+
+        for prop in rna_props:
+            channels.append(
+                BakeChannel(
+                    target.owner, struct, "rna", prop,
+                    struct.path_from_id(prop), target.group,
+                    len(getattr(struct, prop)),
+                )
+            )
+
+        if use_custom and target.is_bone:
+            base = struct.path_from_id()
+
+            for key in struct.keys():
+                if key == "_RNA_UI":
+                    continue
+
+                count, is_array = custom_prop_info(struct, key)
+
+                if not count:
+                    continue
+
+                channels.append(
+                    BakeChannel(
+                        target.owner, struct, "custom", key,
+                        base + '["{}"]'.format(escape_identifier(key)),
+                        target.group, count, is_array,
+                    )
+                )
+
+    return channels
+
+
+def ensure_slot(owner, anim, action):
+    slot = anim.action_slot
+
+    if slot is not None:
+        return slot
+
+    wanted = "OB" + owner.name
+
+    for candidate in action.slots:
+        if getattr(candidate, "identifier", None) == wanted:
+            slot = candidate
+            break
+
+    if slot is None:
+        slot = action.slots.new(id_type='OBJECT', name=owner.name)
+
+    anim.action_slot = slot
+
+    return slot
+
+
+def ensure_channelbag(action, slot):
     try:
-        return key in pb.keys() and key != "_RNA_UI"
-    except Exception:
-        return False
+        from bpy_extras import anim_utils
+        ensure = getattr(anim_utils, "action_ensure_channelbag_for_slot", None)
+
+        if ensure is not None:
+            return ensure(action, slot)
+    except ImportError:
+        pass
+
+    layer = action.layers[0] if len(action.layers) else action.layers.new("Layer")
+    strip = layer.strips[0] if len(layer.strips) else layer.strips.new(type='KEYFRAME')
+
+    return strip.channelbag(slot, ensure=True)
 
 
-def get_bone_custom_properties(pb):
-    """
-    Return user-created custom properties only.
-    """
+class AnimStore:
+    """Finds or creates the F-Curves of one object (slotted-action aware)."""
 
-    try:
-        return [
-            key
-            for key in pb.keys()
-            if key != "_RNA_UI"
-        ]
-    except Exception:
-        return []
+    def __init__(self, owner):
+        self.owner = owner
 
+        anim = owner.animation_data
+
+        if anim is None:
+            anim = owner.animation_data_create()
+
+        action = anim.action
+
+        if action is None:
+            action = bpy.data.actions.new(owner.name + "Action")
+            anim.action = action
+
+        self.action = action
+        self.bag = None
+
+        if hasattr(action, "layers"):           # Blender 4.4+ / 5.x
+            slot = ensure_slot(owner, anim, action)
+            self.bag = ensure_channelbag(action, slot)
+
+    def fcurve(self, data_path, index, group):
+        if self.bag is not None:
+            return self.bag.fcurves.ensure(
+                data_path, index=index, group_name=group
+            )
+
+        fcurve = self.action.fcurves.find(data_path, index=index)    # <= 4.3
+
+        if fcurve is None:
+            fcurve = self.action.fcurves.new(
+                data_path, index=index, action_group=group
+            )
+
+        return fcurve
+
+
+def write_channels(channels, frames):
+    """Insert the sampled values. Returns (keys written, curves, locked, errors)."""
+    stores = {}
+    written = 0
+    curves = 0
+    locked = 0
+    errors = []
+
+    for channel in channels:
+        try:
+            pointer = channel.owner.as_pointer()
+            store = stores.get(pointer)
+
+            if store is None:
+                store = AnimStore(channel.owner)
+                stores[pointer] = store
+
+            for index in range(channel.count):
+                fcurve = store.fcurve(channel.data_path, index, channel.group)
+
+                if fcurve.lock:
+                    locked += 1
+                    continue
+
+                points = fcurve.keyframe_points
+
+                for frame, values in zip(frames, channel.values):
+                    points.insert(frame, values[index], options={'FAST'})
+
+                fcurve.update()
+
+                written += len(frames)
+                curves += 1
+
+        except Exception as exc:
+            traceback.print_exc()
+            errors.append(f"{channel.owner.name}: {exc}")
+
+    return written, curves, locked, errors, [s.owner for s in stores.values()]
+
+
+# ============================================================================
+# UI HELPERS
+# ============================================================================
 
 def refresh_animation_editors(context):
-    """
-    Refresh Timeline / Dope Sheet / Graph Editor.
-    """
-
-    wm = context.window_manager
-
-    for window in wm.windows:
+    for window in context.window_manager.windows:
         screen = window.screen
 
         if not screen:
             continue
 
         for area in screen.areas:
-            if area.type in {
-                'TIMELINE',
-                'GRAPH_EDITOR',
-                'DOPESHEET_EDITOR'
-            }:
+            if area.type in {'GRAPH_EDITOR', 'DOPESHEET_EDITOR', 'NLA_EDITOR', 'VIEW_3D'}:
                 area.tag_redraw()
 
 
-def status_message(text, clear_after=3.0):
-    """
-    Display a temporary status message safely.
-    """
+def tool_poll(context):
+    if context.mode not in {'OBJECT', 'POSE'}:
+        return False
 
-    try:
-        workspace = bpy.context.workspace
+    return bool(context.selected_objects) or context.object is not None
 
-        if workspace is None:
-            return
 
-        workspace.status_text_set(text)
+def join_messages(text, messages):
+    if messages:
+        return f"{text}  ({messages[0]})"
 
-        def clear():
-            try:
-                if bpy.context.workspace:
-                    bpy.context.workspace.status_text_set(None)
-            except Exception:
-                pass
-
-            return None
-
-        bpy.app.timers.register(
-            clear,
-            first_interval=clear_after
-        )
-
-    except Exception:
-        pass
+    return text
 
 
 # ============================================================================
-# OBJECT KEYFRAME DELETE
+# OPERATORS
 # ============================================================================
 
-def delete_object_transform_keys(obj, frame, props):
-    deleted = 0
+class SceneRangeOperator(Operator):
 
-    try:
-        if props.pos:
-            if obj.keyframe_delete(
-                data_path="location",
-                frame=frame
-            ):
-                deleted += 1
-    except Exception:
-        pass
+    bl_idname = "object.keyframe_interval_scene_range"
+    bl_label = "Use Scene Range"
+    bl_description = (
+        "Set Start / End from the scene frame range "
+        "(End = scene end + 1, because End itself is not processed)"
+    )
+    bl_options = {'REGISTER', 'UNDO'}
 
-    try:
-        if props.rot:
-            rotation_path = get_rotation_path(obj)
+    def execute(self, context):
+        scene = context.scene
+        props = scene.del_keyframe_props
 
-            if obj.keyframe_delete(
-                data_path=rotation_path,
-                frame=frame
-            ):
-                deleted += 1
-    except Exception:
-        pass
+        props.start_frame = scene.frame_start
+        props.end_frame = scene.frame_end + 1
 
-    try:
-        if props.scl:
-            if obj.keyframe_delete(
-                data_path="scale",
-                frame=frame
-            ):
-                deleted += 1
-    except Exception:
-        pass
+        return {'FINISHED'}
 
-    return deleted
-
-
-# ============================================================================
-# BONE KEYFRAME DELETE
-# ============================================================================
-
-def delete_bone_transform_keys(pb, frame, props):
-    deleted = 0
-
-    try:
-        if props.pos:
-            if pb.keyframe_delete(
-                data_path="location",
-                frame=frame
-            ):
-                deleted += 1
-    except Exception:
-        pass
-
-    try:
-        if props.rot:
-            rotation_path = get_rotation_path(pb)
-
-            if pb.keyframe_delete(
-                data_path=rotation_path,
-                frame=frame
-            ):
-                deleted += 1
-    except Exception:
-        pass
-
-    try:
-        if props.scl:
-            if pb.keyframe_delete(
-                data_path="scale",
-                frame=frame
-            ):
-                deleted += 1
-    except Exception:
-        pass
-
-    return deleted
-
-
-def delete_bone_custom_properties(pb, frame):
-    deleted = 0
-
-    for key in get_bone_custom_properties(pb):
-
-        try:
-            if pb.keyframe_delete(
-                data_path='["{}"]'.format(
-                    str(key).replace("\\", "\\\\").replace('"', '\\"')
-                ),
-                frame=frame
-            ):
-                deleted += 1
-
-        except Exception:
-            pass
-
-    return deleted
-
-
-# ============================================================================
-# DELETE OPERATOR
-# ============================================================================
 
 class DeleteKeyframeOperator(Operator):
 
     bl_idname = "object.delete_keyframe_by_interval"
     bl_label = "Delete Keyframes"
     bl_description = (
-        "Delete selected animation channels at the selected interval"
+        "Delete keyframes of the selected bones (Pose Mode) or objects "
+        "(Object Mode) at the selected interval"
     )
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
     def poll(cls, context):
-        return bool(context.selected_objects)
+        return tool_poll(context)
 
     def execute(self, context):
-
         props = context.scene.del_keyframe_props
-        objects = list(context.selected_objects)
-
-        if not objects:
-            self.report(
-                {'WARNING'},
-                "No objects selected"
-            )
-            return {'CANCELLED'}
 
         frames = build_target_frames(props)
 
         if not frames:
-            self.report(
-                {'WARNING'},
-                "No frames selected by the current interval settings"
-            )
-            status_message("No frames to process")
+            self.report({'WARNING'}, "No frames to process - check Start, End and Interval")
             return {'CANCELLED'}
 
-        deleted = 0
+        targets = collect_targets(context)
 
-        # ------------------------------------------------------------------
-        # IMPORTANT:
-        # Snapshot selected bones for every armature before processing.
-        # ------------------------------------------------------------------
+        if not targets:
+            self.report({'WARNING'}, nothing_selected_message(context))
+            return {'CANCELLED'}
 
-        armature_bones = {}
+        flags = channel_flags(props)
 
-        for obj in objects:
-            if obj.type == 'ARMATURE':
-                armature_bones[obj.name] = get_selected_pose_bones(obj)
+        if not any(flags):
+            self.report({'WARNING'}, "No channel type is enabled")
+            return {'CANCELLED'}
 
-        # ------------------------------------------------------------------
-        # PROCESS OBJECTS
-        # ------------------------------------------------------------------
+        messages = []
+        targets = filter_usable_targets(targets, messages)
+        frame_set = set(frames)
 
-        for obj in objects:
+        removed = 0
+        changed = 0
 
-            # Object transforms
-            if props.pos or props.rot or props.scl:
-
-                for frame in frames:
-                    deleted += delete_object_transform_keys(
-                        obj,
-                        frame,
-                        props
-                    )
-
-            # Bone animation
-            if obj.type == 'ARMATURE':
-
-                selected_bones = armature_bones.get(
-                    obj.name,
-                    []
+        for owner, owner_targets in group_by_owner(targets):
+            try:
+                count, curves = delete_keys_for_owner(
+                    owner, owner_targets, flags, frame_set
                 )
+            except Exception as exc:
+                traceback.print_exc()
+                messages.append(f"{owner.name}: {exc}")
+                continue
 
-                if not selected_bones:
-                    continue
+            if count:
+                removed += count
+                changed += curves
+                owner.update_tag()
 
-                for pb in selected_bones:
+        if removed == 0:
+            self.report(
+                {'WARNING'},
+                join_messages(
+                    "No keyframes found on the selection at those frames "
+                    "(check Start / End / Interval and the selected channels)",
+                    messages,
+                ),
+            )
+            return {'CANCELLED'}
 
-                    for frame in frames:
-
-                        deleted += delete_bone_transform_keys(
-                            pb,
-                            frame,
-                            props
-                        )
-
-                        if props.custom_props:
-                            deleted += delete_bone_custom_properties(
-                                pb,
-                                frame
-                            )
-
+        context.view_layer.update()
         refresh_animation_editors(context)
 
-        status_message(
-            f"Deleted keyframes: {deleted}"
-        )
-
         self.report(
-            {'INFO'},
-            f"Deleted keyframes: {deleted}"
+            {'WARNING' if messages else 'INFO'},
+            join_messages(
+                f"Deleted {removed} keyframes on {changed} F-Curves", messages
+            ),
         )
 
         return {'FINISHED'}
 
-
-# ============================================================================
-# OBJECT BAKE HELPERS
-# ============================================================================
-
-def insert_object_transform_keys(obj, frame, props):
-    baked = 0
-
-    try:
-        if props.pos:
-            obj.keyframe_insert(
-                data_path="location",
-                frame=frame
-            )
-            baked += 1
-    except Exception:
-        pass
-
-    try:
-        if props.rot:
-            rotation_path = get_rotation_path(obj)
-
-            obj.keyframe_insert(
-                data_path=rotation_path,
-                frame=frame
-            )
-            baked += 1
-    except Exception:
-        pass
-
-    try:
-        if props.scl:
-            obj.keyframe_insert(
-                data_path="scale",
-                frame=frame
-            )
-            baked += 1
-    except Exception:
-        pass
-
-    return baked
-
-
-# ============================================================================
-# BONE BAKE HELPERS
-# ============================================================================
-
-def insert_bone_transform_keys(pb, frame, props):
-    baked = 0
-
-    try:
-        if props.pos:
-            pb.keyframe_insert(
-                data_path="location",
-                frame=frame
-            )
-            baked += 1
-    except Exception:
-        pass
-
-    try:
-        if props.rot:
-            rotation_path = get_rotation_path(pb)
-
-            pb.keyframe_insert(
-                data_path=rotation_path,
-                frame=frame
-            )
-            baked += 1
-    except Exception:
-        pass
-
-    try:
-        if props.scl:
-            pb.keyframe_insert(
-                data_path="scale",
-                frame=frame
-            )
-            baked += 1
-    except Exception:
-        pass
-
-    return baked
-
-
-def insert_bone_custom_properties(pb, frame):
-    baked = 0
-
-    for key in get_bone_custom_properties(pb):
-
-        try:
-            pb.keyframe_insert(
-                data_path='["{}"]'.format(
-                    str(key).replace("\\", "\\\\").replace('"', '\\"')
-                ),
-                frame=frame
-            )
-
-            baked += 1
-
-        except Exception:
-            pass
-
-    return baked
-
-
-# ============================================================================
-# ENSURE ACTION
-# ============================================================================
-
-def ensure_action(obj):
-    """
-    Blender 5.1 still supports normal keyframe_insert() usage,
-    but creating an Action explicitly is useful when baking an object
-    that does not already have animation.
-    """
-
-    if obj.animation_data is None:
-        obj.animation_data_create()
-
-    if obj.animation_data.action is None:
-        action = bpy.data.actions.new(
-            obj.name + "_Baked"
-        )
-
-        obj.animation_data.action = action
-
-    return obj.animation_data.action
-
-
-# ============================================================================
-# BAKE OPERATOR
-# ============================================================================
 
 class BakeKeyframeOperator(Operator):
 
     bl_idname = "object.bake_keyframe_by_interval"
     bl_label = "Bake Keyframes"
     bl_description = (
-        "Bake selected animation channels at the selected interval"
+        "Bake keyframes of the selected bones (Pose Mode) or objects "
+        "(Object Mode) at the selected interval"
     )
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
     def poll(cls, context):
-        return bool(context.selected_objects)
+        return tool_poll(context)
 
     def execute(self, context):
-
-        props = context.scene.del_keyframe_props
         scene = context.scene
-        objects = list(context.selected_objects)
-
-        if not objects:
-            self.report(
-                {'WARNING'},
-                "No objects selected"
-            )
-            return {'CANCELLED'}
+        props = scene.del_keyframe_props
 
         frames = build_target_frames(props)
 
         if not frames:
-            self.report(
-                {'WARNING'},
-                "No frames selected by the current interval settings"
-            )
-            status_message("No frames to bake")
+            self.report({'WARNING'}, "No frames to bake - check Start, End and Interval")
             return {'CANCELLED'}
 
-        # Save current frame
+        targets = collect_targets(context)
+
+        if not targets:
+            self.report({'WARNING'}, nothing_selected_message(context))
+            return {'CANCELLED'}
+
+        flags = channel_flags(props)
+
+        if not any(flags):
+            self.report({'WARNING'}, "No channel type is enabled")
+            return {'CANCELLED'}
+
+        messages = []
+        targets = filter_usable_targets(targets, messages)
+        channels = build_bake_channels(targets, flags)
+
+        if not channels:
+            self.report(
+                {'WARNING'},
+                join_messages("Nothing to bake on the selection", messages),
+            )
+            return {'CANCELLED'}
+
+        # ------------------------------------------------------------------
+        # 1) Sample every frame first ...
+        # ------------------------------------------------------------------
+        wm = context.window_manager
         original_frame = scene.frame_current
+        original_subframe = scene.frame_subframe
 
-        baked = 0
-
-        # Snapshot selected bones for each armature.
-        armature_bones = {}
-
-        for obj in objects:
-
-            if obj.type == 'ARMATURE':
-                armature_bones[obj.name] = get_selected_pose_bones(
-                    obj
-                )
+        wm.progress_begin(0, len(frames))
 
         try:
-
-            # --------------------------------------------------------------
-            # Create actions only for objects that actually need them.
-            # --------------------------------------------------------------
-
-            for obj in objects:
-
-                if props.pos or props.rot or props.scl:
-
-                    ensure_action(obj)
-
-                if obj.type == 'ARMATURE' and props.custom_props:
-
-                    # Bone custom properties are stored in the armature
-                    # object's animation data.
-                    ensure_action(obj)
-
-            # --------------------------------------------------------------
-            # Bake
-            # --------------------------------------------------------------
-
-            for frame in frames:
-
+            for i, frame in enumerate(frames):
                 scene.frame_set(frame)
 
-                for obj in objects:
+                for channel in channels:
+                    channel.values.append(channel.read())
 
-                    # ------------------------------------------------------
-                    # Object transforms
-                    # ------------------------------------------------------
-
-                    if props.pos or props.rot or props.scl:
-
-                        baked += insert_object_transform_keys(
-                            obj,
-                            frame,
-                            props
-                        )
-
-                    # ------------------------------------------------------
-                    # Bone animation
-                    # ------------------------------------------------------
-
-                    if obj.type != 'ARMATURE':
-                        continue
-
-                    selected_bones = armature_bones.get(
-                        obj.name,
-                        []
-                    )
-
-                    for pb in selected_bones:
-
-                        baked += insert_bone_transform_keys(
-                            pb,
-                            frame,
-                            props
-                        )
-
-                        if props.custom_props:
-                            baked += insert_bone_custom_properties(
-                                pb,
-                                frame
-                            )
-
+                wm.progress_update(i + 1)
         finally:
+            wm.progress_end()
+            scene.frame_set(original_frame, subframe=original_subframe)
 
-            # Always restore the original frame,
-            # even if something goes wrong.
-            try:
-                scene.frame_set(original_frame)
-            except Exception:
-                scene.frame_current = original_frame
+        # ------------------------------------------------------------------
+        # 2) ... then write the keys.
+        # ------------------------------------------------------------------
+        written, curves, locked, errors, owners = write_channels(channels, frames)
+        messages.extend(errors)
 
+        if locked:
+            messages.append(f"{locked} locked F-Curves skipped")
+
+        for owner in owners:
+            owner.update_tag()
+
+        context.view_layer.update()
         refresh_animation_editors(context)
 
-        status_message(
-            f"Baked keyframes: {baked}"
-        )
+        if written == 0:
+            self.report(
+                {'WARNING'},
+                join_messages("No keyframes were written", messages),
+            )
+            return {'CANCELLED'}
 
         self.report(
-            {'INFO'},
-            f"Baked keyframe channels: {baked}"
+            {'WARNING' if messages else 'INFO'},
+            join_messages(
+                f"Baked {written} keyframes on {curves} F-Curves", messages
+            ),
         )
 
         return {'FINISHED'}
@@ -864,134 +972,70 @@ class KeyframeIntervalPanel(Panel):
     bl_category = 'Item'
 
     def draw(self, context):
-
         layout = self.layout
         props = context.scene.del_keyframe_props
 
-        # --------------------------------------------------------------
-        # Frame Range
-        # --------------------------------------------------------------
+        # Frame range --------------------------------------------------------
+        layout.label(text="Frame Range")
 
-        layout.label(
-            text="Frame Range"
-        )
+        row = layout.row(align=True)
+        row.prop(props, "start_frame", text="Start")
+        row.prop(props, "end_frame", text="End")
 
-        row = layout.row(
-            align=True
-        )
+        layout.operator(SceneRangeOperator.bl_idname, text="Use Scene Range")
 
-        row.prop(
-            props,
-            "start_frame",
-            text="Start"
-        )
+        # Interval -----------------------------------------------------------
+        layout.prop(props, "interval")
+        layout.prop(props, "inverse_interval")
 
-        row.prop(
-            props,
-            "end_frame",
-            text="End"
-        )
-
-        # --------------------------------------------------------------
-        # Interval
-        # --------------------------------------------------------------
-
-        layout.prop(
-            props,
-            "interval"
-        )
-
-        layout.prop(
-            props,
-            "inverse_interval"
-        )
-
-        # --------------------------------------------------------------
-        # Channels
-        # --------------------------------------------------------------
-
+        # Channels -----------------------------------------------------------
         layout.separator()
+        layout.label(text="Channels")
+        layout.prop(props, "all_channels", toggle=True)
 
-        layout.label(
-            text="Channels"
-        )
-
-        layout.prop(
-            props,
-            "all_channels",
-            toggle=True
-        )
-
-        col = layout.column(
-            align=True
-        )
-
+        col = layout.column(align=True)
         col.enabled = not props.all_channels
+        col.prop(props, "pos")
+        col.prop(props, "rot")
+        col.prop(props, "scl")
+        col.prop(props, "custom_props")
 
-        col.prop(
-            props,
-            "pos"
-        )
-
-        col.prop(
-            props,
-            "rot"
-        )
-
-        col.prop(
-            props,
-            "scl"
-        )
-
-        col.prop(
-            props,
-            "custom_props"
-        )
-
-        # --------------------------------------------------------------
-        # Preview
-        # --------------------------------------------------------------
-
+        # Preview ------------------------------------------------------------
         layout.separator()
 
         box = layout.box()
+        box.label(text="Live Preview")
 
-        box.label(
-            text="Live Preview"
-        )
+        frame_range = get_frame_range(props)
 
-        if props.preview_keyframes:
-            box.label(
-                text=f"Frames: {props.preview_keyframes}"
-            )
+        if frame_range is None:
+            box.label(text="End must be greater than Start", icon='ERROR')
         else:
-            box.label(
-                text="Frames: None"
+            start, end = frame_range
+            interval = int(props.interval)
+            inverse = bool(props.inverse_interval)
+
+            total = count_target_frames(start, end, interval, inverse)
+
+            shown = ", ".join(
+                str(f)
+                for f in islice(iter_target_frames(start, end, interval, inverse), 15)
             )
 
-        box.label(
-            text=f"Total: {props.preview_count}"
-        )
+            if total > 15:
+                shown += ", ..."
 
-        # --------------------------------------------------------------
-        # Operators
-        # --------------------------------------------------------------
+            box.label(text="Frames: " + (shown or "None"))
+            box.label(text=f"Total: {total}")
 
+        box.label(text=describe_targets(context))
+
+        # Operators ----------------------------------------------------------
         layout.separator()
 
-        row = layout.row(
-            align=True
-        )
-
-        row.operator(
-            "object.delete_keyframe_by_interval",
-            icon='KEY_HLT'
-        )
-
-        row.operator(
-            "object.bake_keyframe_by_interval",
-            icon='REC'
-        )
+        row = layout.row(align=True)
+        row.operator(DeleteKeyframeOperator.bl_idname, icon='KEY_HLT')
+        row.operator(BakeKeyframeOperator.bl_idname, icon='REC')
 
 
 # ============================================================================
@@ -1000,6 +1044,7 @@ class KeyframeIntervalPanel(Panel):
 
 classes = (
     DelKeyProperties,
+    SceneRangeOperator,
     DeleteKeyframeOperator,
     BakeKeyframeOperator,
     KeyframeIntervalPanel,
@@ -1007,31 +1052,14 @@ classes = (
 
 
 def register():
-
     for cls in classes:
         bpy.utils.register_class(cls)
 
-    bpy.types.Scene.del_keyframe_props = bpy.props.PointerProperty(
-        type=DelKeyProperties
-    )
-
-    # Initialize preview.
-    try:
-        props = bpy.context.scene.del_keyframe_props
-        update_live_preview(
-            bpy.context.scene,
-            props
-        )
-    except Exception:
-        pass
+    bpy.types.Scene.del_keyframe_props = PointerProperty(type=DelKeyProperties)
 
 
 def unregister():
-
-    if hasattr(
-        bpy.types.Scene,
-        "del_keyframe_props"
-    ):
+    if hasattr(bpy.types.Scene, "del_keyframe_props"):
         del bpy.types.Scene.del_keyframe_props
 
     for cls in reversed(classes):
