@@ -19,7 +19,7 @@ from bpy.props import (
 bl_info = {
     "name": "Playblast Quad View",
     "author": "Venkatesh sanku",
-    "version": (1, 5, 1),
+    "version": (1, 6, 1),
     "blender": (5, 1, 0),
     "location": "View3D > Sidebar > Playblast",
     "description": "Playblast review screenshot and video sequences for viewport - quadview",
@@ -111,10 +111,6 @@ def get_output_path(filepath):
 def get_temp_folder(output_path):
     """
     Temporary PNG directory.
-    Example:
-        //quadview_render.mp4
-    becomes:
-        //quadview_render_temp/
     """
 
     root, _ext = os.path.splitext(output_path)
@@ -190,6 +186,95 @@ def get_image_resolution(filepath):
             except Exception:
                 pass
 
+def save_image_with_settings(
+    context,
+    source_png,
+    target_path,
+    image_format,
+    quality
+):
+    """
+    Load a PNG and re-save it using the requested format and quality.
+    """
+
+    scene = context.scene
+
+    old_file_format = scene.render.image_settings.file_format
+    old_quality = scene.render.image_settings.quality
+    old_compression = scene.render.image_settings.compression
+    old_color_depth = scene.render.image_settings.color_depth
+    old_color_mode = scene.render.image_settings.color_mode
+
+    image = None
+
+    try:
+
+        scene.render.image_settings.file_format = image_format
+
+        quality = max(0, min(100, int(quality)))
+
+        if image_format in {'JPEG', 'TIFF'}:
+            scene.render.image_settings.quality = quality
+
+        if image_format == 'PNG':
+            compression = 100 - quality
+            scene.render.image_settings.compression = max(
+                0,
+                min(100, compression)
+            )
+
+        try:
+            scene.render.image_settings.color_mode = 'RGB'
+        except Exception:
+            pass
+
+        try:
+            scene.render.image_settings.color_depth = '8'
+        except Exception:
+            pass
+
+        image = bpy.data.images.load(
+            source_png,
+            check_existing=False
+        )
+
+        image.save_render(
+            target_path,
+            scene=scene
+        )
+
+        return True
+
+    except Exception as exc:
+
+        print(
+            "Playblast Quad View: Re-save failed:",
+            exc
+        )
+
+        return False
+
+    finally:
+
+        if image is not None:
+
+            try:
+                bpy.data.images.remove(image)
+            except Exception:
+                pass
+
+        try:
+            scene.render.image_settings.file_format = old_file_format
+            scene.render.image_settings.quality = old_quality
+            scene.render.image_settings.compression = old_compression
+            scene.render.image_settings.color_depth = old_color_depth
+            scene.render.image_settings.color_mode = old_color_mode
+        except Exception as exc:
+            print(
+                "Playblast Quad View: Could not restore image settings:",
+                exc
+            )
+
 # ============================================================================
 # PROPERTY GROUP
 # ============================================================================
@@ -232,12 +317,29 @@ class QP_Props(bpy.types.PropertyGroup):
     )
 
     video_quality: IntProperty(
-        name="Video Quality",
-        description="Video quality from 0 (low) to 100 (high)",
+        name="Quality",
+        description=(
+            "Quality 0-100. "
+            "For JPEG/TIFF images it is visual quality. "
+            "For PNG it controls file compression. "
+            "For video it controls the bitrate"
+        ),
         default=90,
         min=0,
         max=100,
         subtype='PERCENTAGE'
+    )
+
+    image_format: EnumProperty(
+        name="Image Format",
+        description="Format used for saved screenshots",
+        items=[
+            ('PNG', "PNG", "Lossless. Quality controls compression only"),
+            ('JPEG', "JPEG", "Lossy. Quality controls visual quality"),
+            ('BMP', "BMP", "Uncompressed bitmap"),
+            ('TIFF', "TIFF", "Lossy or lossless TIFF"),
+        ],
+        default='PNG'
     )
 
     shading_mode: EnumProperty(
@@ -266,23 +368,13 @@ class QP_OT_switch_layout(bpy.types.Operator):
         area = get_view3d_area(context)
 
         if area is None:
-
-            self.report(
-                {'ERROR'},
-                "No 3D Viewport found"
-            )
-
+            self.report({'ERROR'}, "No 3D Viewport found")
             return {'CANCELLED'}
 
         region = get_window_region(area)
 
         if region is None:
-
-            self.report(
-                {'ERROR'},
-                "No VIEW_3D window region found"
-            )
-
+            self.report({'ERROR'}, "No VIEW_3D window region found")
             return {'CANCELLED'}
 
         space = area.spaces.active
@@ -294,7 +386,6 @@ class QP_OT_switch_layout(bpy.types.Operator):
                 region=region,
                 space_data=space
             ):
-
                 result = bpy.ops.screen.region_quadview()
 
             if 'FINISHED' in result:
@@ -303,29 +394,18 @@ class QP_OT_switch_layout(bpy.types.Operator):
                     not context.scene.qp_props.is_quad_active
                 )
 
-                self.report(
-                    {'INFO'},
-                    "Quad View toggled"
-                )
-
+                self.report({'INFO'}, "Quad View toggled")
                 return {'FINISHED'}
 
-            self.report(
-                {'ERROR'},
-                "Quad View operation failed"
-            )
-
+            self.report({'ERROR'}, "Quad View operation failed")
             return {'CANCELLED'}
 
         except Exception as exc:
 
             self.report(
                 {'ERROR'},
-                "Could not toggle Quad View: {}".format(
-                    exc
-                )
+                "Could not toggle Quad View: {}".format(exc)
             )
-
             return {'CANCELLED'}
 
 # ============================================================================
@@ -336,7 +416,7 @@ class QP_OT_screenshot_quadview(bpy.types.Operator):
 
     bl_idname = "qp.screenshot_quadview"
     bl_label = "Playblast Screenshot"
-    bl_description = "Save the current VIEW_3D editor as a PNG"
+    bl_description = "Save the current VIEW_3D editor as an image"
 
     def execute(self, context):
 
@@ -346,23 +426,18 @@ class QP_OT_screenshot_quadview(bpy.types.Operator):
             props.render_filepath
         )
 
-        # --------------------------------------------------------------
-        # Always save screenshot as image.
-        # --------------------------------------------------------------
+        ext_map = {
+            'PNG': '.png',
+            'JPEG': '.jpg',
+            'BMP': '.bmp',
+            'TIFF': '.tif',
+        }
 
-        root, ext = os.path.splitext(filepath)
+        image_format = props.image_format
+        target_ext = ext_map.get(image_format, '.png')
 
-        if ext.lower() not in {
-            ".png",
-            ".jpg",
-            ".jpeg",
-            ".bmp",
-            ".tga",
-            ".tif",
-            ".tiff"
-        }:
-
-            filepath = root + ".png"
+        root, _ext = os.path.splitext(filepath)
+        filepath = root + target_ext
 
         directory = os.path.dirname(filepath)
 
@@ -372,24 +447,16 @@ class QP_OT_screenshot_quadview(bpy.types.Operator):
         area = get_view3d_area(context)
 
         if area is None:
-
-            self.report(
-                {'ERROR'},
-                "No VIEW_3D area found"
-            )
-
+            self.report({'ERROR'}, "No VIEW_3D area found")
             return {'CANCELLED'}
 
         region = get_window_region(area)
 
         if region is None:
-
-            self.report(
-                {'ERROR'},
-                "No VIEW_3D window region found"
-            )
-
+            self.report({'ERROR'}, "No VIEW_3D window region found")
             return {'CANCELLED'}
+
+        temp_png = filepath + ".tmp_capture.png"
 
         try:
 
@@ -398,48 +465,56 @@ class QP_OT_screenshot_quadview(bpy.types.Operator):
                 region=region,
                 space_data=area.spaces.active
             ):
-
                 result = bpy.ops.screen.screenshot_area(
-                    filepath=filepath,
+                    filepath=temp_png,
                     check_existing=False
                 )
 
             if 'FINISHED' not in result:
-
-                self.report(
-                    {'ERROR'},
-                    "Screenshot operation failed"
-                )
-
+                self.report({'ERROR'}, "Screenshot operation failed")
                 return {'CANCELLED'}
 
-            if not os.path.isfile(filepath):
-
-                self.report(
-                    {'ERROR'},
-                    "Screenshot file was not created"
-                )
-
+            if not os.path.isfile(temp_png):
+                self.report({'ERROR'}, "Screenshot file was not created")
                 return {'CANCELLED'}
 
         except Exception as exc:
 
             self.report(
                 {'ERROR'},
-                "Screenshot failed: {}".format(
-                    exc
-                )
+                "Screenshot failed: {}".format(exc)
             )
+            return {'CANCELLED'}
 
+        success = save_image_with_settings(
+            context,
+            temp_png,
+            filepath,
+            image_format,
+            props.video_quality
+        )
+
+        try:
+            if os.path.isfile(temp_png):
+                os.remove(temp_png)
+        except Exception:
+            pass
+
+        if not success:
+            self.report(
+                {'ERROR'},
+                "Could not save image with requested settings"
+            )
+            return {'CANCELLED'}
+
+        if not os.path.isfile(filepath):
+            self.report({'ERROR'}, "Screenshot file was not created")
             return {'CANCELLED'}
 
         self.report(
             {'INFO'},
-            "Screenshot saved: {}".format(
-                filepath
-            )
+            "Screenshot saved: {}".format(filepath)
         )
-
         return {'FINISHED'}
 
 # ============================================================================
@@ -459,12 +534,7 @@ class QP_OT_screenshot_quadview_anim(bpy.types.Operator):
         global _PLAYBLAST_RUNNING
 
         if _PLAYBLAST_RUNNING:
-
-            self.report(
-                {'WARNING'},
-                "A Playblast is already running"
-            )
-
+            self.report({'WARNING'}, "A Playblast is already running")
             return {'CANCELLED'}
 
         scene = context.scene
@@ -473,71 +543,32 @@ class QP_OT_screenshot_quadview_anim(bpy.types.Operator):
         area = get_view3d_area(context)
 
         if area is None:
-
-            self.report(
-                {'ERROR'},
-                "No VIEW_3D area found"
-            )
-
+            self.report({'ERROR'}, "No VIEW_3D area found")
             return {'CANCELLED'}
 
         region = get_window_region(area)
 
         if region is None:
-
-            self.report(
-                {'ERROR'},
-                "No VIEW_3D window region found"
-            )
-
+            self.report({'ERROR'}, "No VIEW_3D window region found")
             return {'CANCELLED'}
 
         space = area.spaces.active
-
-        # --------------------------------------------------------------
-        # Store references.
-        # --------------------------------------------------------------
 
         self.scene = scene
         self.area = area
         self.region = region
         self.space = space
 
-        # --------------------------------------------------------------
-        # Store frame state.
-        # --------------------------------------------------------------
-
         self.original_frame = scene.frame_current
 
         self.start = scene.frame_start
         self.end = scene.frame_end
-        self.step = max(
-            1,
-            int(props.frame_step)
-        )
-
+        self.step = max(1, int(props.frame_step))
         self.frame = self.start
-
-        # Sequential output index.
-        # --------------------------------------------------------------
-
         self.capture_index = 1
 
-        # --------------------------------------------------------------
-        # Output paths.
-        # --------------------------------------------------------------
-
-        self.output_path = get_output_path(
-            props.render_filepath
-        )
-
-        self.folder = get_temp_folder(
-            self.output_path
-        )
-
-        # --------------------------------------------------------------
-        # Save viewport state.
-        # --------------------------------------------------------------
+        self.output_path = get_output_path(props.render_filepath)
+        self.folder = get_temp_folder(self.output_path)
 
         self._old_shading = None
         self._old_overlays = None
@@ -549,298 +580,162 @@ class QP_OT_screenshot_quadview_anim(bpy.types.Operator):
         try:
 
             if hasattr(space, "shading"):
-                self._old_shading = (
-                    space.shading.type
-                )
+                self._old_shading = space.shading.type
 
             if hasattr(space, "overlay"):
-                self._old_overlays = (
-                    space.overlay.show_overlays
-                )
+                self._old_overlays = space.overlay.show_overlays
 
             if hasattr(space, "show_region_ui"):
-                self._old_ui = (
-                    space.show_region_ui
-                )
+                self._old_ui = space.show_region_ui
 
             if hasattr(space, "show_region_toolbar"):
-                self._old_toolbar = (
-                    space.show_region_toolbar
-                )
+                self._old_toolbar = space.show_region_toolbar
 
             if hasattr(space, "show_gizmo"):
-                self._old_gizmo = (
-                    space.show_gizmo
-                )
+                self._old_gizmo = space.show_gizmo
 
             if hasattr(space, "show_region_header"):
-                self._old_header = (
-                    space.show_region_header
-                )
+                self._old_header = space.show_region_header
 
         except Exception as exc:
-
-            print(
-                "Playblast Quad View: State save warning:",
-                exc
-            )
-
-        # --------------------------------------------------------------
-        # Configure viewport.
-        # --------------------------------------------------------------
+            print("Playblast Quad View: State save warning:", exc)
 
         try:
 
             if hasattr(space, "shading"):
-
-                space.shading.type = (
-                    props.shading_mode
-                )
+                space.shading.type = props.shading_mode
 
             if hasattr(space, "overlay"):
-
                 space.overlay.show_overlays = False
 
             if hasattr(space, "show_region_ui"):
-
                 space.show_region_ui = False
 
             if hasattr(space, "show_region_toolbar"):
-
                 space.show_region_toolbar = False
 
             if hasattr(space, "show_gizmo"):
-
                 space.show_gizmo = False
 
-            # Hide the top header bar (Object Mode / View / Select / ...)
             if hasattr(space, "show_region_header"):
-
                 space.show_region_header = False
 
         except Exception as exc:
-
             self.report(
                 {'WARNING'},
-                "Viewport settings warning: {}".format(
-                    exc
-                )
+                "Viewport settings warning: {}".format(exc)
             )
-
-        # --------------------------------------------------------------
-        # Prepare temporary folder.
-        # --------------------------------------------------------------
 
         try:
 
             if os.path.isdir(self.folder):
+                shutil.rmtree(self.folder)
 
-                shutil.rmtree(
-                    self.folder
-                )
-
-            ensure_folder(
-                self.folder
-            )
+            ensure_folder(self.folder)
 
         except Exception as exc:
 
             self.restore_state()
-
             self.report(
                 {'ERROR'},
-                "Could not create temp folder: {}".format(
-                    exc
-                )
+                "Could not create temp folder: {}".format(exc)
             )
-
             return {'CANCELLED'}
 
-        # --------------------------------------------------------------
-        # Mark running.
-        # --------------------------------------------------------------
-
         _PLAYBLAST_RUNNING = True
-
         props.is_playblasting = True
-
-        # --------------------------------------------------------------
-        # Initial frame.
-        # --------------------------------------------------------------
 
         try:
 
-            scene.frame_set(
-                self.frame
-            )
-
+            scene.frame_set(self.frame)
             context.view_layer.update()
 
         except Exception as exc:
 
-            self.finish_capture(
-                context,
-                cancelled=True
-            )
-
+            self.finish_capture(context, cancelled=True)
             self.report(
                 {'ERROR'},
-                "Could not set initial frame: {}".format(
-                    exc
-                )
+                "Could not set initial frame: {}".format(exc)
             )
-
             return {'CANCELLED'}
-
-        # --------------------------------------------------------------
-        # Start timer.
-        # --------------------------------------------------------------
 
         try:
 
-            self._timer = (
-                context.window_manager.event_timer_add(
-                    0.10,
-                    window=context.window
-                )
+            self._timer = context.window_manager.event_timer_add(
+                0.10,
+                window=context.window
             )
 
-            context.window_manager.modal_handler_add(
-                self
-            )
+            context.window_manager.modal_handler_add(self)
 
         except Exception as exc:
 
-            self.finish_capture(
-                context,
-                cancelled=True
-            )
-
+            self.finish_capture(context, cancelled=True)
             self.report(
                 {'ERROR'},
-                "Could not start Playblast timer: {}".format(
-                    exc
-                )
+                "Could not start Playblast timer: {}".format(exc)
             )
-
             return {'CANCELLED'}
 
         self.report(
             {'INFO'},
-            "Playblast started: {} to {}".format(
-                self.start,
-                self.end
-            )
+            "Playblast started: {} to {}".format(self.start, self.end)
         )
-
         return {'RUNNING_MODAL'}
-
-    # ----------------------------------------------------------------------
-    # MODAL
-    # ----------------------------------------------------------------------
 
     def modal(self, context, event):
 
         if event.type == 'ESC':
 
-            self.finish_capture(
-                context,
-                cancelled=True
-            )
-
-            self.report(
-                {'WARNING'},
-                "Playblast cancelled"
-            )
-
+            self.finish_capture(context, cancelled=True)
+            self.report({'WARNING'}, "Playblast cancelled")
             return {'CANCELLED'}
 
         if event.type != 'TIMER':
-
             return {'RUNNING_MODAL'}
-
-        # --------------------------------------------------------------
-        # Finished capture.
-        # --------------------------------------------------------------
 
         if self.frame > self.end:
 
-            self.finish_capture(
-                context,
-                cancelled=False
-            )
+            self.finish_capture(context, cancelled=False)
 
-            # Encode captured images.
             result = bpy.ops.qp.combine_images_to_video()
 
             if 'FINISHED' in result:
-
                 return {'FINISHED'}
 
             return {'CANCELLED'}
 
-        # --------------------------------------------------------------
-        # Change animation frame.
-        # --------------------------------------------------------------
-
         try:
 
-            self.scene.frame_set(
-                self.frame
-            )
-
+            self.scene.frame_set(self.frame)
             context.view_layer.update()
 
-            # Force the viewport to redraw.
             try:
-
                 self.area.tag_redraw()
-
             except Exception:
                 pass
 
-            # Blender redraw helper.
             try:
-
                 bpy.ops.wm.redraw_timer(
                     type='DRAW_WIN_SWAP',
                     iterations=1
                 )
-
             except Exception:
                 pass
 
         except Exception as exc:
 
-            self.finish_capture(
-                context,
-                cancelled=True
-            )
-
+            self.finish_capture(context, cancelled=True)
             self.report(
                 {'ERROR'},
-                "Frame {} update failed: {}".format(
-                    self.frame,
-                    exc
-                )
+                "Frame {} update failed: {}".format(self.frame, exc)
             )
-
             return {'CANCELLED'}
-
-        # --------------------------------------------------------------
-        # Sequential image filename.
-        # --------------------------------------------------------------
 
         filepath = os.path.join(
             self.folder,
-            "quadview_frame_{:04d}.png".format(
-                self.capture_index
-            )
+            "quadview_frame_{:04d}.png".format(self.capture_index)
         )
-
-        # --------------------------------------------------------------
-        # Screenshot current VIEW_3D editor.
-        # --------------------------------------------------------------
 
         try:
 
@@ -849,49 +744,31 @@ class QP_OT_screenshot_quadview_anim(bpy.types.Operator):
                 region=self.region,
                 space_data=self.space
             ):
-
                 result = bpy.ops.screen.screenshot_area(
                     filepath=filepath,
                     check_existing=False
                 )
 
             if 'FINISHED' not in result:
-
                 raise RuntimeError(
-                    "screenshot_area returned {}".format(
-                        result
-                    )
+                    "screenshot_area returned {}".format(result)
                 )
 
             if not os.path.isfile(filepath):
-
-                raise RuntimeError(
-                    "Screenshot file was not created"
-                )
+                raise RuntimeError("Screenshot file was not created")
 
         except Exception as exc:
 
             print(
                 "Playblast Quad View:",
-                "Frame {} failed: {}".format(
-                    self.frame,
-                    exc
-                )
+                "Frame {} failed: {}".format(self.frame, exc)
             )
 
-            self.finish_capture(
-                context,
-                cancelled=True
-            )
-
+            self.finish_capture(context, cancelled=True)
             self.report(
                 {'ERROR'},
-                "Could not capture frame {}: {}".format(
-                    self.frame,
-                    exc
-                )
+                "Could not capture frame {}: {}".format(self.frame, exc)
             )
-
             return {'CANCELLED'}
 
         print(
@@ -901,145 +778,64 @@ class QP_OT_screenshot_quadview_anim(bpy.types.Operator):
             )
         )
 
-        # --------------------------------------------------------------
-        # Advance.
-        # --------------------------------------------------------------
-
         self.frame += self.step
         self.capture_index += 1
 
         return {'RUNNING_MODAL'}
 
-    # ----------------------------------------------------------------------
-    # RESTORE VIEWPORT
-    # ----------------------------------------------------------------------
-
     def restore_state(self):
 
-        space = getattr(
-            self,
-            "space",
-            None
-        )
+        space = getattr(self, "space", None)
 
         if space is None:
             return
 
         try:
 
-            if (
-                self._old_shading is not None
-                and hasattr(space, "shading")
-            ):
+            if (self._old_shading is not None
+                    and hasattr(space, "shading")):
+                space.shading.type = self._old_shading
 
-                space.shading.type = (
-                    self._old_shading
-                )
+            if (self._old_overlays is not None
+                    and hasattr(space, "overlay")):
+                space.overlay.show_overlays = self._old_overlays
 
-            if (
-                self._old_overlays is not None
-                and hasattr(space, "overlay")
-            ):
+            if (self._old_ui is not None
+                    and hasattr(space, "show_region_ui")):
+                space.show_region_ui = self._old_ui
 
-                space.overlay.show_overlays = (
-                    self._old_overlays
-                )
+            if (self._old_toolbar is not None
+                    and hasattr(space, "show_region_toolbar")):
+                space.show_region_toolbar = self._old_toolbar
 
-            if (
-                self._old_ui is not None
-                and hasattr(space, "show_region_ui")
-            ):
+            if (self._old_gizmo is not None
+                    and hasattr(space, "show_gizmo")):
+                space.show_gizmo = self._old_gizmo
 
-                space.show_region_ui = (
-                    self._old_ui
-                )
-
-            if (
-                self._old_toolbar is not None
-                and hasattr(space, "show_region_toolbar")
-            ):
-
-                space.show_region_toolbar = (
-                    self._old_toolbar
-                )
-
-            if (
-                self._old_gizmo is not None
-                and hasattr(space, "show_gizmo")
-            ):
-
-                space.show_gizmo = (
-                    self._old_gizmo
-                )
-
-            if (
-                self._old_header is not None
-                and hasattr(space, "show_region_header")
-            ):
-
-                space.show_region_header = (
-                    self._old_header
-                )
+            if (self._old_header is not None
+                    and hasattr(space, "show_region_header")):
+                space.show_region_header = self._old_header
 
         except Exception as exc:
+            print("Playblast Quad View: Restore warning:", exc)
 
-            print(
-                "Playblast Quad View: Restore warning:",
-                exc
-            )
-
-    # ----------------------------------------------------------------------
-    # FINISH CAPTURE
-    # ----------------------------------------------------------------------
-
-    def finish_capture(
-        self,
-        context,
-        cancelled=False
-    ):
+    def finish_capture(self, context, cancelled=False):
 
         global _PLAYBLAST_RUNNING
 
-        # --------------------------------------------------------------
-        # Remove timer.
-        # --------------------------------------------------------------
-
-        safe_remove_timer(
-            context.window_manager,
-            self._timer
-        )
-
+        safe_remove_timer(context.window_manager, self._timer)
         self._timer = None
-
-        # --------------------------------------------------------------
-        # Restore viewport state.
-        # --------------------------------------------------------------
 
         self.restore_state()
 
-        # --------------------------------------------------------------
-        # Restore original frame.
-        # --------------------------------------------------------------
-
         try:
-
-            self.scene.frame_set(
-                self.original_frame
-            )
-
+            self.scene.frame_set(self.original_frame)
             context.view_layer.update()
-
         except Exception:
             pass
 
-        # --------------------------------------------------------------
-        # Update properties.
-        # --------------------------------------------------------------
-
         try:
-
             self.scene.qp_props.is_playblasting = False
-
         except Exception:
             pass
 
@@ -1059,29 +855,13 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
 
         props = context.scene.qp_props
 
-        output_path = get_output_path(
-            props.render_filepath
-        )
+        output_path = get_output_path(props.render_filepath)
+        folder = get_temp_folder(output_path)
 
-        folder = get_temp_folder(
-            output_path
-        )
-
-        # --------------------------------------------------------------
-        # Find images.
-        # --------------------------------------------------------------
-
-        images = get_frame_files(
-            folder
-        )
+        images = get_frame_files(folder)
 
         if not images:
-
-            self.report(
-                {'ERROR'},
-                "No Playblast PNG frames were found"
-            )
-
+            self.report({'ERROR'}, "No Playblast PNG frames were found")
             return {'CANCELLED'}
 
         print(
@@ -1090,34 +870,19 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
             )
         )
 
-        # --------------------------------------------------------------
-        # Calculate FPS.
-        # --------------------------------------------------------------
-
         scene = context.scene
 
         fps = float(scene.render.fps)
 
         if scene.render.fps_base != 0:
-
-            fps = (
-                fps /
-                float(scene.render.fps_base)
-            )
+            fps = fps / float(scene.render.fps_base)
 
         if fps <= 0:
-
             fps = 24.0
-
-        # --------------------------------------------------------------
-        # External FFMPEG.
-        # --------------------------------------------------------------
 
         if props.use_ffmpeg:
 
-            ffmpeg_path = shutil.which(
-                "ffmpeg"
-            )
+            ffmpeg_path = shutil.which("ffmpeg")
 
             if ffmpeg_path is not None:
 
@@ -1130,9 +895,7 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
                 )
 
                 if ffmpeg_result:
-
                     clean_folder(folder)
-
                     return {'FINISHED'}
 
                 self.report(
@@ -1148,20 +911,12 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
                     "Trying Blender VSE."
                 )
 
-        # --------------------------------------------------------------
-        # Blender VSE.
-        # --------------------------------------------------------------
-
         return self.encode_with_vse(
             context,
             output_path,
             folder,
             images
         )
-
-    # ----------------------------------------------------------------------
-    # FFMPEG
-    # ----------------------------------------------------------------------
 
     def encode_with_ffmpeg(
         self,
@@ -1177,15 +932,10 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
             "quadview_frame_%04d.png"
         )
 
-        # --------------------------------------------------------------
-        # Quality mapping (0-100 -> CRF 51-0)
-        # --------------------------------------------------------------
-
         quality = int(context.scene.qp_props.video_quality)
         quality = max(0, min(100, quality))
 
-        # 0   -> CRF 51 (worst)
-        # 100 -> CRF 0  (lossless)
+        # 0 -> CRF 51 (worst), 100 -> CRF 0 (lossless)
         crf_value = int(round((100 - quality) * 51 / 100.0))
         crf_value = max(0, min(51, crf_value))
 
@@ -1204,10 +954,6 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
             str(crf_value),
         ]
 
-        # --------------------------------------------------------------
-        # Resolution scaling.
-        # --------------------------------------------------------------
-
         scale = context.scene.qp_props.resolution_scale
 
         if scale < 0.999:
@@ -1216,15 +962,9 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
                 "scale="
                 "trunc(iw*{}/2)*2:"
                 "trunc(ih*{}/2)*2"
-            ).format(
-                scale,
-                scale
-            )
+            ).format(scale, scale)
 
-            command.extend([
-                "-vf",
-                scale_filter
-            ])
+            command.extend(["-vf", scale_filter])
 
         command.extend([
             "-movflags",
@@ -1234,10 +974,7 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
 
         print(
             "Playblast Quad View: Running FFMPEG "
-            "(quality={}, crf={})...".format(
-                quality,
-                crf_value
-            )
+            "(quality={}, crf={})...".format(quality, crf_value)
         )
 
         try:
@@ -1250,45 +987,26 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
             )
 
         except Exception as exc:
-
-            print(
-                "FFMPEG execution error:",
-                exc
-            )
-
+            print("FFMPEG execution error:", exc)
             return False
 
         if result.returncode != 0:
-
-            print(
-                "FFMPEG stderr:"
-            )
-
-            print(
-                result.stderr
-            )
-
+            print("FFMPEG stderr:")
+            print(result.stderr)
             return False
 
         if not os.path.isfile(output_path):
-
-            print(
-                "FFMPEG reported success but output file "
-                "does not exist."
-            )
-
+            print("FFMPEG reported success but output file does not exist.")
             return False
 
+        size_mb = os.path.getsize(output_path) / (1024.0 * 1024.0)
         print(
-            "Playblast Quad View: FFMPEG video created:",
-            output_path
+            "Playblast Quad View: FFMPEG video created: {} ({:.2f} MB)".format(
+                output_path, size_mb
+            )
         )
 
-        self.report(
-            {'INFO'},
-            "Video created with FFMPEG"
-        )
-
+        self.report({'INFO'}, "Video created with FFMPEG")
         return True
 
     # ----------------------------------------------------------------------
@@ -1296,11 +1014,14 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
     # ----------------------------------------------------------------------
 
     def encode_with_vse(self, context, output_path, folder, images):
+
         scene = context.scene
 
-        # 1. Save render state (including ffmpeg settings)
+        # Save render state (including ffmpeg + color settings)
         old_filepath = scene.render.filepath
         old_file_format = scene.render.image_settings.file_format
+        old_color_mode = scene.render.image_settings.color_mode
+        old_color_depth = scene.render.image_settings.color_depth
         old_resolution_x = scene.render.resolution_x
         old_resolution_y = scene.render.resolution_y
         old_resolution_percentage = scene.render.resolution_percentage
@@ -1308,24 +1029,41 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
         old_fps_base = scene.render.fps_base
         old_frame_start = scene.frame_start
         old_frame_end = scene.frame_end
+        old_use_sequencer = scene.render.use_sequencer
+
         old_ffmpeg_format = scene.render.ffmpeg.format
         old_ffmpeg_codec = scene.render.ffmpeg.codec
         old_ffmpeg_crf = scene.render.ffmpeg.constant_rate_factor
         old_ffmpeg_video_bitrate = scene.render.ffmpeg.video_bitrate
 
+        old_ffmpeg_minrate = None
+        old_ffmpeg_maxrate = None
+
         try:
-            # 2. Get or create sequence editor
+            old_ffmpeg_minrate = scene.render.ffmpeg.minrate
+        except Exception:
+            pass
+
+        try:
+            old_ffmpeg_maxrate = scene.render.ffmpeg.maxrate
+        except Exception:
+            pass
+
+        try:
+
+            # 1. Get or create sequence editor
             if scene.sequence_editor is None:
                 scene.sequence_editor_create()
+
             seq = scene.sequence_editor
 
-            # 3. Compatibility: get strips collection
+            # 2. Compatibility: get strips collection
             if hasattr(seq, "strips"):
                 strips_coll = seq.strips
             else:
                 strips_coll = seq.sequences
 
-            # 4. Clear existing strips
+            # 3. Clear existing strips
             for strip in list(strips_coll):
                 try:
                     strips_coll.remove(strip)
@@ -1333,14 +1071,18 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
                     print("Could not remove strip:", strip.name, exc)
 
             first_image = os.path.join(folder, images[0])
+
             if not os.path.isfile(first_image):
-                raise RuntimeError("First image is missing:\n{}".format(first_image))
+                raise RuntimeError(
+                    "First image is missing:\n{}".format(first_image)
+                )
 
             width, height = get_image_resolution(first_image)
+
             if width is None or height is None:
                 raise RuntimeError("Unable to determine image resolution")
 
-            # 5. Create image strip
+            # 4. Create image strip
             strip = strips_coll.new_image(
                 name="QuadView",
                 filepath=first_image,
@@ -1349,115 +1091,194 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
             )
 
             if strip is None:
-                raise RuntimeError("Blender failed to create the image strip")
+                raise RuntimeError(
+                    "Blender failed to create the image strip"
+                )
 
-            # 6. Add remaining images
             for filename in images[1:]:
                 image_path = os.path.join(folder, filename)
                 if not os.path.isfile(image_path):
-                    raise RuntimeError("Missing Playblast image:\n{}".format(image_path))
+                    raise RuntimeError(
+                        "Missing Playblast image:\n{}".format(image_path)
+                    )
                 strip.elements.append(filename)
 
             frame_count = len(images)
 
-            # 7. Resolution scaling
+            # 5. Resolution scaling
             scale = float(context.scene.qp_props.resolution_scale)
+
             if scale <= 0:
                 scale = 1.0
+
             output_width = int(width * scale)
             output_height = int(height * scale)
             output_width -= (output_width % 2)
             output_height -= (output_height % 2)
             output_width = max(2, output_width)
             output_height = max(2, output_height)
+
             scene.render.resolution_x = output_width
             scene.render.resolution_y = output_height
             scene.render.resolution_percentage = 100
 
-            # 8. Video format settings
+            # 6. Video format settings
             scene.render.image_settings.file_format = 'FFMPEG'
-            scene.render.ffmpeg.format = 'MPEG4'
-            scene.render.ffmpeg.codec = 'H264'
 
-            # 8b. Quality -> bitrate mapping (kbps)
-            #     Property is 'video_bitrate', not 'bitrate'.
-            quality = int(context.scene.qp_props.video_quality)
-            quality = max(0, min(100, quality))
-
-            bitrate_kbps = int(
-                1000 + (quality / 100.0) * 39000
-            )
+            # CRITICAL: force RGB output (fixes black and white video)
+            try:
+                scene.render.image_settings.color_mode = 'RGB'
+            except Exception as exc:
+                print(
+                    "Playblast Quad View: Could not set color_mode:",
+                    exc
+                )
 
             try:
-                scene.render.ffmpeg.constant_rate_factor = 'NONE'
+                scene.render.image_settings.color_depth = '8'
             except Exception:
                 pass
 
+            scene.render.ffmpeg.format = 'MPEG4'
+            scene.render.ffmpeg.codec = 'H264'
+
+            # 7. Quality -> bitrate (CBR)
+            #
+            #   quality 0   -> 500 kbps
+            #   quality 100 -> 50000 kbps
+            #
+            # We also force constant_rate_factor to 'NONE' so Blender
+            # uses our bitrate instead of one of its CRF presets.
+            # Setting matching minrate and maxrate forces true CBR.
+            quality = int(context.scene.qp_props.video_quality)
+            quality = max(0, min(100, quality))
+
+            bitrate_kbps = int(500 + (quality / 100.0) * 49500)
+
+            try:
+                scene.render.ffmpeg.constant_rate_factor = 'NONE'
+            except Exception as exc:
+                print(
+                    "Playblast Quad View: Could not set CRF preset:",
+                    exc
+                )
+
             scene.render.ffmpeg.video_bitrate = bitrate_kbps
 
+            # Force CBR with matching minrate / maxrate
+            try:
+                scene.render.ffmpeg.minrate = bitrate_kbps
+            except Exception:
+                pass
+
+            try:
+                scene.render.ffmpeg.maxrate = bitrate_kbps
+            except Exception:
+                pass
+
             print(
-                "Playblast Quad View: VSE quality={} -> bitrate={} kbps".format(
-                    quality,
-                    bitrate_kbps
+                "Playblast Quad View: VSE quality={} -> "
+                "bitrate={} kbps (CBR)".format(
+                    quality, bitrate_kbps
                 )
             )
 
-            # 9. Output path and frame range
+            # 8. Output path and frame range
             scene.render.filepath = output_path
             scene.render.fps = old_fps
             scene.render.fps_base = old_fps_base
             scene.frame_start = 1
             scene.frame_end = frame_count
 
-            # 10. Enable VSE rendering
+            # 9. Enable VSE rendering
             scene.render.use_sequencer = True
 
-            # 11. Refresh VSE
+            # 10. Refresh VSE
             try:
                 bpy.ops.sequencer.refresh_all()
             except Exception:
                 pass
+
             try:
                 context.view_layer.update()
             except Exception:
                 pass
 
-            # 12. Render VSE animation
+            # 11. Render VSE animation
             print("Playblast Quad View: Rendering VSE video...")
+
             result = bpy.ops.render.render(animation=True)
+
             if 'FINISHED' not in result:
-                raise RuntimeError("VSE render returned: {}".format(result))
+                raise RuntimeError(
+                    "VSE render returned: {}".format(result)
+                )
 
             if not os.path.isfile(output_path):
                 raise RuntimeError(
-                    "Blender completed the render operation, but the video file was not created:\n{}".format(output_path)
+                    "Blender completed the render operation, "
+                    "but the video file was not created:\n{}".format(
+                        output_path
+                    )
                 )
 
-            print("Playblast Quad View: Video created:", output_path)
+            size_mb = os.path.getsize(output_path) / (1024.0 * 1024.0)
+
+            print(
+                "Playblast Quad View: Video created: {} ({:.2f} MB)".format(
+                    output_path, size_mb
+                )
+            )
+
             self.report({'INFO'}, "Video created successfully")
             return {'FINISHED'}
 
         except Exception as exc:
+
             print("Playblast Quad View VSE ERROR:", repr(exc))
-            self.report({'ERROR'}, "VSE encoding failed: {}".format(exc))
+
+            self.report(
+                {'ERROR'},
+                "VSE encoding failed: {}".format(exc)
+            )
             return {'CANCELLED'}
 
         finally:
-            # 13. Restore scene settings
+
             try:
+
                 scene.render.filepath = old_filepath
                 scene.render.image_settings.file_format = old_file_format
+                scene.render.image_settings.color_mode = old_color_mode
+                scene.render.image_settings.color_depth = old_color_depth
                 scene.render.resolution_x = old_resolution_x
                 scene.render.resolution_y = old_resolution_y
-                scene.render.resolution_percentage = old_resolution_percentage
+                scene.render.resolution_percentage = (
+                    old_resolution_percentage
+                )
                 scene.render.fps = old_fps
                 scene.render.fps_base = old_fps_base
                 scene.frame_start = old_frame_start
                 scene.frame_end = old_frame_end
+                scene.render.use_sequencer = old_use_sequencer
+
                 scene.render.ffmpeg.format = old_ffmpeg_format
                 scene.render.ffmpeg.codec = old_ffmpeg_codec
                 scene.render.ffmpeg.constant_rate_factor = old_ffmpeg_crf
                 scene.render.ffmpeg.video_bitrate = old_ffmpeg_video_bitrate
+
+                if old_ffmpeg_minrate is not None:
+                    try:
+                        scene.render.ffmpeg.minrate = old_ffmpeg_minrate
+                    except Exception:
+                        pass
+
+                if old_ffmpeg_maxrate is not None:
+                    try:
+                        scene.render.ffmpeg.maxrate = old_ffmpeg_maxrate
+                    except Exception:
+                        pass
+
             except Exception as exc:
                 print("Could not restore render settings:", exc)
 
@@ -1479,94 +1300,35 @@ class QP_PT_panel(bpy.types.Panel):
         layout = self.layout
         props = context.scene.qp_props
 
-        # --------------------------------------------------------------
-        # Quad View
-        # --------------------------------------------------------------
-
         row = layout.row()
+        row.operator("qp.switch_layout", icon='WINDOW')
 
-        row.operator(
-            "qp.switch_layout",
-            icon='WINDOW'
-        )
+        layout.prop(props, "render_filepath")
 
-        # --------------------------------------------------------------
-        # Save Path
-        # --------------------------------------------------------------
-
-        layout.prop(
-            props,
-            "render_filepath"
-        )
-
-        # --------------------------------------------------------------
-        # Screenshot / Animation
-        # --------------------------------------------------------------
-
-        row = layout.row(
-            align=True
-        )
-
-        row.operator(
-            "qp.screenshot_quadview",
-            icon='IMAGE_DATA'
-        )
-
+        row = layout.row(align=True)
+        row.operator("qp.screenshot_quadview", icon='IMAGE_DATA')
         row.operator(
             "qp.screenshot_quadview_anim",
             icon='RENDER_ANIMATION'
         )
 
-        # --------------------------------------------------------------
-        # Options
-        # --------------------------------------------------------------
-
         layout.separator()
 
-        layout.label(
-            text="Extra Options",
-            icon='PREFERENCES'
-        )
+        layout.label(text="Extra Options", icon='PREFERENCES')
 
-        layout.prop(
-            props,
-            "use_ffmpeg"
-        )
-
-        layout.prop(
-            props,
-            "frame_step"
-        )
-
-        layout.prop(
-            props,
-            "resolution_scale"
-        )
-
-        layout.prop(
-            props,
-            "video_quality"
-        )
-
-        layout.prop(
-            props,
-            "shading_mode"
-        )
-
-        # --------------------------------------------------------------
-        # Status
-        # --------------------------------------------------------------
+        layout.prop(props, "image_format")
+        layout.prop(props, "video_quality")
+        layout.prop(props, "use_ffmpeg")
+        layout.prop(props, "frame_step")
+        layout.prop(props, "resolution_scale")
+        layout.prop(props, "shading_mode")
 
         if props.is_playblasting:
 
             layout.separator()
 
             box = layout.box()
-
-            box.label(
-                text="PLAYBLAST IN PROGRESS",
-                icon='TIME'
-            )
+            box.label(text="PLAYBLAST IN PROGRESS", icon='TIME')
 
 # ============================================================================
 # REGISTER
@@ -1584,13 +1346,9 @@ classes = (
 def register():
 
     for cls in classes:
-        bpy.utils.register_class(
-            cls
-        )
+        bpy.utils.register_class(cls)
 
-    bpy.types.Scene.qp_props = PointerProperty(
-        type=QP_Props
-    )
+    bpy.types.Scene.qp_props = PointerProperty(type=QP_Props)
 
 def unregister():
 
@@ -1598,18 +1356,11 @@ def unregister():
 
     _PLAYBLAST_RUNNING = False
 
-    if hasattr(
-        bpy.types.Scene,
-        "qp_props"
-    ):
-
+    if hasattr(bpy.types.Scene, "qp_props"):
         del bpy.types.Scene.qp_props
 
     for cls in reversed(classes):
-
-        bpy.utils.unregister_class(
-            cls
-        )
+        bpy.utils.unregister_class(cls)
 
 # ============================================================================
 # RUN
