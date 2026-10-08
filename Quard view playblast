@@ -2,6 +2,7 @@ import bpy
 import os
 import shutil
 import subprocess
+import time
 
 from bpy.props import (
     StringProperty,
@@ -19,7 +20,7 @@ from bpy.props import (
 bl_info = {
     "name": "Playblast Quad View",
     "author": "Venkatesh sanku",
-    "version": (1, 6, 1),
+    "version": (1, 6, 2),
     "blender": (5, 1, 0),
     "location": "View3D > Sidebar > Playblast",
     "description": "Playblast review screenshot and video sequences for viewport - quadview",
@@ -89,10 +90,7 @@ def clean_folder(path):
         )
 
 def get_output_path(filepath):
-    """
-    Resolve and normalize the output path.
-    Default is MP4.
-    """
+    """Resolve and normalize the output path."""
 
     filepath = bpy.path.abspath(filepath)
 
@@ -109,18 +107,14 @@ def get_output_path(filepath):
     return filepath
 
 def get_temp_folder(output_path):
-    """
-    Temporary PNG directory.
-    """
+    """Temporary PNG directory."""
 
     root, _ext = os.path.splitext(output_path)
 
     return root + "_temp"
 
 def get_frame_files(folder):
-    """
-    Return Playblast PNG files in numerical order.
-    """
+    """Return Playblast PNG files in numerical order."""
 
     if not os.path.isdir(folder):
         return []
@@ -150,9 +144,7 @@ def get_frame_files(folder):
     return files
 
 def get_image_resolution(filepath):
-    """
-    Load one PNG temporarily and return its dimensions.
-    """
+    """Load one PNG temporarily and return its dimensions."""
 
     image = None
 
@@ -186,6 +178,42 @@ def get_image_resolution(filepath):
             except Exception:
                 pass
 
+def wait_for_file(filepath, timeout=2.0):
+    """
+    Wait until a freshly written file is readable and non-empty.
+    Returns True when the file is ready.
+    """
+
+    start_time = time.time()
+
+    while (time.time() - start_time) < timeout:
+
+        try:
+
+            if os.path.isfile(filepath):
+
+                size = os.path.getsize(filepath)
+
+                if size > 0:
+
+                    # Try to open it to confirm it is valid.
+                    try:
+
+                        with open(filepath, "rb") as fh:
+                            fh.read(8)
+
+                        return True
+
+                    except Exception:
+                        pass
+
+        except Exception:
+            pass
+
+        time.sleep(0.05)
+
+    return False
+
 def save_image_with_settings(
     context,
     source_png,
@@ -195,6 +223,9 @@ def save_image_with_settings(
 ):
     """
     Load a PNG and re-save it using the requested format and quality.
+
+    Uses multiple fallback strategies because Blender's image format
+    constraints differ per format.
     """
 
     scene = context.scene
@@ -206,53 +237,140 @@ def save_image_with_settings(
     old_color_mode = scene.render.image_settings.color_mode
 
     image = None
+    success = False
+    last_error = None
+
+    quality = max(0, min(100, int(quality)))
 
     try:
 
+        # ------------------------------------------------------------------
+        # Configure image settings in the safest order:
+        # 1. file_format first (resets dependent fields)
+        # 2. color_mode / color_depth second (accepted values depend on format)
+        # 3. quality / compression last
+        # ------------------------------------------------------------------
+
         scene.render.image_settings.file_format = image_format
 
-        quality = max(0, min(100, int(quality)))
+        # --- color mode ---
+        preferred_modes = ['RGB', 'BW']
 
-        if image_format in {'JPEG', 'TIFF'}:
-            scene.render.image_settings.quality = quality
+        for mode in preferred_modes:
 
-        if image_format == 'PNG':
-            compression = 100 - quality
-            scene.render.image_settings.compression = max(
-                0,
-                min(100, compression)
-            )
+            try:
+                scene.render.image_settings.color_mode = mode
+                break
 
-        try:
-            scene.render.image_settings.color_mode = 'RGB'
-        except Exception:
-            pass
+            except Exception:
+                continue
 
-        try:
-            scene.render.image_settings.color_depth = '8'
-        except Exception:
-            pass
+        # --- color depth ---
+        preferred_depths = ['8']
+
+        for depth in preferred_depths:
+
+            try:
+                scene.render.image_settings.color_depth = depth
+                break
+
+            except Exception:
+                continue
+
+        # --- quality / compression ---
+        if image_format == 'JPEG':
+
+            try:
+                scene.render.image_settings.quality = quality
+            except Exception:
+                pass
+
+        elif image_format == 'TIFF':
+
+            try:
+                scene.render.image_settings.quality = quality
+            except Exception:
+                pass
+
+        elif image_format == 'PNG':
+
+            try:
+                scene.render.image_settings.compression = max(
+                    0,
+                    min(100, 100 - quality)
+                )
+            except Exception:
+                pass
+
+        # ------------------------------------------------------------------
+        # Load the source PNG
+        # ------------------------------------------------------------------
 
         image = bpy.data.images.load(
             source_png,
             check_existing=False
         )
 
-        image.save_render(
-            target_path,
-            scene=scene
-        )
+        # ------------------------------------------------------------------
+        # Strategy 1: save_render with quality parameter
+        # ------------------------------------------------------------------
 
-        return True
+        try:
+
+            image.save_render(
+                target_path,
+                scene=scene,
+                quality=quality
+            )
+
+            if os.path.isfile(target_path) and os.path.getsize(target_path) > 0:
+                success = True
+
+        except TypeError as exc:
+            last_error = exc
+        except Exception as exc:
+            last_error = exc
+
+        # ------------------------------------------------------------------
+        # Strategy 2: save_render without quality parameter
+        # ------------------------------------------------------------------
+
+        if not success:
+
+            try:
+
+                image.save_render(
+                    target_path,
+                    scene=scene
+                )
+
+                if os.path.isfile(target_path) and os.path.getsize(target_path) > 0:
+                    success = True
+
+            except Exception as exc:
+                last_error = exc
+
+        # ------------------------------------------------------------------
+        # Strategy 3: direct image.save() with explicit file format
+        # ------------------------------------------------------------------
+
+        if not success:
+
+            try:
+
+                image.filepath_raw = target_path
+                image.file_format = image_format
+                image.save()
+
+                if os.path.isfile(target_path) and os.path.getsize(target_path) > 0:
+                    success = True
+
+            except Exception as exc:
+                last_error = exc
 
     except Exception as exc:
 
-        print(
-            "Playblast Quad View: Re-save failed:",
-            exc
-        )
-
-        return False
+        last_error = exc
 
     finally:
 
@@ -269,11 +387,19 @@ def save_image_with_settings(
             scene.render.image_settings.compression = old_compression
             scene.render.image_settings.color_depth = old_color_depth
             scene.render.image_settings.color_mode = old_color_mode
-        except Exception as exc:
-            print(
-                "Playblast Quad View: Could not restore image settings:",
-                exc
-            )
+        except Exception:
+            pass
+
+    if not success and last_error is not None:
+
+        print(
+            "Playblast Quad View: Save image failed ({}):".format(
+                image_format
+            ),
+            repr(last_error)
+        )
+
+    return success
 
 # ============================================================================
 # PROPERTY GROUP
@@ -458,6 +584,13 @@ class QP_OT_screenshot_quadview(bpy.types.Operator):
 
         temp_png = filepath + ".tmp_capture.png"
 
+        # Clean any stale temp file.
+        try:
+            if os.path.isfile(temp_png):
+                os.remove(temp_png)
+        except Exception:
+            pass
+
         try:
 
             with context.temp_override(
@@ -474,15 +607,19 @@ class QP_OT_screenshot_quadview(bpy.types.Operator):
                 self.report({'ERROR'}, "Screenshot operation failed")
                 return {'CANCELLED'}
 
-            if not os.path.isfile(temp_png):
-                self.report({'ERROR'}, "Screenshot file was not created")
-                return {'CANCELLED'}
-
         except Exception as exc:
 
             self.report(
                 {'ERROR'},
                 "Screenshot failed: {}".format(exc)
+            )
+            return {'CANCELLED'}
+
+        # Wait for the OS to flush the file.
+        if not wait_for_file(temp_png):
+            self.report(
+                {'ERROR'},
+                "Screenshot file was not written properly"
             )
             return {'CANCELLED'}
 
@@ -737,6 +874,13 @@ class QP_OT_screenshot_quadview_anim(bpy.types.Operator):
             "quadview_frame_{:04d}.png".format(self.capture_index)
         )
 
+        # Remove any stale file.
+        try:
+            if os.path.isfile(filepath):
+                os.remove(filepath)
+        except Exception:
+            pass
+
         try:
 
             with context.temp_override(
@@ -754,9 +898,6 @@ class QP_OT_screenshot_quadview_anim(bpy.types.Operator):
                     "screenshot_area returned {}".format(result)
                 )
 
-            if not os.path.isfile(filepath):
-                raise RuntimeError("Screenshot file was not created")
-
         except Exception as exc:
 
             print(
@@ -768,6 +909,16 @@ class QP_OT_screenshot_quadview_anim(bpy.types.Operator):
             self.report(
                 {'ERROR'},
                 "Could not capture frame {}: {}".format(self.frame, exc)
+            )
+            return {'CANCELLED'}
+
+        # Ensure the file is actually flushed and readable.
+        if not wait_for_file(filepath, timeout=2.0):
+
+            self.finish_capture(context, cancelled=True)
+            self.report(
+                {'ERROR'},
+                "Frame {} file not written".format(self.frame)
             )
             return {'CANCELLED'}
 
@@ -935,10 +1086,10 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
         quality = int(context.scene.qp_props.video_quality)
         quality = max(0, min(100, quality))
 
-        # 0 -> CRF 51 (worst), 100 -> CRF 0 (lossless)
         crf_value = int(round((100 - quality) * 51 / 100.0))
         crf_value = max(0, min(51, crf_value))
 
+        # -pix_fmt yuv420p guarantees RGB -> YUV 4:2:0 with color.
         command = [
             ffmpeg_path,
             "-y",
@@ -1017,7 +1168,7 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
 
         scene = context.scene
 
-        # Save render state (including ffmpeg + color settings)
+        # Save render state
         old_filepath = scene.render.filepath
         old_file_format = scene.render.image_settings.file_format
         old_color_mode = scene.render.image_settings.color_mode
@@ -1122,34 +1273,57 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
             scene.render.resolution_y = output_height
             scene.render.resolution_percentage = 100
 
+            # ------------------------------------------------------------------
             # 6. Video format settings
+            #
+            # IMPORTANT: set file_format FIRST, then force color_mode = 'RGB'.
+            # Blender resets color_mode whenever file_format changes, and if
+            # it stays at 'BW' the video will be grayscale.
+            # ------------------------------------------------------------------
+
             scene.render.image_settings.file_format = 'FFMPEG'
 
-            # CRITICAL: force RGB output (fixes black and white video)
-            try:
-                scene.render.image_settings.color_mode = 'RGB'
-            except Exception as exc:
-                print(
-                    "Playblast Quad View: Could not set color_mode:",
-                    exc
-                )
+            # Force RGB (with a fallback loop in case the mode is rejected).
+            color_mode_set = False
 
+            for mode in ('RGB', 'RGBA'):
+
+                try:
+                    scene.render.image_settings.color_mode = mode
+                    color_mode_set = True
+                    break
+                except Exception:
+                    continue
+
+            # Force 8-bit depth.
             try:
                 scene.render.image_settings.color_depth = '8'
             except Exception:
                 pass
 
+            # Verification print for debugging.
+            print(
+                "Playblast Quad View: VSE color_mode = '{}', "
+                "color_depth = '{}', file_format = '{}'".format(
+                    scene.render.image_settings.color_mode,
+                    scene.render.image_settings.color_depth,
+                    scene.render.image_settings.file_format
+                )
+            )
+
+            if not color_mode_set:
+                print(
+                    "Playblast Quad View: WARNING - could not force "
+                    "RGB color mode; output may be grayscale."
+                )
+
             scene.render.ffmpeg.format = 'MPEG4'
             scene.render.ffmpeg.codec = 'H264'
 
+            # ------------------------------------------------------------------
             # 7. Quality -> bitrate (CBR)
-            #
-            #   quality 0   -> 500 kbps
-            #   quality 100 -> 50000 kbps
-            #
-            # We also force constant_rate_factor to 'NONE' so Blender
-            # uses our bitrate instead of one of its CRF presets.
-            # Setting matching minrate and maxrate forces true CBR.
+            # ------------------------------------------------------------------
+
             quality = int(context.scene.qp_props.video_quality)
             quality = max(0, min(100, quality))
 
@@ -1165,7 +1339,6 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
 
             scene.render.ffmpeg.video_bitrate = bitrate_kbps
 
-            # Force CBR with matching minrate / maxrate
             try:
                 scene.render.ffmpeg.minrate = bitrate_kbps
             except Exception:
