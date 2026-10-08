@@ -19,7 +19,7 @@ from bpy.props import (
 bl_info = {
     "name": "Playblast Quad View",
     "author": "Venkatesh sanku",
-    "version": (1, 5, 0),
+    "version": (1, 5, 1),
     "blender": (5, 1, 0),
     "location": "View3D > Sidebar > Playblast",
     "description": "Playblast review screenshot and video sequences for viewport - quadview",
@@ -545,7 +545,6 @@ class QP_OT_screenshot_quadview_anim(bpy.types.Operator):
         self._old_toolbar = None
         self._old_gizmo = None
         self._old_header = None
-        self._old_header_align = None
 
         try:
 
@@ -1312,7 +1311,7 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
         old_ffmpeg_format = scene.render.ffmpeg.format
         old_ffmpeg_codec = scene.render.ffmpeg.codec
         old_ffmpeg_crf = scene.render.ffmpeg.constant_rate_factor
-        old_ffmpeg_bitrate = scene.render.ffmpeg.bitrate
+        old_ffmpeg_video_bitrate = scene.render.ffmpeg.video_bitrate
 
         try:
             # 2. Get or create sequence editor
@@ -1381,13 +1380,7 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
             scene.render.ffmpeg.codec = 'H264'
 
             # 8b. Quality -> bitrate mapping (kbps)
-            #
-            # Blender uses "constant_rate_factor" and "bitrate".
-            # When CRF is set to 'NONE', Blender uses the target bitrate.
-            #
-            # Quality 0   -> 1000 kbps
-            # Quality 100 -> 40000 kbps
-            #
+            #     Property is 'video_bitrate', not 'bitrate'.
             quality = int(context.scene.qp_props.video_quality)
             quality = max(0, min(100, quality))
 
@@ -1400,7 +1393,7 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
             except Exception:
                 pass
 
-            scene.render.ffmpeg.bitrate = bitrate_kbps
+            scene.render.ffmpeg.video_bitrate = bitrate_kbps
 
             print(
                 "Playblast Quad View: VSE quality={} -> bitrate={} kbps".format(
@@ -1464,7 +1457,7 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
                 scene.render.ffmpeg.format = old_ffmpeg_format
                 scene.render.ffmpeg.codec = old_ffmpeg_codec
                 scene.render.ffmpeg.constant_rate_factor = old_ffmpeg_crf
-                scene.render.ffmpeg.bitrate = old_ffmpeg_bitrate
+                scene.render.ffmpeg.video_bitrate = old_ffmpeg_video_bitrate
             except Exception as exc:
                 print("Could not restore render settings:", exc)
 
