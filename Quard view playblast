@@ -19,7 +19,7 @@ from bpy.props import (
 bl_info = {
     "name": "Playblast Quad View",
     "author": "Venkatesh sanku",
-    "version": (1, 4, 2),
+    "version": (1, 5, 0),
     "blender": (5, 1, 0),
     "location": "View3D > Sidebar > Playblast",
     "description": "Playblast review screenshot and video sequences for viewport - quadview",
@@ -229,6 +229,15 @@ class QP_Props(bpy.types.PropertyGroup):
         default=1.0,
         min=0.25,
         max=1.0
+    )
+
+    video_quality: IntProperty(
+        name="Video Quality",
+        description="Video quality from 0 (low) to 100 (high)",
+        default=90,
+        min=0,
+        max=100,
+        subtype='PERCENTAGE'
     )
 
     shading_mode: EnumProperty(
@@ -535,6 +544,8 @@ class QP_OT_screenshot_quadview_anim(bpy.types.Operator):
         self._old_ui = None
         self._old_toolbar = None
         self._old_gizmo = None
+        self._old_header = None
+        self._old_header_align = None
 
         try:
 
@@ -561,6 +572,11 @@ class QP_OT_screenshot_quadview_anim(bpy.types.Operator):
             if hasattr(space, "show_gizmo"):
                 self._old_gizmo = (
                     space.show_gizmo
+                )
+
+            if hasattr(space, "show_region_header"):
+                self._old_header = (
+                    space.show_region_header
                 )
 
         except Exception as exc:
@@ -597,6 +613,11 @@ class QP_OT_screenshot_quadview_anim(bpy.types.Operator):
             if hasattr(space, "show_gizmo"):
 
                 space.show_gizmo = False
+
+            # Hide the top header bar (Object Mode / View / Select / ...)
+            if hasattr(space, "show_region_header"):
+
+                space.show_region_header = False
 
         except Exception as exc:
 
@@ -952,6 +973,15 @@ class QP_OT_screenshot_quadview_anim(bpy.types.Operator):
                     self._old_gizmo
                 )
 
+            if (
+                self._old_header is not None
+                and hasattr(space, "show_region_header")
+            ):
+
+                space.show_region_header = (
+                    self._old_header
+                )
+
         except Exception as exc:
 
             print(
@@ -1148,6 +1178,18 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
             "quadview_frame_%04d.png"
         )
 
+        # --------------------------------------------------------------
+        # Quality mapping (0-100 -> CRF 51-0)
+        # --------------------------------------------------------------
+
+        quality = int(context.scene.qp_props.video_quality)
+        quality = max(0, min(100, quality))
+
+        # 0   -> CRF 51 (worst)
+        # 100 -> CRF 0  (lossless)
+        crf_value = int(round((100 - quality) * 51 / 100.0))
+        crf_value = max(0, min(51, crf_value))
+
         command = [
             ffmpeg_path,
             "-y",
@@ -1159,6 +1201,8 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
             "libx264",
             "-pix_fmt",
             "yuv420p",
+            "-crf",
+            str(crf_value),
         ]
 
         # --------------------------------------------------------------
@@ -1190,7 +1234,11 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
         ])
 
         print(
-            "Playblast Quad View: Running FFMPEG..."
+            "Playblast Quad View: Running FFMPEG "
+            "(quality={}, crf={})...".format(
+                quality,
+                crf_value
+            )
         )
 
         try:
@@ -1263,6 +1311,8 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
         old_frame_end = scene.frame_end
         old_ffmpeg_format = scene.render.ffmpeg.format
         old_ffmpeg_codec = scene.render.ffmpeg.codec
+        old_ffmpeg_crf = scene.render.ffmpeg.constant_rate_factor
+        old_ffmpeg_bitrate = scene.render.ffmpeg.bitrate
 
         try:
             # 2. Get or create sequence editor
@@ -1330,6 +1380,35 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
             scene.render.ffmpeg.format = 'MPEG4'
             scene.render.ffmpeg.codec = 'H264'
 
+            # 8b. Quality -> bitrate mapping (kbps)
+            #
+            # Blender uses "constant_rate_factor" and "bitrate".
+            # When CRF is set to 'NONE', Blender uses the target bitrate.
+            #
+            # Quality 0   -> 1000 kbps
+            # Quality 100 -> 40000 kbps
+            #
+            quality = int(context.scene.qp_props.video_quality)
+            quality = max(0, min(100, quality))
+
+            bitrate_kbps = int(
+                1000 + (quality / 100.0) * 39000
+            )
+
+            try:
+                scene.render.ffmpeg.constant_rate_factor = 'NONE'
+            except Exception:
+                pass
+
+            scene.render.ffmpeg.bitrate = bitrate_kbps
+
+            print(
+                "Playblast Quad View: VSE quality={} -> bitrate={} kbps".format(
+                    quality,
+                    bitrate_kbps
+                )
+            )
+
             # 9. Output path and frame range
             scene.render.filepath = output_path
             scene.render.fps = old_fps
@@ -1350,7 +1429,7 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
             except Exception:
                 pass
 
-            # 12. Render VSE animation (FIX: no 'sequencer' argument)
+            # 12. Render VSE animation
             print("Playblast Quad View: Rendering VSE video...")
             result = bpy.ops.render.render(animation=True)
             if 'FINISHED' not in result:
@@ -1384,6 +1463,8 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
                 scene.frame_end = old_frame_end
                 scene.render.ffmpeg.format = old_ffmpeg_format
                 scene.render.ffmpeg.codec = old_ffmpeg_codec
+                scene.render.ffmpeg.constant_rate_factor = old_ffmpeg_crf
+                scene.render.ffmpeg.bitrate = old_ffmpeg_bitrate
             except Exception as exc:
                 print("Could not restore render settings:", exc)
 
@@ -1467,6 +1548,11 @@ class QP_PT_panel(bpy.types.Panel):
         layout.prop(
             props,
             "resolution_scale"
+        )
+
+        layout.prop(
+            props,
+            "video_quality"
         )
 
         layout.prop(
