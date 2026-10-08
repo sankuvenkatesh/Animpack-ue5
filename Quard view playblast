@@ -12,7 +12,6 @@ from bpy.props import (
     PointerProperty,
 )
 
-
 # ============================================================================
 # ADD-ON INFO
 # ============================================================================
@@ -20,20 +19,18 @@ from bpy.props import (
 bl_info = {
     "name": "Playblast Quad View",
     "author": "Venkatesh sanku",
-    "version": (1, 4, 0),
+    "version": (1, 4, 1),
     "blender": (5, 1, 0),
     "location": "View3D > Sidebar > Playblast",
     "description": "Playblast review screenshot and video sequences for viewport - quadview",
     "category": "3D View",
 }
 
-
 # ============================================================================
 # GLOBAL STATE
 # ============================================================================
 
 _PLAYBLAST_RUNNING = False
-
 
 # ============================================================================
 # HELPERS
@@ -51,7 +48,6 @@ def get_view3d_area(context):
 
     return None
 
-
 def get_window_region(area):
     """Find the WINDOW region of a VIEW_3D area."""
     if area is None:
@@ -63,7 +59,6 @@ def get_window_region(area):
 
     return None
 
-
 def safe_remove_timer(window_manager, timer):
     """Safely remove a Blender event timer."""
     if timer is None:
@@ -74,12 +69,10 @@ def safe_remove_timer(window_manager, timer):
     except Exception:
         pass
 
-
 def ensure_folder(path):
     """Create a folder if it does not exist."""
     if path:
         os.makedirs(path, exist_ok=True)
-
 
 def clean_folder(path):
     """Delete a temporary folder safely."""
@@ -94,7 +87,6 @@ def clean_folder(path):
             "Playblast Quad View: Failed to remove temp folder:",
             exc
         )
-
 
 def get_output_path(filepath):
     """
@@ -116,7 +108,6 @@ def get_output_path(filepath):
 
     return filepath
 
-
 def get_temp_folder(output_path):
     """
     Temporary PNG directory.
@@ -129,7 +120,6 @@ def get_temp_folder(output_path):
     root, _ext = os.path.splitext(output_path)
 
     return root + "_temp"
-
 
 def get_frame_files(folder):
     """
@@ -162,7 +152,6 @@ def get_frame_files(folder):
     files.sort(key=sort_number)
 
     return files
-
 
 def get_image_resolution(filepath):
     """
@@ -200,7 +189,6 @@ def get_image_resolution(filepath):
                 bpy.data.images.remove(image)
             except Exception:
                 pass
-
 
 # ============================================================================
 # PROPERTY GROUP
@@ -253,7 +241,6 @@ class QP_Props(bpy.types.PropertyGroup):
         ],
         default='SOLID'
     )
-
 
 # ============================================================================
 # QUAD VIEW TOGGLE
@@ -331,7 +318,6 @@ class QP_OT_switch_layout(bpy.types.Operator):
             )
 
             return {'CANCELLED'}
-
 
 # ============================================================================
 # SINGLE SCREENSHOT
@@ -446,7 +432,6 @@ class QP_OT_screenshot_quadview(bpy.types.Operator):
         )
 
         return {'FINISHED'}
-
 
 # ============================================================================
 # PLAYBLAST ANIMATION CAPTURE
@@ -1036,7 +1021,6 @@ class QP_OT_screenshot_quadview_anim(bpy.types.Operator):
 
         _PLAYBLAST_RUNNING = False
 
-
 # ============================================================================
 # COMBINE IMAGES TO VIDEO
 # ============================================================================
@@ -1266,135 +1250,54 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
         return True
 
     # ----------------------------------------------------------------------
-    # BLENDER 5.1 VSE
+    # BLENDER VSE (COMPATIBLE WITH 3.x, 4.x, 5.x)
     # ----------------------------------------------------------------------
 
-    def encode_with_vse(
-        self,
-        context,
-        output_path,
-        folder,
-        images
-    ):
-
+    def encode_with_vse(self, context, output_path, folder, images):
         scene = context.scene
 
-        # --------------------------------------------------------------
-        # Save render state.
-        # --------------------------------------------------------------
-
+        # 1. Save render state (including ffmpeg settings)
         old_filepath = scene.render.filepath
-
-        old_file_format = (
-            scene.render.image_settings.file_format
-        )
-
+        old_file_format = scene.render.image_settings.file_format
         old_resolution_x = scene.render.resolution_x
         old_resolution_y = scene.render.resolution_y
-        old_resolution_percentage = (
-            scene.render.resolution_percentage
-        )
-
+        old_resolution_percentage = scene.render.resolution_percentage
         old_fps = scene.render.fps
         old_fps_base = scene.render.fps_base
-
         old_frame_start = scene.frame_start
         old_frame_end = scene.frame_end
-
-        # Save whether scene had a sequence editor.
-        had_sequence_editor = (
-            scene.sequence_editor is not None
-        )
+        old_ffmpeg_format = scene.render.ffmpeg.format
+        old_ffmpeg_codec = scene.render.ffmpeg.codec
 
         try:
-
-            # ----------------------------------------------------------
-            # Get/create sequence editor.
-            # ----------------------------------------------------------
-
+            # 2. Get or create sequence editor
             if scene.sequence_editor is None:
-
                 scene.sequence_editor_create()
-
             seq = scene.sequence_editor
 
-            # ----------------------------------------------------------
-            # Blender 5.1 API:
-            #
-            # seq.strips       -> top-level strips
-            # seq.strips_all   -> all strips recursively
-            #
-            # We remove top-level strips. If a meta-strip exists,
-            # removing the top-level meta removes its contents too.
-            # ----------------------------------------------------------
+            # 3. Compatibility: get strips collection (Blender 5.x uses .strips, older uses .sequences)
+            if hasattr(seq, "strips"):
+                strips_coll = seq.strips
+            else:
+                strips_coll = seq.sequences
 
-            for strip in list(seq.strips):
-
+            # 4. Clear existing strips
+            for strip in list(strips_coll):
                 try:
-
-                    seq.strips.remove(
-                        strip
-                    )
-
+                    strips_coll.remove(strip)
                 except Exception as exc:
+                    print("Could not remove strip:", strip.name, exc)
 
-                    print(
-                        "Could not remove strip:",
-                        strip.name,
-                        exc
-                    )
-
-            # ----------------------------------------------------------
-            # First image.
-            # ----------------------------------------------------------
-
-            first_image = os.path.join(
-                folder,
-                images[0]
-            )
-
+            first_image = os.path.join(folder, images[0])
             if not os.path.isfile(first_image):
+                raise RuntimeError("First image is missing:\n{}".format(first_image))
 
-                raise RuntimeError(
-                    "First image is missing:\n{}".format(
-                        first_image
-                    )
-                )
-
-            # ----------------------------------------------------------
-            # Read source dimensions.
-            # ----------------------------------------------------------
-
-            width, height = get_image_resolution(
-                first_image
-            )
-
+            width, height = get_image_resolution(first_image)
             if width is None or height is None:
+                raise RuntimeError("Unable to determine image resolution")
 
-                raise RuntimeError(
-                    "Unable to determine image resolution"
-                )
-
-            print(
-                "Playblast Quad View: Image size = {} x {}".format(
-                    width,
-                    height
-                )
-            )
-
-            # ----------------------------------------------------------
-            # Create Blender 5.1 image strip.
-            #
-            # This is the important API fix:
-            #
-            # OLD:
-            #     seq.sequences.new_image(...)
-            #
-            # NEW:
-            #     seq.strips.new_image(...)
-            # ----------------------------------------------------------
-
-            strip = seq.strips.new_image(
+            # 5. Create image strip (use compatible collection)
+            strip = strips_coll.new_image(
                 name="QuadView",
                 filepath=first_image,
                 channel=1,
@@ -1402,272 +1305,94 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
             )
 
             if strip is None:
+                raise RuntimeError("Blender failed to create the image strip")
 
-                raise RuntimeError(
-                    "Blender failed to create the image strip"
-                )
-
-            # ----------------------------------------------------------
-            # Add remaining images.
-            # ----------------------------------------------------------
-
+            # 6. Add remaining images
             for filename in images[1:]:
-
-                image_path = os.path.join(
-                    folder,
-                    filename
-                )
-
+                image_path = os.path.join(folder, filename)
                 if not os.path.isfile(image_path):
-
-                    raise RuntimeError(
-                        "Missing Playblast image:\n{}".format(
-                            image_path
-                        )
-                    )
-
-                # StripElements.append expects the filename
-                # relative to the image strip directory.
-                strip.elements.append(
-                    filename
-                )
-
-            # ----------------------------------------------------------
-            # Number of video frames.
-            # ----------------------------------------------------------
+                    raise RuntimeError("Missing Playblast image:\n{}".format(image_path))
+                strip.elements.append(filename)
 
             frame_count = len(images)
 
-            # ----------------------------------------------------------
-            # Resolution scale.
-            # ----------------------------------------------------------
-
-            scale = float(
-                context.scene.qp_props.resolution_scale
-            )
-
+            # 7. Resolution scaling
+            scale = float(context.scene.qp_props.resolution_scale)
             if scale <= 0:
                 scale = 1.0
-
-            output_width = int(
-                width * scale
-            )
-
-            output_height = int(
-                height * scale
-            )
-
-            # H.264 requires even dimensions.
-            output_width -= (
-                output_width % 2
-            )
-
-            output_height -= (
-                output_height % 2
-            )
-
-            output_width = max(
-                2,
-                output_width
-            )
-
-            output_height = max(
-                2,
-                output_height
-            )
-
-            scene.render.resolution_x = (
-                output_width
-            )
-
-            scene.render.resolution_y = (
-                output_height
-            )
-
+            output_width = int(width * scale)
+            output_height = int(height * scale)
+            output_width -= (output_width % 2)
+            output_height -= (output_height % 2)
+            output_width = max(2, output_width)
+            output_height = max(2, output_height)
+            scene.render.resolution_x = output_width
+            scene.render.resolution_y = output_height
             scene.render.resolution_percentage = 100
 
-            # ----------------------------------------------------------
-            # Video format.
-            # ----------------------------------------------------------
-
-            scene.render.image_settings.file_format = (
-                'FFMPEG'
-            )
-
-            # These properties are standard Blender movie settings.
+            # 8. Video format settings
+            scene.render.image_settings.file_format = 'FFMPEG'
             scene.render.ffmpeg.format = 'MPEG4'
             scene.render.ffmpeg.codec = 'H264'
 
-            # ----------------------------------------------------------
-            # Output.
-            # ----------------------------------------------------------
-
+            # 9. Output path and frame range
             scene.render.filepath = output_path
-
-            # ----------------------------------------------------------
-            # Keep original FPS.
-            # ----------------------------------------------------------
-
             scene.render.fps = old_fps
             scene.render.fps_base = old_fps_base
-
-            # ----------------------------------------------------------
-            # Render only the generated image sequence.
-            # ----------------------------------------------------------
-
             scene.frame_start = 1
             scene.frame_end = frame_count
 
-            # ----------------------------------------------------------
-            # Make VSE the source.
-            # ----------------------------------------------------------
-
+            # 10. Enable VSE rendering
             scene.render.use_sequencer = True
 
-            # ----------------------------------------------------------
-            # Refresh sequence editor.
-            # ----------------------------------------------------------
-
+            # 11. Refresh VSE
             try:
-
                 bpy.ops.sequencer.refresh_all()
-
             except Exception:
                 pass
-
-            # ----------------------------------------------------------
-            # Force strip information to update.
-            # ----------------------------------------------------------
-
             try:
-
                 context.view_layer.update()
-
             except Exception:
                 pass
 
-            # ----------------------------------------------------------
-            # Render VSE animation.
-            # ----------------------------------------------------------
-
-            print(
-                "Playblast Quad View: Rendering VSE video..."
-            )
-
-            result = bpy.ops.render.render(
-                animation=True,
-                sequencer=True
-            )
-
+            # 12. Render VSE animation
+            print("Playblast Quad View: Rendering VSE video...")
+            result = bpy.ops.render.render(animation=True, sequencer=True)
             if 'FINISHED' not in result:
-
-                raise RuntimeError(
-                    "VSE render returned: {}".format(
-                        result
-                    )
-                )
-
-            # ----------------------------------------------------------
-            # Verify output.
-            # ----------------------------------------------------------
+                raise RuntimeError("VSE render returned: {}".format(result))
 
             if not os.path.isfile(output_path):
-
                 raise RuntimeError(
-                    "Blender completed the render operation, "
-                    "but the video file was not created:\n{}".format(
-                        output_path
-                    )
+                    "Blender completed the render operation, but the video file was not created:\n{}".format(output_path)
                 )
 
-            print(
-                "Playblast Quad View: Video created:",
-                output_path
-            )
-
-            self.report(
-                {'INFO'},
-                "Video created successfully"
-            )
-
+            print("Playblast Quad View: Video created:", output_path)
+            self.report({'INFO'}, "Video created successfully")
             return {'FINISHED'}
 
         except Exception as exc:
-
-            print(
-                "=================================================="
-            )
-
-            print(
-                "Playblast Quad View VSE ERROR:"
-            )
-
-            print(
-                repr(exc)
-            )
-
-            print(
-                "=================================================="
-            )
-
-            self.report(
-                {'ERROR'},
-                "VSE encoding failed: {}".format(
-                    exc
-                )
-            )
-
+            print("Playblast Quad View VSE ERROR:", repr(exc))
+            self.report({'ERROR'}, "VSE encoding failed: {}".format(exc))
             return {'CANCELLED'}
 
         finally:
-
-            # ----------------------------------------------------------
-            # Restore scene render settings.
-            # ----------------------------------------------------------
-
+            # 13. Restore scene settings
             try:
-
-                scene.render.filepath = (
-                    old_filepath
-                )
-
-                scene.render.image_settings.file_format = (
-                    old_file_format
-                )
-
-                scene.render.resolution_x = (
-                    old_resolution_x
-                )
-
-                scene.render.resolution_y = (
-                    old_resolution_y
-                )
-
-                scene.render.resolution_percentage = (
-                    old_resolution_percentage
-                )
-
+                scene.render.filepath = old_filepath
+                scene.render.image_settings.file_format = old_file_format
+                scene.render.resolution_x = old_resolution_x
+                scene.render.resolution_y = old_resolution_y
+                scene.render.resolution_percentage = old_resolution_percentage
                 scene.render.fps = old_fps
                 scene.render.fps_base = old_fps_base
-
                 scene.frame_start = old_frame_start
                 scene.frame_end = old_frame_end
-
+                scene.render.ffmpeg.format = old_ffmpeg_format
+                scene.render.ffmpeg.codec = old_ffmpeg_codec
             except Exception as exc:
+                print("Could not restore render settings:", exc)
 
-                print(
-                    "Could not restore render settings:",
-                    exc
-                )
-
-            # ----------------------------------------------------------
-            # Delete temporary images only after encoding attempt.
-            # ----------------------------------------------------------
-
-            clean_folder(
-                folder
-            )
-
+            clean_folder(folder)
 
 # ============================================================================
 # UI PANEL
@@ -1769,7 +1494,6 @@ class QP_PT_panel(bpy.types.Panel):
                 icon='TIME'
             )
 
-
 # ============================================================================
 # REGISTER
 # ============================================================================
@@ -1783,7 +1507,6 @@ classes = (
     QP_PT_panel,
 )
 
-
 def register():
 
     for cls in classes:
@@ -1794,7 +1517,6 @@ def register():
     bpy.types.Scene.qp_props = PointerProperty(
         type=QP_Props
     )
-
 
 def unregister():
 
@@ -1815,10 +1537,9 @@ def unregister():
             cls
         )
 
-
 # ============================================================================
 # RUN
 # ============================================================================
 
-if __name__ == "__main__"q:
+if __name__ == "__main__":
     register()
