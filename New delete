@@ -1,5 +1,5 @@
 """
-Keyframe Tools Interval  -  v3.1.0  (Blender 5.1+)
+Keyframe Tools Interval  -  v3.1.1  (Blender 5.1+)
 
 Delete or bake keyframes at an interval on
   * selected bones   (Pose Mode)   : position / rotation / scale + numeric bone custom properties
@@ -8,26 +8,16 @@ Delete or bake keyframes at an interval on
 Install: Edit > Preferences > Add-ons > Install from Disk (or run it from the Text Editor).
 Panel  : 3D Viewport > Sidebar (N) > Item tab > "Keyframe Interval Tools".
 
-What changed in 3.1.0
-  * The Delete / Bake buttons sit at the TOP of the panel and are enabled in Object
-    Mode and Pose Mode no matter what is selected (the old poll needed a *selected
-    object*, which is often not the case in Pose Mode, so the buttons were greyed out).
-  * Unique operator / panel / property ids, so an older copy of this add-on can no
-    longer clash with (or remove) the buttons of this one.
-  * Keys are edited directly on the F-Curves of the action slot assigned to the object
-    (Blender 4.4+/5.x slotted actions) instead of tens of thousands of
-    keyframe_insert()/keyframe_delete() calls whose errors were hidden by "except: pass".
-  * Bake samples ALL frames first and writes the keys afterwards (no curve drift).
-  * Pose Mode only touches the selected bones (not the armature object itself); every
-    armature in Pose Mode is handled; hidden bones are ignored.
-  * "All Channels" really means everything (custom properties used to stay off).
-  * Real counts / errors are shown in the status bar and the System Console.
+What changed in 3.1.1
+  * Fixed AttributeError: 'Bone' object has no attribute 'select' in Blender 5.1.
+    Bone selection is now resolved robustly via Bone.select, Bone.select_get(),
+    PoseBone.select, and finally bpy.context.selected_pose_bones.
 """
 
 bl_info = {
     "name": "Keyframe Tools Interval",
     "author": "Venkatesh Sanku",
-    "version": (3, 1, 0),
+    "version": (3, 1, 1),
     "blender": (5, 1, 0),
     "location": "View3D > Sidebar > Item",
     "description": "Delete or bake keyframes by interval on transforms and bone custom properties",
@@ -210,12 +200,61 @@ class Target:
 
 
 def bone_is_visible(bone):
-    visible = getattr(bone, "is_visible", None)
+    """Robust visibility check across Blender versions."""
+    if bone is None:
+        return True
 
+    visible = getattr(bone, "is_visible", None)
     if visible is not None:
         return bool(visible)
 
-    return not bone.hide
+    hide = getattr(bone, "hide", None)
+    if hide is not None:
+        return not hide
+
+    return True
+
+
+def _pose_bone_selected(pb):
+    """
+    Robustly return True if a pose bone is selected.
+
+    Blender 5.1 does not always expose 'select' on the Bone reached via
+    pose_bone.bone, so we try multiple APIs and fall back to the context.
+    """
+    bone = getattr(pb, "bone", None)
+
+    if bone is not None:
+        # Classic property (Blender 2.x - 4.x, still present on many builds).
+        sel = getattr(bone, "select", None)
+        if sel is not None:
+            return bool(sel)
+
+        # Newer API: select_get() on the Bone itself.
+        getter = getattr(bone, "select_get", None)
+        if getter is not None:
+            try:
+                return bool(getter())
+            except Exception:
+                pass
+
+    # Some builds expose select on the PoseBone instead.
+    sel = getattr(pb, "select", None)
+    if sel is not None:
+        return bool(sel)
+
+    # Last resort: ask the context (valid for the active armature).
+    try:
+        selected = bpy.context.selected_pose_bones
+    except Exception:
+        selected = None
+
+    if selected:
+        for spb in selected:
+            if spb is pb:
+                return True
+
+    return False
 
 
 def selected_pose_bones(obj):
@@ -224,10 +263,13 @@ def selected_pose_bones(obj):
     if obj.type != 'ARMATURE' or pose is None:
         return []
 
-    return [
-        pb for pb in pose.bones
-        if pb.bone.select and bone_is_visible(pb.bone)
-    ]
+    result = []
+
+    for pb in pose.bones:
+        if _pose_bone_selected(pb) and bone_is_visible(pb.bone):
+            result.append(pb)
+
+    return result
 
 
 def collect_targets(context):
