@@ -1,13 +1,13 @@
 bl_info = {
     "name": "Display Modes — Selected / Unselected / All",
     "author": "ChatGPT + User",
-    "version": (2, 0, 0),
+    "version": (2, 1, 0),
     "blender": (4, 2, 0),
     "location": "3D Viewport > Sidebar > View; Outliner & Viewport context menus",
     "description": (
-        "Set viewport display modes (Bounds / Wire / Solid / Textured) for "
-        "Selected, Unselected, All, or Collection objects. Optionally forces "
-        "Bounds on save so files open light on any machine."
+        "Set viewport display modes for Selected, Unselected, All, or Collection "
+        "objects. Forces Bounds + Solid shading on save so files open light on "
+        "any machine, with or without the addon."
     ),
     "category": "3D View",
 }
@@ -19,6 +19,9 @@ from bpy.props import BoolProperty, EnumProperty
 ADDON_ID = __name__
 ORIG_KEY = "_display_mode_before_save"
 
+# Module-level stash for viewport space state (keyed by space.as_pointer())
+_saved_space_state = {}
+
 
 #===================================
 # --- Addon Preferences ---
@@ -29,18 +32,17 @@ class OBJECTDISPLAY_AP_preferences(AddonPreferences):
     force_bounds_on_save: BoolProperty(
         name="Force Bounds on Save",
         description=(
-            "Before saving the .blend file, set every object's viewport display "
-            "type to Bounds. Files then open quickly on any machine — with or "
-            "without this addon installed"
+            "Before saving, set every object's display type to Bounds AND force "
+            "each 3D Viewport's shading to Solid with wireframes off. The file "
+            "then opens as bounding boxes on any machine — with or without this addon"
         ),
         default=True,
     )
     restore_on_load: BoolProperty(
         name="Restore Display Modes on Load",
         description=(
-            "When a .blend is opened on a machine that has this addon installed, "
-            "restore the original display modes that were stored before the last "
-            "save. On machines without the addon, files will simply open in Bounds"
+            "When a .blend is opened on a machine with this addon installed, "
+            "restore the original display modes that were stashed before the save"
         ),
         default=True,
     )
@@ -51,9 +53,9 @@ class OBJECTDISPLAY_AP_preferences(AddonPreferences):
         col.prop(self, "force_bounds_on_save")
         col.prop(self, "restore_on_load")
         col.separator()
-        col.label(text="Tip: display_type is saved in the .blend file itself.", icon='INFO')
-        col.label(text="No addon is required on the opening machine.")
-        col.label(text="Viewport Shading (top-right) can override display types.")
+        col.label(text="Saved .blend opens as Bounds everywhere.", icon='INFO')
+        col.label(text="Viewport Shading is forced to Solid on save,")
+        col.label(text="because Wireframe shading overrides display_type.")
 
 
 def _get_prefs(context):
@@ -62,33 +64,60 @@ def _get_prefs(context):
 
 
 #===================================
-# --- Save / Load Handlers ---
+# --- Viewport space helpers ---
 #===================================
-def _save_pre_handler(dummy):
-    prefs = _get_prefs(bpy.context)
-    if not prefs or not prefs.force_bounds_on_save:
-        return
+def _iter_view3d_spaces():
+    """Yield every 3D Viewport space currently open."""
+    for window in bpy.context.window_manager.windows:
+        for area in window.screen.areas:
+            if area.type == 'VIEW_3D':
+                for space in area.spaces:
+                    if space.type == 'VIEW_3D':
+                        yield space
+
+
+def _force_solid_shading_and_stash():
+    _saved_space_state.clear()
+    for space in _iter_view3d_spaces():
+        key = space.as_pointer()
+        try:
+            _saved_space_state[key] = (
+                space.shading.type,
+                space.overlay.show_wireframes,
+            )
+            space.shading.type = 'SOLID'
+            space.overlay.show_wireframes = False
+        except Exception:
+            # Space might not be fully initialized; skip safely
+            pass
+
+
+def _restore_space_shading():
+    for space in _iter_view3d_spaces():
+        key = space.as_pointer()
+        state = _saved_space_state.get(key)
+        if not state:
+            continue
+        shading_type, show_wireframes = state
+        try:
+            space.shading.type = shading_type
+            space.overlay.show_wireframes = show_wireframes
+        except Exception:
+            pass
+    _saved_space_state.clear()
+
+
+#===================================
+# --- Object display stashing ---
+#===================================
+def _stash_and_force_bounds():
     for obj in bpy.data.objects:
         if ORIG_KEY not in obj:
             obj[ORIG_KEY] = obj.display_type
         obj.display_type = 'BOUNDS'
 
 
-def _save_post_handler(dummy):
-    prefs = _get_prefs(bpy.context)
-    if not prefs or not prefs.force_bounds_on_save:
-        return
-    _restore_display_types(bpy.context)
-
-
-def _load_post_handler(dummy):
-    prefs = _get_prefs(bpy.context)
-    if not prefs or not prefs.restore_on_load:
-        return
-    _restore_display_types(bpy.context)
-
-
-def _restore_display_types(context):
+def _restore_display_types():
     for obj in bpy.data.objects:
         if ORIG_KEY in obj:
             try:
@@ -102,10 +131,36 @@ def _restore_display_types(context):
 
 
 #===================================
+# --- Save / Load Handlers ---
+#===================================
+def _save_pre_handler(dummy):
+    prefs = _get_prefs(bpy.context)
+    if not prefs or not prefs.force_bounds_on_save:
+        return
+    _stash_and_force_bounds()
+    _force_solid_shading_and_stash()
+
+
+def _save_post_handler(dummy):
+    prefs = _get_prefs(bpy.context)
+    if not prefs or not prefs.force_bounds_on_save:
+        return
+    _restore_display_types()
+    _restore_space_shading()
+
+
+def _load_post_handler(dummy):
+    prefs = _get_prefs(bpy.context)
+    if not prefs or not prefs.restore_on_load:
+        return
+    _restore_display_types()
+
+
+#===================================
 # --- Main Operator ---
 #===================================
 class OBJECTSDISPLAY_OT_objects_viewport_display(Operator):
-    """Select objects by certain criteria and set their viewport display mode"""
+    """Select objects by criteria and set their viewport display mode"""
     bl_idname = "objectsdisplay.objects_viewport_display"
     bl_label = "Objects Viewport Display"
     bl_options = {'REGISTER', 'UNDO'}
