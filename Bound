@@ -1,13 +1,14 @@
 bl_info = {
     "name": "Display Modes — Selected / Unselected / All",
     "author": "ChatGPT + User",
-    "version": (3, 0, 0),
+    "version": (4, 1, 0),
     "blender": (4, 2, 0),
     "location": "3D Viewport > Sidebar > View; Outliner & Viewport context menus",
     "description": (
         "Set viewport display modes for Selected, Unselected, All, or Collection "
-        "objects. On save, forces Bounds + Wireframe into the file. With the addon "
-        "installed the file opens as Bounds; without the addon it opens as Wireframe."
+        "objects. Optional per-file fallback: when switched on for a file, saving "
+        "writes Bounds + Wireframe into it. With the addon active that file opens "
+        "as Bounds; without the addon it opens as Wireframe."
     ),
     "category": "3D View",
 }
@@ -15,11 +16,19 @@ bl_info = {
 import bpy
 from bpy.types import Operator, Panel, Menu, AddonPreferences
 from bpy.props import BoolProperty, EnumProperty
+from bpy.app.handlers import persistent
 
 ADDON_ID = __name__
 
-# Per-session stash used only to restore the user's live viewport after save
-_saved_shading_for_session = {}
+# Per-file switch. It is registered on every Scene, so Blender stores it in the .blend.
+FALLBACK_PROP = "objectsdisplay_fallback"
+
+# Live-session state captured right before a save so it can be put back afterwards:
+#   {"shading": {space_pointer: shading_type}, "display": {object_pointer: display_type}}
+_snapshot = None
+
+# Re-entrancy guard for _sync_fallback_flag
+_syncing = False
 
 
 #===================================
@@ -31,9 +40,10 @@ class OBJECTDISPLAY_AP_preferences(AddonPreferences):
     force_on_save: BoolProperty(
         name="Force Fallback State on Save",
         description=(
-            "On every save, write the .blend with objects in Bounds and every "
-            "3D Viewport's shading set to Wireframe. Files then open as Bounds "
-            "on machines that have this addon, and as Wireframe everywhere else"
+            "Master switch. When on, any file that has 'Fallback on Save (this "
+            "file)' enabled is written with every object set to Bounds and every "
+            "3D Viewport set to Wireframe (your open session is restored right "
+            "after the save). Turn off to disable the behaviour for all files"
         ),
         default=True,
     )
@@ -42,27 +52,59 @@ class OBJECTDISPLAY_AP_preferences(AddonPreferences):
         layout = self.layout
         layout.prop(self, "force_on_save")
         box = layout.box()
-        box.label(text="With addon    → file opens as Bounds", icon='CHECKMARK')
-        box.label(text="Without addon → file opens as Wireframe", icon='X')
+        box.label(text="Per file: View tab > Display Modes > Fallback on Save", icon='INFO')
+        box.label(text="With addon    → opens as Bounds", icon='CHECKMARK')
+        box.label(text="Without addon → opens as Wireframe", icon='X')
 
 
-def _get_prefs(context):
-    return context.preferences.addons[ADDON_ID].preferences \
-        if ADDON_ID in context.preferences.addons else None
+def _get_prefs():
+    try:
+        return bpy.context.preferences.addons[ADDON_ID].preferences
+    except (KeyError, AttributeError):
+        return None
 
 
 #===================================
-# --- Viewport space helpers ---
+# --- Per-file switch (stored in the .blend, on every Scene) ---
 #===================================
-def _iter_view3d_spaces():
-    """Yield every open 3D Viewport space (works in handlers, timers, operators)."""
-    wm = bpy.context.window_manager
-    if not wm:
+def _file_opted_in():
+    """True when this .blend has 'Fallback on Save (this file)' switched on."""
+    return any(getattr(scene, FALLBACK_PROP, False) for scene in bpy.data.scenes)
+
+
+def _flag_owner(context):
+    """The scene that represents the file's switch: one that has it on, else the current one."""
+    for scene in bpy.data.scenes:
+        if getattr(scene, FALLBACK_PROP, False):
+            return scene
+    return context.scene
+
+
+def _sync_fallback_flag(self, context):
+    """Property update: copy the new value to every scene so it acts as ONE per-file switch."""
+    global _syncing
+    if _syncing:
         return
-    for window in wm.windows:
-        if not window.screen:
-            continue
-        for area in window.screen.areas:
+    _syncing = True
+    try:
+        value = getattr(self, FALLBACK_PROP)
+        for scene in bpy.data.scenes:
+            try:
+                if getattr(scene, FALLBACK_PROP) != value:
+                    setattr(scene, FALLBACK_PROP, value)
+            except Exception:
+                pass  # e.g. a linked (read-only) scene
+    finally:
+        _syncing = False
+
+
+#===================================
+# --- Core helpers — iterate bpy.data.screens (NOT window_manager) ---
+#===================================
+def _iter_all_view3d_spaces():
+    """Every 3D Viewport space across every screen, visible or not."""
+    for screen in bpy.data.screens:
+        for area in screen.areas:
             if area.type != 'VIEW_3D':
                 continue
             for space in area.spaces:
@@ -70,66 +112,145 @@ def _iter_view3d_spaces():
                     yield space
 
 
-def _force_objects_bounds():
+def _set_all_viewport_shading(mode):
+    count = 0
+    for space in _iter_all_view3d_spaces():
+        try:
+            if space.shading.type != mode:
+                space.shading.type = mode
+            count += 1
+        except Exception:
+            pass
+    return count
+
+
+def _force_all_objects_bounds():
     for obj in bpy.data.objects:
         try:
-            obj.display_type = 'BOUNDS'
+            if obj.display_type != 'BOUNDS':
+                obj.display_type = 'BOUNDS'
         except Exception:
             pass
 
 
-def _set_all_viewports_shading(shading_type):
-    for space in _iter_view3d_spaces():
-        try:
-            space.shading.type = shading_type
-        except Exception:
-            pass
+def _force_fallback_state():
+    """Objects → BOUNDS, every viewport → WIREFRAME. This is what gets saved."""
+    _force_all_objects_bounds()
+    return _set_all_viewport_shading('WIREFRAME')
 
 
 #===================================
-# --- Save / Load Handlers ---
+# --- Snapshot / restore of the live session around a save ---
 #===================================
-def _save_pre_handler(dummy):
-    """Before writing the file: stash live shading, then force BOUNDS + WIREFRAME."""
-    prefs = _get_prefs(bpy.context)
-    if not prefs or not prefs.force_on_save:
-        return
-
-    _saved_shading_for_session.clear()
-    for space in _iter_view3d_spaces():
+def _take_snapshot():
+    snap = {"shading": {}, "display": {}}
+    for space in _iter_all_view3d_spaces():
         try:
-            _saved_shading_for_session[space.as_pointer()] = space.shading.type
+            snap["shading"][space.as_pointer()] = space.shading.type
+        except Exception:
+            pass
+    for obj in bpy.data.objects:
+        try:
+            snap["display"][obj.as_pointer()] = obj.display_type
+        except Exception:
+            pass
+    return snap
+
+
+def _restore_snapshot():
+    """Put the live session back exactly as it was before the save forced the
+    fallback state: viewport shading AND every object's display type.
+    Also used as a timer callback, so it always returns None (= run once)."""
+    global _snapshot
+    snap, _snapshot = _snapshot, None
+    if not snap:
+        return None
+
+    for space in _iter_all_view3d_spaces():
+        wanted = snap["shading"].get(space.as_pointer())
+        if wanted is None:
+            continue
+        try:
+            if space.shading.type != wanted:
+                space.shading.type = wanted
         except Exception:
             pass
 
-    _force_objects_bounds()
-    _set_all_viewports_shading('WIREFRAME')
+    for obj in bpy.data.objects:
+        wanted = snap["display"].get(obj.as_pointer())
+        if wanted is None:
+            continue
+        try:
+            if obj.display_type != wanted:
+                obj.display_type = wanted
+        except Exception:
+            pass
+    return None
 
 
-def _save_post_handler(dummy):
-    """After the file is written: restore the user's live viewport shading."""
-    for space in _iter_view3d_spaces():
-        key = space.as_pointer()
-        if key in _saved_shading_for_session:
-            try:
-                space.shading.type = _saved_shading_for_session[key]
-            except Exception:
-                pass
-    _saved_shading_for_session.clear()
+#===================================
+# --- Manual operator: apply fallback state right now ---
+#===================================
+class OBJECTDISPLAY_OT_apply_fallback(Operator):
+    """Immediately set all objects to Bounds and all viewports to Wireframe.
+Useful for verifying behaviour, or for preparing a file before sharing."""
+    bl_idname = "objectsdisplay.apply_fallback"
+    bl_label = "Apply Fallback State (Bounds + Wireframe)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        _force_all_objects_bounds()
+        n = _set_all_viewport_shading('WIREFRAME')
+        self.report({'INFO'}, f"Fallback applied to {n} viewport(s)")
+        return {'FINISHED'}
 
 
-def _apply_load_overrides():
-    """Force BOUNDS objects + SOLID shading on load (only if addon is active)."""
-    prefs = _get_prefs(bpy.context)
-    if not prefs:
-        return
-    _force_objects_bounds()
-    _set_all_viewports_shading('SOLID')
+#===================================
+# --- Save / Load Handlers (@persistent so they survive file loads) ---
+#===================================
+@persistent
+def _save_pre_handler(*_args):
+    global _snapshot
+    prefs = _get_prefs()
+    if not prefs or not prefs.force_on_save or not _file_opted_in():
+        return  # master switch off, or this file has not opted in: leave everything alone
+
+    # If an earlier save's restore is still pending, its snapshot is the true
+    # session state — keep it instead of snapshotting the already-forced state.
+    if _snapshot is None:
+        _snapshot = _take_snapshot()
+
+    # Safety net: if the save fails, save_post never fires. Timers only run once
+    # Blender's main loop is free again (i.e. after the save), so this always restores.
+    if not bpy.app.timers.is_registered(_restore_snapshot):
+        bpy.app.timers.register(_restore_snapshot, first_interval=0.1)
+
+    # Write the fallback state into the file about to be saved
+    _force_fallback_state()
 
 
-def _load_post_handler(dummy):
-    # Viewport areas may not be ready the instant load_post fires; defer a tick.
-    bpy.app.timers.register(_apply_load_overrides, first_interval=0.1)
+@persistent
+def _save_post_handler(*_args):
+    # The file is fully written now — put the live session back right away
+    _restore_snapshot()
+
+
+@persistent
+def _load_post_handler(*_args):
+    global _snapshot
+    _snapshot = None  # a snapshot from the previous file is meaningless now
+    # Viewports aren't ready the instant load_post fires; defer.
+    bpy.app.timers.register(_post_load_apply, first_interval=0.3)
+
+
+def _post_load_apply():
+    prefs = _get_prefs()
+    if not prefs or not _file_opted_in():
+        return None  # addon not active, or this file hasn't opted in — leave it as saved
+
+    _force_all_objects_bounds()
+    _set_all_viewport_shading('SOLID')   # SOLID + BOUNDS = visible bounding boxes
+    return None
 
 
 #===================================
@@ -208,15 +329,19 @@ class OBJECTSDISPLAY_OT_objects_viewport_display(Operator):
             case 'ALL':        objects = list(context.scene.objects)
             case 'SELECTED':   objects = self._iter_selected(context)
             case 'UNSELECTED': objects = self._iter_unselected(context)
-            case 'COLLECTION':
-                objects = self._iter_collection(context)
-                self._rename_collection(context, self.display_mode)
+            case 'COLLECTION': objects = self._iter_collection(context)
 
+        changed = 0
         for obj in objects:
             try:
                 obj.display_type = self.display_mode
+                changed += 1
             except Exception:
                 pass
+
+        # Only tag the collection name when something was actually changed
+        if self.select_method == 'COLLECTION' and changed:
+            self._rename_collection(context, self.display_mode)
         return {'FINISHED'}
 
     @classmethod
@@ -260,11 +385,16 @@ class OBJECTDISPLAY_PT_objectdisplay_panel(Panel):
                 op.select_method = scope.upper()
                 op.display_mode  = mode
 
-        prefs = _get_prefs(context)
+        prefs = _get_prefs()
+        box2 = layout.box()
+        box2.label(text="Save Behaviour:", icon='FILE_TICK')
+        box2.prop(_flag_owner(context), FALLBACK_PROP, toggle=True)
         if prefs:
-            box2 = layout.box()
-            box2.label(text="Save Behaviour:", icon='FILE_TICK')
             box2.prop(prefs, "force_on_save", toggle=True)
+            if not prefs.force_on_save:
+                box2.label(text="Master switch is off (Preferences)", icon='ERROR')
+        box2.operator("objectsdisplay.apply_fallback",
+                      icon='SHADING_WIRE', text="Apply Fallback Now")
 
 
 #===================================
@@ -311,6 +441,7 @@ classes = (
     OBJECTDISPLAY_AP_preferences,
     OBJECTDISPLAY_PT_objectdisplay_panel,
     OBJECTSDISPLAY_OT_objects_viewport_display,
+    OBJECTDISPLAY_OT_apply_fallback,
     OBJECTDISPLAY_MT_viewport_object_submenu,
     OBJECTDISPLAY_MT_outliner_object_submenu,
     OBJECTDISPLAY_MT_outliner_collection_submenu,
@@ -335,6 +466,19 @@ def _menu_viewport_object(self, context):
 
 
 def register():
+    # Per-file switch: lives on every Scene, so it is saved inside the .blend
+    setattr(bpy.types.Scene, FALLBACK_PROP, BoolProperty(
+        name="Fallback on Save (this file)",
+        description=(
+            "Applies to this .blend only. When on, saving writes every object as "
+            "Bounds and every 3D Viewport as Wireframe into the file (your open "
+            "session is restored right after). With this addon active the file "
+            "opens as Bounds + Solid; without it, as Wireframe"
+        ),
+        default=False,
+        update=_sync_fallback_flag,
+    ))
+
     for cls in classes:
         bpy.utils.register_class(cls)
 
@@ -349,6 +493,15 @@ def register():
 
 
 def unregister():
+    # Put the session back if a save left a snapshot pending, and drop pending timers
+    _restore_snapshot()
+    for fn in (_restore_snapshot, _post_load_apply):
+        try:
+            if bpy.app.timers.is_registered(fn):
+                bpy.app.timers.unregister(fn)
+        except Exception:
+            pass
+
     for handler, collection in (
         (_save_pre_handler,  bpy.app.handlers.save_pre),
         (_save_post_handler, bpy.app.handlers.save_post),
@@ -372,6 +525,11 @@ def unregister():
 
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
+
+    try:
+        delattr(bpy.types.Scene, FALLBACK_PROP)
+    except AttributeError:
+        pass
 
 
 if __name__ == "__main__":
