@@ -1,13 +1,14 @@
 bl_info = {
     "name": "Display Modes — Selected / Unselected / All",
     "author": "ChatGPT + User",
-    "version": (2, 1, 0),
+    "version": (2, 2, 0),
     "blender": (4, 2, 0),
     "location": "3D Viewport > Sidebar > View; Outliner & Viewport context menus",
     "description": (
         "Set viewport display modes for Selected, Unselected, All, or Collection "
-        "objects. Forces Bounds + Solid shading on save so files open light on "
-        "any machine, with or without the addon."
+        "objects. On save, forces Bounds + Wireframe viewport shading so files "
+        "open as wireframes on machines without the addon, and restore normally "
+        "where the addon is installed."
     ),
     "category": "3D View",
 }
@@ -19,7 +20,7 @@ from bpy.props import BoolProperty, EnumProperty
 ADDON_ID = __name__
 ORIG_KEY = "_display_mode_before_save"
 
-# Module-level stash for viewport space state (keyed by space.as_pointer())
+# Stash for viewport space state (keyed by space.as_pointer())
 _saved_space_state = {}
 
 
@@ -29,12 +30,13 @@ _saved_space_state = {}
 class OBJECTDISPLAY_AP_preferences(AddonPreferences):
     bl_idname = ADDON_ID
 
-    force_bounds_on_save: BoolProperty(
-        name="Force Bounds on Save",
+    force_on_save: BoolProperty(
+        name="Force Fallback State on Save",
         description=(
-            "Before saving, set every object's display type to Bounds AND force "
-            "each 3D Viewport's shading to Solid with wireframes off. The file "
-            "then opens as bounding boxes on any machine — with or without this addon"
+            "Before saving: stash the current viewport shading + object display "
+            "types, then write the file with objects in Bounds and viewport "
+            "shading set to Wireframe. Files then open as wireframes on any "
+            "machine that does not have this addon active"
         ),
         default=True,
     )
@@ -42,7 +44,8 @@ class OBJECTDISPLAY_AP_preferences(AddonPreferences):
         name="Restore Display Modes on Load",
         description=(
             "When a .blend is opened on a machine with this addon installed, "
-            "restore the original display modes that were stashed before the save"
+            "restore the original viewport shading and object display modes "
+            "that were stashed before the save"
         ),
         default=True,
     )
@@ -50,12 +53,15 @@ class OBJECTDISPLAY_AP_preferences(AddonPreferences):
     def draw(self, context):
         layout = self.layout
         col = layout.column(align=True)
-        col.prop(self, "force_bounds_on_save")
+        col.prop(self, "force_on_save")
         col.prop(self, "restore_on_load")
         col.separator()
-        col.label(text="Saved .blend opens as Bounds everywhere.", icon='INFO')
-        col.label(text="Viewport Shading is forced to Solid on save,")
-        col.label(text="because Wireframe shading overrides display_type.")
+        box = layout.box()
+        box.label(text="Behaviour summary:", icon='INFO')
+        box.label(text="• With addon  → opens with your saved display modes")
+        box.label(text="• Without addon → opens as wireframe")
+        box.label(text="Wireframe shading overrides object display_type,")
+        box.label(text="so the fallback view is guaranteed.")
 
 
 def _get_prefs(context):
@@ -67,7 +73,7 @@ def _get_prefs(context):
 # --- Viewport space helpers ---
 #===================================
 def _iter_view3d_spaces():
-    """Yield every 3D Viewport space currently open."""
+    """Yield every open 3D Viewport space."""
     for window in bpy.context.window_manager.windows:
         for area in window.screen.areas:
             if area.type == 'VIEW_3D':
@@ -76,7 +82,8 @@ def _iter_view3d_spaces():
                         yield space
 
 
-def _force_solid_shading_and_stash():
+def _force_fallback_state():
+    """Stash current shading + overlay state, then force Wireframe shading."""
     _saved_space_state.clear()
     for space in _iter_view3d_spaces():
         key = space.as_pointer()
@@ -85,10 +92,11 @@ def _force_solid_shading_and_stash():
                 space.shading.type,
                 space.overlay.show_wireframes,
             )
-            space.shading.type = 'SOLID'
-            space.overlay.show_wireframes = False
+            # Force wireframe shading. This is what any machine without the
+            # addon will see, because shading.type overrides display_type.
+            space.shading.type = 'WIREFRAME'
+            space.overlay.show_wireframes = True
         except Exception:
-            # Space might not be fully initialized; skip safely
             pass
 
 
@@ -135,15 +143,15 @@ def _restore_display_types():
 #===================================
 def _save_pre_handler(dummy):
     prefs = _get_prefs(bpy.context)
-    if not prefs or not prefs.force_bounds_on_save:
+    if not prefs or not prefs.force_on_save:
         return
     _stash_and_force_bounds()
-    _force_solid_shading_and_stash()
+    _force_fallback_state()
 
 
 def _save_post_handler(dummy):
     prefs = _get_prefs(bpy.context)
-    if not prefs or not prefs.force_bounds_on_save:
+    if not prefs or not prefs.force_on_save:
         return
     _restore_display_types()
     _restore_space_shading()
@@ -288,7 +296,7 @@ class OBJECTDISPLAY_PT_objectdisplay_panel(Panel):
         if prefs:
             box2 = layout.box()
             box2.label(text="Save Behaviour:", icon='FILE_TICK')
-            box2.prop(prefs, "force_bounds_on_save", toggle=True)
+            box2.prop(prefs, "force_on_save", toggle=True)
             box2.prop(prefs, "restore_on_load", toggle=True)
 
 
