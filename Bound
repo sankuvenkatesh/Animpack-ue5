@@ -1,0 +1,348 @@
+bl_info = {
+    "name": "Display Modes — Selected / Unselected / All",
+    "author": "ChatGPT + User",
+    "version": (2, 0, 0),
+    "blender": (4, 2, 0),
+    "location": "3D Viewport > Sidebar > View; Outliner & Viewport context menus",
+    "description": (
+        "Set viewport display modes (Bounds / Wire / Solid / Textured) for "
+        "Selected, Unselected, All, or Collection objects. Optionally forces "
+        "Bounds on save so files open light on any machine."
+    ),
+    "category": "3D View",
+}
+
+import bpy
+from bpy.types import Operator, Panel, Menu, AddonPreferences
+from bpy.props import BoolProperty, EnumProperty
+
+ADDON_ID = __name__
+ORIG_KEY = "_display_mode_before_save"
+
+
+#===================================
+# --- Addon Preferences ---
+#===================================
+class OBJECTDISPLAY_AP_preferences(AddonPreferences):
+    bl_idname = ADDON_ID
+
+    force_bounds_on_save: BoolProperty(
+        name="Force Bounds on Save",
+        description=(
+            "Before saving the .blend file, set every object's viewport display "
+            "type to Bounds. Files then open quickly on any machine — with or "
+            "without this addon installed"
+        ),
+        default=True,
+    )
+    restore_on_load: BoolProperty(
+        name="Restore Display Modes on Load",
+        description=(
+            "When a .blend is opened on a machine that has this addon installed, "
+            "restore the original display modes that were stored before the last "
+            "save. On machines without the addon, files will simply open in Bounds"
+        ),
+        default=True,
+    )
+
+    def draw(self, context):
+        layout = self.layout
+        col = layout.column(align=True)
+        col.prop(self, "force_bounds_on_save")
+        col.prop(self, "restore_on_load")
+        col.separator()
+        col.label(text="Tip: display_type is saved in the .blend file itself.", icon='INFO')
+        col.label(text="No addon is required on the opening machine.")
+        col.label(text="Viewport Shading (top-right) can override display types.")
+
+
+def _get_prefs(context):
+    prefs = context.preferences.addons.get(ADDON_ID)
+    return prefs.preferences if prefs else None
+
+
+#===================================
+# --- Save / Load Handlers ---
+#===================================
+def _save_pre_handler(dummy):
+    prefs = _get_prefs(bpy.context)
+    if not prefs or not prefs.force_bounds_on_save:
+        return
+    for obj in bpy.data.objects:
+        if ORIG_KEY not in obj:
+            obj[ORIG_KEY] = obj.display_type
+        obj.display_type = 'BOUNDS'
+
+
+def _save_post_handler(dummy):
+    prefs = _get_prefs(bpy.context)
+    if not prefs or not prefs.force_bounds_on_save:
+        return
+    _restore_display_types(bpy.context)
+
+
+def _load_post_handler(dummy):
+    prefs = _get_prefs(bpy.context)
+    if not prefs or not prefs.restore_on_load:
+        return
+    _restore_display_types(bpy.context)
+
+
+def _restore_display_types(context):
+    for obj in bpy.data.objects:
+        if ORIG_KEY in obj:
+            try:
+                obj.display_type = obj[ORIG_KEY]
+            except Exception:
+                pass
+            try:
+                del obj[ORIG_KEY]
+            except Exception:
+                pass
+
+
+#===================================
+# --- Main Operator ---
+#===================================
+class OBJECTSDISPLAY_OT_objects_viewport_display(Operator):
+    """Select objects by certain criteria and set their viewport display mode"""
+    bl_idname = "objectsdisplay.objects_viewport_display"
+    bl_label = "Objects Viewport Display"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    select_method: EnumProperty(
+        name="Select Method",
+        items=[
+            ('ALL',        "All",        "All objects",        0),
+            ('SELECTED',   "Selected",   "Selected objects",   1),
+            ('UNSELECTED', "Unselected", "Unselected objects", 2),
+            ('COLLECTION', "Collection", "Collection objects", 3),
+        ],
+        default='SELECTED',
+    )
+    display_mode: EnumProperty(
+        name="Display Mode",
+        items=[
+            ('BOUNDS',   "Bounds",   "Bounds mode",   0),
+            ('WIRE',     "Wire",     "Wire mode",     1),
+            ('SOLID',    "Solid",    "Solid mode",    2),
+            ('TEXTURED', "Textured", "Textured mode", 3),
+        ],
+        default='TEXTURED',
+    )
+
+    def _iter_selected(self, context):
+        if not context.selected_objects:
+            self.report({'INFO'}, "No objects are selected")
+            return []
+        return list(context.selected_objects)
+
+    def _iter_unselected(self, context):
+        if not context.selected_objects:
+            self.report({'INFO'}, "Nothing selected — operating on all objects")
+            return list(context.scene.objects)
+        sel = set(context.selected_objects)
+        return [o for o in context.scene.objects if o not in sel]
+
+    def _iter_collection(self, context):
+        active = context.view_layer.active_layer_collection
+        if active == context.view_layer.layer_collection:
+            self.report({'WARNING'}, "Select a specific collection, not the scene root")
+            return []
+        coll = active.collection
+        if not coll.all_objects:
+            self.report({'INFO'}, "Collection is empty")
+            return []
+        return list(coll.all_objects)
+
+    def _rename_collection(self, context, mode):
+        coll = context.view_layer.active_layer_collection.collection
+        if (coll == context.scene.collection or
+                coll.library is not None or
+                coll.override_library is not None):
+            self.report({'INFO'}, "Collection name is read-only; skipping rename")
+            return
+        for suffix in ("_WIRE", "_BOUNDS", "_SOLID", "_TEXTURED",
+                       " WIRE", " BOUNDS", " SOLID", " TEXTURED",
+                       "-WIRE", "-BOUNDS", "-SOLID", "-TEXTURED"):
+            if coll.name.endswith(suffix):
+                coll.name = coll.name[: -len(suffix)]
+                break
+        if mode in ('WIRE', 'BOUNDS'):
+            coll.name += "_" + mode
+
+    def execute(self, context):
+        objects = []
+        match self.select_method:
+            case 'ALL':        objects = list(context.scene.objects)
+            case 'SELECTED':   objects = self._iter_selected(context)
+            case 'UNSELECTED': objects = self._iter_unselected(context)
+            case 'COLLECTION':
+                objects = self._iter_collection(context)
+                self._rename_collection(context, self.display_mode)
+
+        for obj in objects:
+            try:
+                obj.display_type = self.display_mode
+            except Exception:
+                pass
+        return {'FINISHED'}
+
+    @classmethod
+    def description(cls, context, properties):
+        scope = {
+            'ALL': "all", 'SELECTED': "selected",
+            'UNSELECTED': "unselected", 'COLLECTION': "collection",
+        }.get(properties.select_method, "")
+        mode = {
+            'BOUNDS': "Bounds", 'WIRE': "Wire",
+            'SOLID': "Solid", 'TEXTURED': "Textured",
+        }.get(properties.display_mode, "")
+        return f"Select {scope} objects and set their viewport display mode to {mode}"
+
+
+#===================================
+# --- Sidebar Panel ---
+#===================================
+class OBJECTDISPLAY_PT_objectdisplay_panel(Panel):
+    bl_label = "Display Modes"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "View"
+
+    def draw(self, context):
+        layout = self.layout
+
+        box = layout.box()
+        box.label(text="Viewport Visibility:", icon='RESTRICT_VIEW_OFF')
+        for scope in ('Collection', 'All', 'Selected', 'Unselected'):
+            row = box.row(align=True)
+            row.label(text=scope + ":")
+            for mode, icon in (
+                ('BOUNDS',   'PIVOT_BOUNDBOX'),
+                ('WIRE',     'MOD_WIREFRAME'),
+                ('SOLID',    'SHADING_SOLID'),
+                ('TEXTURED', 'TEXTURE'),
+            ):
+                op = row.operator("objectsdisplay.objects_viewport_display",
+                                  text="", icon=icon)
+                op.select_method = scope.upper()
+                op.display_mode  = mode
+
+        prefs = _get_prefs(context)
+        if prefs:
+            box2 = layout.box()
+            box2.label(text="Save Behaviour:", icon='FILE_TICK')
+            box2.prop(prefs, "force_bounds_on_save", toggle=True)
+            box2.prop(prefs, "restore_on_load", toggle=True)
+
+
+#===================================
+# --- Menus ---
+#===================================
+def _draw_viewport_menu(layout, scope_label, scope_id):
+    for mode, icon, text in (
+        ('BOUNDS',   'PIVOT_BOUNDBOX',  f"Display {scope_label} as bounds"),
+        ('WIRE',     'MOD_WIREFRAME',   f"Display {scope_label} as wire"),
+        ('SOLID',    'SHADING_SOLID',   f"Display {scope_label} as solid"),
+        ('TEXTURED', 'TEXTURE',         f"Display {scope_label} as textured"),
+    ):
+        op = layout.operator("objectsdisplay.objects_viewport_display",
+                             text=text, icon=icon)
+        op.select_method = scope_id
+        op.display_mode  = mode
+
+
+class OBJECTDISPLAY_MT_viewport_object_submenu(Menu):
+    bl_label = "Object Display Mode"
+    bl_idname = "OBJECTDISPLAY_MT_viewport_object_submenu"
+    def draw(self, context):
+        _draw_viewport_menu(self.layout, "selected", 'SELECTED')
+
+
+class OBJECTDISPLAY_MT_outliner_object_submenu(Menu):
+    bl_label = "Object Display Mode"
+    bl_idname = "OBJECTDISPLAY_MT_outliner_object_submenu"
+    def draw(self, context):
+        _draw_viewport_menu(self.layout, "selected", 'SELECTED')
+
+
+class OBJECTDISPLAY_MT_outliner_collection_submenu(Menu):
+    bl_label = "Object Display Mode"
+    bl_idname = "OBJECTDISPLAY_MT_outliner_collection_submenu"
+    def draw(self, context):
+        _draw_viewport_menu(self.layout, "collection", 'COLLECTION')
+
+
+#===================================
+# --- Registration ---
+#===================================
+classes = (
+    OBJECTDISPLAY_AP_preferences,
+    OBJECTDISPLAY_PT_objectdisplay_panel,
+    OBJECTSDISPLAY_OT_objects_viewport_display,
+    OBJECTDISPLAY_MT_viewport_object_submenu,
+    OBJECTDISPLAY_MT_outliner_object_submenu,
+    OBJECTDISPLAY_MT_outliner_collection_submenu,
+)
+
+
+def _menu_outliner_object(self, context):
+    self.layout.separator()
+    self.layout.menu("OBJECTDISPLAY_MT_outliner_object_submenu")
+
+
+def _menu_outliner_collection(self, context):
+    self.layout.separator()
+    self.layout.menu("OBJECTDISPLAY_MT_outliner_collection_submenu")
+
+
+def _menu_viewport_object(self, context):
+    if context.mode != 'OBJECT':
+        return
+    self.layout.separator()
+    self.layout.menu("OBJECTDISPLAY_MT_viewport_object_submenu")
+
+
+def register():
+    for cls in classes:
+        bpy.utils.register_class(cls)
+
+    bpy.types.OUTLINER_MT_context_menu.append(_menu_outliner_object)
+    bpy.types.OUTLINER_MT_object.append(_menu_outliner_object)
+    bpy.types.OUTLINER_MT_collection.append(_menu_outliner_collection)
+    bpy.types.VIEW3D_MT_object_context_menu.append(_menu_viewport_object)
+
+    bpy.app.handlers.save_pre.append(_save_pre_handler)
+    bpy.app.handlers.save_post.append(_save_post_handler)
+    bpy.app.handlers.load_post.append(_load_post_handler)
+
+
+def unregister():
+    for handler, collection in (
+        (_save_pre_handler,  bpy.app.handlers.save_pre),
+        (_save_post_handler, bpy.app.handlers.save_post),
+        (_load_post_handler, bpy.app.handlers.load_post),
+    ):
+        try:
+            collection.remove(handler)
+        except (ValueError, AttributeError):
+            pass
+
+    for hook, owner in (
+        (_menu_outliner_object,     bpy.types.OUTLINER_MT_context_menu),
+        (_menu_outliner_object,     bpy.types.OUTLINER_MT_object),
+        (_menu_outliner_collection, bpy.types.OUTLINER_MT_collection),
+        (_menu_viewport_object,     bpy.types.VIEW3D_MT_object_context_menu),
+    ):
+        try:
+            owner.remove(hook)
+        except (ValueError, AttributeError):
+            pass
+
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)
+
+
+if __name__ == "__main__":
+    register()
