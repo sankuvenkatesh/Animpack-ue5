@@ -1,16 +1,42 @@
 bl_info = {
     "name": "Display Modes — Selected / Unselected / All",
     "author": "ChatGPT + User",
-    "version": (4, 1, 0),
+    "version": (4, 2, 0),
     "blender": (4, 2, 0),
     "location": "3D Viewport > Sidebar > View; Outliner & Viewport context menus",
     "description": (
         "Set viewport display modes for Selected, Unselected, All, or Collection "
-        "objects. Saving writes Bounds + Wireframe into the file. With the addon "
-        "active that file opens as Bounds; without the addon it opens as Wireframe."
+        "objects. With the add-on active, files open as Bounds + Wireframe. Saving "
+        "writes Wireframe viewports and non-Bounds objects into the file, so machines "
+        "without the add-on open it as plain wireframe."
     ),
     "category": "3D View",
 }
+
+#===================================
+# HOW IT BEHAVES
+#
+#  Add-on ACTIVE
+#    open a file : every object -> Bounds, every 3D viewport -> Wireframe
+#    save a file : the .blend is written with Wireframe viewports and NO Bounds
+#                  objects (see below); your live session is then put straight back
+#                  to how it was (Bounds + Wireframe).
+#
+#  Add-on NOT installed / switched off
+#    open a file : nothing runs, so you get exactly what was saved -> Wireframe
+#                  viewports, objects drawn as wireframe, never as Bounds boxes.
+#
+#  Why the saved file cannot contain Bounds: a Bounds object is drawn as a box in
+#  EVERY viewport mode, and without the add-on no code exists to change it back.
+#  So at save time each Bounds object is written with the display type it had
+#  before the add-on switched it to Bounds (Wire if that is unknown).
+#
+#  "Collections": a collection has no display type of its own. Every object in the
+#  file is handled (nested, hidden and excluded collections included).
+#
+#  Files saved by older versions of this add-on still contain Bounds objects. Open
+#  them once with the add-on active and save again to make them portable.
+#===================================
 
 import bpy
 from bpy.types import Operator, Panel, Menu
@@ -20,6 +46,10 @@ from bpy.app.handlers import persistent
 # Live-session state captured right before a save so it can be put back afterwards:
 #   {"shading": {space_pointer: shading_type}, "display": {object_pointer: display_type}}
 _snapshot = None
+
+# Display type each object had before it was switched to Bounds, so the saved file can
+# get it back.   {object.name_full: display_type}   Rebuilt whenever a file is opened.
+_orig_display = {}
 
 
 #===================================
@@ -48,18 +78,43 @@ def _set_all_viewport_shading(mode):
     return count
 
 
-def _force_all_objects_bounds():
+def _set_object_display(obj, mode):
+    """Set one object's display type. When it is switched TO Bounds, remember the
+    type it had so the saved file can get it back."""
+    current = obj.display_type
+    if current == mode:
+        return
+    if mode == 'BOUNDS':
+        _orig_display[obj.name_full] = current
+    obj.display_type = mode
+
+
+def _set_all_objects_display(mode):
+    """Every object in the file: all scenes, all collections (nested, hidden and
+    excluded ones included) and objects that are not linked to any scene."""
     for obj in bpy.data.objects:
         try:
-            if obj.display_type != 'BOUNDS':
-                obj.display_type = 'BOUNDS'
+            _set_object_display(obj, mode)
         except Exception:
             pass
 
 
-def _force_fallback_state():
-    """Objects → BOUNDS, every viewport → WIREFRAME. This is what gets saved."""
-    _force_all_objects_bounds()
+def _apply_working_state():
+    """Bounds + Wireframe — what you see in Blender while the add-on is active."""
+    _set_all_objects_display('BOUNDS')
+    return _set_all_viewport_shading('WIREFRAME')
+
+
+def _apply_file_state():
+    """What gets written into the .blend: Wireframe viewports and no Bounds objects.
+    A Bounds object gets back the display type it had before (Wire if unknown);
+    objects already showing another display type are left alone."""
+    for obj in bpy.data.objects:
+        try:
+            if obj.display_type == 'BOUNDS':
+                obj.display_type = _orig_display.get(obj.name_full, 'WIRE')
+        except Exception:
+            pass
     return _set_all_viewport_shading('WIREFRAME')
 
 
@@ -82,8 +137,8 @@ def _take_snapshot():
 
 
 def _restore_snapshot():
-    """Put the live session back exactly as it was before the save forced the
-    fallback state: viewport shading AND every object's display type.
+    """Put the live session back exactly as it was before the save wrote the file
+    state: viewport shading AND every object's display type.
     Also used as a timer callback, so it always returns None (= run once)."""
     global _snapshot
     snap, _snapshot = _snapshot, None
@@ -113,19 +168,18 @@ def _restore_snapshot():
 
 
 #===================================
-# --- Manual operator: apply bounding box right now ---
+# --- Manual operator: apply Bounds + Wireframe right now ---
 #===================================
 class OBJECTDISPLAY_OT_apply_fallback(Operator):
     """Immediately set all objects to Bounds and all viewports to Wireframe.
-Useful for verifying behaviour, or for preparing a file before sharing."""
+This is the same state the add-on applies whenever a file is opened"""
     bl_idname = "objectsdisplay.apply_fallback"
-    bl_label = "Apply Bounding Box"
+    bl_label = "Apply Bounds + Wireframe"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-        _force_all_objects_bounds()
-        n = _set_all_viewport_shading('WIREFRAME')
-        self.report({'INFO'}, f"Bounding box applied to {n} viewport(s)")
+        n = _apply_working_state()
+        self.report({'INFO'}, f"Bounds + Wireframe applied to {n} viewport(s)")
         return {'FINISHED'}
 
 
@@ -137,7 +191,7 @@ def _save_pre_handler(*_args):
     global _snapshot
 
     # If an earlier save's restore is still pending, its snapshot is the true
-    # session state — keep it instead of snapshotting the already-forced state.
+    # session state — keep it instead of snapshotting the already-changed state.
     if _snapshot is None:
         _snapshot = _take_snapshot()
 
@@ -146,8 +200,9 @@ def _save_pre_handler(*_args):
     if not bpy.app.timers.is_registered(_restore_snapshot):
         bpy.app.timers.register(_restore_snapshot, first_interval=0.1)
 
-    # Write the fallback state into the file about to be saved
-    _force_fallback_state()
+    # Write the portable state into the file about to be saved:
+    # Wireframe viewports, no Bounds objects.
+    _apply_file_state()
 
 
 @persistent
@@ -156,18 +211,20 @@ def _save_post_handler(*_args):
     _restore_snapshot()
 
 
+def _post_load_apply():
+    # SOLID/anything + BOUNDS objects -> boxes; Wireframe viewport as requested
+    _apply_working_state()
+    return None
+
+
 @persistent
 def _load_post_handler(*_args):
     global _snapshot
-    _snapshot = None  # a snapshot from the previous file is meaningless now
+    _snapshot = None          # a snapshot from the previous file is meaningless now
+    _orig_display.clear()     # so are the remembered display types
     # Viewports aren't ready the instant load_post fires; defer.
-    bpy.app.timers.register(_post_load_apply, first_interval=0.3)
-
-
-def _post_load_apply():
-    _force_all_objects_bounds()
-    _set_all_viewport_shading('SOLID')   # SOLID + BOUNDS = visible bounding boxes
-    return None
+    if not bpy.app.timers.is_registered(_post_load_apply):
+        bpy.app.timers.register(_post_load_apply, first_interval=0.3)
 
 
 #===================================
@@ -251,7 +308,7 @@ class OBJECTSDISPLAY_OT_objects_viewport_display(Operator):
         changed = 0
         for obj in objects:
             try:
-                obj.display_type = self.display_mode
+                _set_object_display(obj, self.display_mode)
                 changed += 1
             except Exception:
                 pass
@@ -304,8 +361,11 @@ class OBJECTDISPLAY_PT_objectdisplay_panel(Panel):
 
         box2 = layout.box()
         box2.label(text="Save Behaviour:", icon='FILE_TICK')
+        col = box2.column(align=True)
+        col.label(text="Saved file: Wireframe, no Bounds")
+        col.label(text="Opened here: Bounds + Wireframe")
         box2.operator("objectsdisplay.apply_fallback",
-                      icon='SHADING_WIRE', text="Apply Bounding Box")
+                      icon='SHADING_WIRE', text="Apply Bounds + Wireframe")
 
 
 #===================================
@@ -392,6 +452,7 @@ def register():
 def unregister():
     # Put the session back if a save left a snapshot pending, and drop pending timers
     _restore_snapshot()
+    _orig_display.clear()
     for fn in (_restore_snapshot, _post_load_apply):
         try:
             if bpy.app.timers.is_registered(fn):
