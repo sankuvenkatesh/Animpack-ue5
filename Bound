@@ -1,14 +1,13 @@
 bl_info = {
     "name": "Display Modes — Selected / Unselected / All",
     "author": "ChatGPT + User",
-    "version": (2, 2, 0),
+    "version": (3, 0, 0),
     "blender": (4, 2, 0),
     "location": "3D Viewport > Sidebar > View; Outliner & Viewport context menus",
     "description": (
         "Set viewport display modes for Selected, Unselected, All, or Collection "
-        "objects. On save, forces Bounds + Wireframe viewport shading so files "
-        "open as wireframes on machines without the addon, and restore normally "
-        "where the addon is installed."
+        "objects. On save, forces Bounds + Wireframe into the file. With the addon "
+        "installed the file opens as Bounds; without the addon it opens as Wireframe."
     ),
     "category": "3D View",
 }
@@ -18,10 +17,9 @@ from bpy.types import Operator, Panel, Menu, AddonPreferences
 from bpy.props import BoolProperty, EnumProperty
 
 ADDON_ID = __name__
-ORIG_KEY = "_display_mode_before_save"
 
-# Stash for viewport space state (keyed by space.as_pointer())
-_saved_space_state = {}
+# Per-session stash used only to restore the user's live viewport after save
+_saved_shading_for_session = {}
 
 
 #===================================
@@ -33,135 +31,105 @@ class OBJECTDISPLAY_AP_preferences(AddonPreferences):
     force_on_save: BoolProperty(
         name="Force Fallback State on Save",
         description=(
-            "Before saving: stash the current viewport shading + object display "
-            "types, then write the file with objects in Bounds and viewport "
-            "shading set to Wireframe. Files then open as wireframes on any "
-            "machine that does not have this addon active"
-        ),
-        default=True,
-    )
-    restore_on_load: BoolProperty(
-        name="Restore Display Modes on Load",
-        description=(
-            "When a .blend is opened on a machine with this addon installed, "
-            "restore the original viewport shading and object display modes "
-            "that were stashed before the save"
+            "On every save, write the .blend with objects in Bounds and every "
+            "3D Viewport's shading set to Wireframe. Files then open as Bounds "
+            "on machines that have this addon, and as Wireframe everywhere else"
         ),
         default=True,
     )
 
     def draw(self, context):
         layout = self.layout
-        col = layout.column(align=True)
-        col.prop(self, "force_on_save")
-        col.prop(self, "restore_on_load")
-        col.separator()
+        layout.prop(self, "force_on_save")
         box = layout.box()
-        box.label(text="Behaviour summary:", icon='INFO')
-        box.label(text="• With addon  → opens with your saved display modes")
-        box.label(text="• Without addon → opens as wireframe")
-        box.label(text="Wireframe shading overrides object display_type,")
-        box.label(text="so the fallback view is guaranteed.")
+        box.label(text="With addon    → file opens as Bounds", icon='CHECKMARK')
+        box.label(text="Without addon → file opens as Wireframe", icon='X')
 
 
 def _get_prefs(context):
-    prefs = context.preferences.addons.get(ADDON_ID)
-    return prefs.preferences if prefs else None
+    return context.preferences.addons[ADDON_ID].preferences \
+        if ADDON_ID in context.preferences.addons else None
 
 
 #===================================
 # --- Viewport space helpers ---
 #===================================
 def _iter_view3d_spaces():
-    """Yield every open 3D Viewport space."""
-    for window in bpy.context.window_manager.windows:
+    """Yield every open 3D Viewport space (works in handlers, timers, operators)."""
+    wm = bpy.context.window_manager
+    if not wm:
+        return
+    for window in wm.windows:
+        if not window.screen:
+            continue
         for area in window.screen.areas:
-            if area.type == 'VIEW_3D':
-                for space in area.spaces:
-                    if space.type == 'VIEW_3D':
-                        yield space
+            if area.type != 'VIEW_3D':
+                continue
+            for space in area.spaces:
+                if space.type == 'VIEW_3D':
+                    yield space
 
 
-def _force_fallback_state():
-    """Stash current shading + overlay state, then force Wireframe shading."""
-    _saved_space_state.clear()
-    for space in _iter_view3d_spaces():
-        key = space.as_pointer()
+def _force_objects_bounds():
+    for obj in bpy.data.objects:
         try:
-            _saved_space_state[key] = (
-                space.shading.type,
-                space.overlay.show_wireframes,
-            )
-            # Force wireframe shading. This is what any machine without the
-            # addon will see, because shading.type overrides display_type.
-            space.shading.type = 'WIREFRAME'
-            space.overlay.show_wireframes = True
+            obj.display_type = 'BOUNDS'
         except Exception:
             pass
 
 
-def _restore_space_shading():
+def _set_all_viewports_shading(shading_type):
     for space in _iter_view3d_spaces():
-        key = space.as_pointer()
-        state = _saved_space_state.get(key)
-        if not state:
-            continue
-        shading_type, show_wireframes = state
         try:
             space.shading.type = shading_type
-            space.overlay.show_wireframes = show_wireframes
         except Exception:
             pass
-    _saved_space_state.clear()
-
-
-#===================================
-# --- Object display stashing ---
-#===================================
-def _stash_and_force_bounds():
-    for obj in bpy.data.objects:
-        if ORIG_KEY not in obj:
-            obj[ORIG_KEY] = obj.display_type
-        obj.display_type = 'BOUNDS'
-
-
-def _restore_display_types():
-    for obj in bpy.data.objects:
-        if ORIG_KEY in obj:
-            try:
-                obj.display_type = obj[ORIG_KEY]
-            except Exception:
-                pass
-            try:
-                del obj[ORIG_KEY]
-            except Exception:
-                pass
 
 
 #===================================
 # --- Save / Load Handlers ---
 #===================================
 def _save_pre_handler(dummy):
+    """Before writing the file: stash live shading, then force BOUNDS + WIREFRAME."""
     prefs = _get_prefs(bpy.context)
     if not prefs or not prefs.force_on_save:
         return
-    _stash_and_force_bounds()
-    _force_fallback_state()
+
+    _saved_shading_for_session.clear()
+    for space in _iter_view3d_spaces():
+        try:
+            _saved_shading_for_session[space.as_pointer()] = space.shading.type
+        except Exception:
+            pass
+
+    _force_objects_bounds()
+    _set_all_viewports_shading('WIREFRAME')
 
 
 def _save_post_handler(dummy):
+    """After the file is written: restore the user's live viewport shading."""
+    for space in _iter_view3d_spaces():
+        key = space.as_pointer()
+        if key in _saved_shading_for_session:
+            try:
+                space.shading.type = _saved_shading_for_session[key]
+            except Exception:
+                pass
+    _saved_shading_for_session.clear()
+
+
+def _apply_load_overrides():
+    """Force BOUNDS objects + SOLID shading on load (only if addon is active)."""
     prefs = _get_prefs(bpy.context)
-    if not prefs or not prefs.force_on_save:
+    if not prefs:
         return
-    _restore_display_types()
-    _restore_space_shading()
+    _force_objects_bounds()
+    _set_all_viewports_shading('SOLID')
 
 
 def _load_post_handler(dummy):
-    prefs = _get_prefs(bpy.context)
-    if not prefs or not prefs.restore_on_load:
-        return
-    _restore_display_types()
+    # Viewport areas may not be ready the instant load_post fires; defer a tick.
+    bpy.app.timers.register(_apply_load_overrides, first_interval=0.1)
 
 
 #===================================
@@ -297,7 +265,6 @@ class OBJECTDISPLAY_PT_objectdisplay_panel(Panel):
             box2 = layout.box()
             box2.label(text="Save Behaviour:", icon='FILE_TICK')
             box2.prop(prefs, "force_on_save", toggle=True)
-            box2.prop(prefs, "restore_on_load", toggle=True)
 
 
 #===================================
