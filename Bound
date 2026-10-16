@@ -6,96 +6,20 @@ bl_info = {
     "location": "3D Viewport > Sidebar > View; Outliner & Viewport context menus",
     "description": (
         "Set viewport display modes for Selected, Unselected, All, or Collection "
-        "objects. Optional per-file fallback: when switched on for a file, saving "
-        "writes Bounds + Wireframe into it. With the addon active that file opens "
-        "as Bounds; without the addon it opens as Wireframe."
+        "objects. Saving writes Bounds + Wireframe into the file. With the addon "
+        "active that file opens as Bounds; without the addon it opens as Wireframe."
     ),
     "category": "3D View",
 }
 
 import bpy
-from bpy.types import Operator, Panel, Menu, AddonPreferences
-from bpy.props import BoolProperty, EnumProperty
+from bpy.types import Operator, Panel, Menu
+from bpy.props import EnumProperty
 from bpy.app.handlers import persistent
-
-ADDON_ID = __name__
-
-# Per-file switch. It is registered on every Scene, so Blender stores it in the .blend.
-FALLBACK_PROP = "objectsdisplay_fallback"
 
 # Live-session state captured right before a save so it can be put back afterwards:
 #   {"shading": {space_pointer: shading_type}, "display": {object_pointer: display_type}}
 _snapshot = None
-
-# Re-entrancy guard for _sync_fallback_flag
-_syncing = False
-
-
-#===================================
-# --- Addon Preferences ---
-#===================================
-class OBJECTDISPLAY_AP_preferences(AddonPreferences):
-    bl_idname = ADDON_ID
-
-    force_on_save: BoolProperty(
-        name="Force Fallback State on Save",
-        description=(
-            "Master switch. When on, any file that has 'Fallback on Save (this "
-            "file)' enabled is written with every object set to Bounds and every "
-            "3D Viewport set to Wireframe (your open session is restored right "
-            "after the save). Turn off to disable the behaviour for all files"
-        ),
-        default=True,
-    )
-
-    def draw(self, context):
-        layout = self.layout
-        layout.prop(self, "force_on_save")
-        box = layout.box()
-        box.label(text="Per file: View tab > Display Modes > Fallback on Save", icon='INFO')
-        box.label(text="With addon    → opens as Bounds", icon='CHECKMARK')
-        box.label(text="Without addon → opens as Wireframe", icon='X')
-
-
-def _get_prefs():
-    try:
-        return bpy.context.preferences.addons[ADDON_ID].preferences
-    except (KeyError, AttributeError):
-        return None
-
-
-#===================================
-# --- Per-file switch (stored in the .blend, on every Scene) ---
-#===================================
-def _file_opted_in():
-    """True when this .blend has 'Fallback on Save (this file)' switched on."""
-    return any(getattr(scene, FALLBACK_PROP, False) for scene in bpy.data.scenes)
-
-
-def _flag_owner(context):
-    """The scene that represents the file's switch: one that has it on, else the current one."""
-    for scene in bpy.data.scenes:
-        if getattr(scene, FALLBACK_PROP, False):
-            return scene
-    return context.scene
-
-
-def _sync_fallback_flag(self, context):
-    """Property update: copy the new value to every scene so it acts as ONE per-file switch."""
-    global _syncing
-    if _syncing:
-        return
-    _syncing = True
-    try:
-        value = getattr(self, FALLBACK_PROP)
-        for scene in bpy.data.scenes:
-            try:
-                if getattr(scene, FALLBACK_PROP) != value:
-                    setattr(scene, FALLBACK_PROP, value)
-            except Exception:
-                pass  # e.g. a linked (read-only) scene
-    finally:
-        _syncing = False
 
 
 #===================================
@@ -189,19 +113,19 @@ def _restore_snapshot():
 
 
 #===================================
-# --- Manual operator: apply fallback state right now ---
+# --- Manual operator: apply bounding box right now ---
 #===================================
 class OBJECTDISPLAY_OT_apply_fallback(Operator):
     """Immediately set all objects to Bounds and all viewports to Wireframe.
 Useful for verifying behaviour, or for preparing a file before sharing."""
     bl_idname = "objectsdisplay.apply_fallback"
-    bl_label = "Apply Fallback State (Bounds + Wireframe)"
+    bl_label = "Apply Bounding Box"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
         _force_all_objects_bounds()
         n = _set_all_viewport_shading('WIREFRAME')
-        self.report({'INFO'}, f"Fallback applied to {n} viewport(s)")
+        self.report({'INFO'}, f"Bounding box applied to {n} viewport(s)")
         return {'FINISHED'}
 
 
@@ -211,9 +135,6 @@ Useful for verifying behaviour, or for preparing a file before sharing."""
 @persistent
 def _save_pre_handler(*_args):
     global _snapshot
-    prefs = _get_prefs()
-    if not prefs or not prefs.force_on_save or not _file_opted_in():
-        return  # master switch off, or this file has not opted in: leave everything alone
 
     # If an earlier save's restore is still pending, its snapshot is the true
     # session state — keep it instead of snapshotting the already-forced state.
@@ -244,10 +165,6 @@ def _load_post_handler(*_args):
 
 
 def _post_load_apply():
-    prefs = _get_prefs()
-    if not prefs or not _file_opted_in():
-        return None  # addon not active, or this file hasn't opted in — leave it as saved
-
     _force_all_objects_bounds()
     _set_all_viewport_shading('SOLID')   # SOLID + BOUNDS = visible bounding boxes
     return None
@@ -385,16 +302,10 @@ class OBJECTDISPLAY_PT_objectdisplay_panel(Panel):
                 op.select_method = scope.upper()
                 op.display_mode  = mode
 
-        prefs = _get_prefs()
         box2 = layout.box()
         box2.label(text="Save Behaviour:", icon='FILE_TICK')
-        box2.prop(_flag_owner(context), FALLBACK_PROP, toggle=True)
-        if prefs:
-            box2.prop(prefs, "force_on_save", toggle=True)
-            if not prefs.force_on_save:
-                box2.label(text="Master switch is off (Preferences)", icon='ERROR')
         box2.operator("objectsdisplay.apply_fallback",
-                      icon='SHADING_WIRE', text="Apply Fallback Now")
+                      icon='SHADING_WIRE', text="Apply Bounding Box")
 
 
 #===================================
@@ -438,7 +349,6 @@ class OBJECTDISPLAY_MT_outliner_collection_submenu(Menu):
 # --- Registration ---
 #===================================
 classes = (
-    OBJECTDISPLAY_AP_preferences,
     OBJECTDISPLAY_PT_objectdisplay_panel,
     OBJECTSDISPLAY_OT_objects_viewport_display,
     OBJECTDISPLAY_OT_apply_fallback,
@@ -466,19 +376,6 @@ def _menu_viewport_object(self, context):
 
 
 def register():
-    # Per-file switch: lives on every Scene, so it is saved inside the .blend
-    setattr(bpy.types.Scene, FALLBACK_PROP, BoolProperty(
-        name="Fallback on Save (this file)",
-        description=(
-            "Applies to this .blend only. When on, saving writes every object as "
-            "Bounds and every 3D Viewport as Wireframe into the file (your open "
-            "session is restored right after). With this addon active the file "
-            "opens as Bounds + Solid; without it, as Wireframe"
-        ),
-        default=False,
-        update=_sync_fallback_flag,
-    ))
-
     for cls in classes:
         bpy.utils.register_class(cls)
 
@@ -525,11 +422,6 @@ def unregister():
 
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
-
-    try:
-        delattr(bpy.types.Scene, FALLBACK_PROP)
-    except AttributeError:
-        pass
 
 
 if __name__ == "__main__":
