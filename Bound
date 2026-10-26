@@ -1,419 +1,272 @@
 bl_info = {
     "name": "Display Modes — Selected / Unselected / All",
     "author": "ChatGPT + User",
-    "version": (4, 3, 1),
+    "version": (5, 0, 0),
     "blender": (4, 2, 0),
     "location": "3D Viewport > Sidebar > View; Outliner & Viewport context menus",
     "description": (
-        "Set viewport display modes for Selected, Unselected, All, or Collection "
-        "objects. With the add-on active, everything is Bounds + Wireframe. Saving "
-        "writes Wireframe viewports and non-Bounds objects into the file, so machines "
-        "without the add-on open it as plain wireframe."
+        "Set object display modes for Selected / Unselected / All / Collection. "
+        "Files are saved and opened as Wire objects in Wireframe viewports, on any "
+        "machine, with or without this add-on."
     ),
     "category": "3D View",
 }
-
-#===================================
-# HOW IT BEHAVES
-#
-#  Add-on ACTIVE
-#    open a file, enable the add-on, start Blender, Reload Scripts
-#                : every object -> Bounds, every 3D viewport -> Wireframe
-#    save a file : the .blend is written with Wireframe viewports and NO Bounds
-#                  objects (see below); your live session is then put straight back
-#                  to how it was (Bounds + Wireframe).
-#    disable it  : Bounds objects are turned back into their previous display type
-#                  (viewports are left alone), so a plain File > Save afterwards
-#                  still writes a portable file.
-#
-#  Add-on NOT installed / switched off
-#    open a file : nothing runs, so you get exactly what was saved -> Wireframe
-#                  viewports, objects drawn as wireframe, never as Bounds boxes.
-#
-#  Why the saved file cannot contain Bounds: a Bounds object is drawn as a box in
-#  EVERY viewport mode, and without the add-on no code exists to change it back.
-#  So at save time each Bounds object is written with the display type it had
-#  before the add-on switched it to Bounds (Wire if that is unknown). That type is
-#  kept in a custom property on the object itself ("_dm_orig_display"), so it
-#  follows renames and undo. The property is removed again before the file is
-#  written, so it never ends up in the .blend.
-#
-#  BUTTONS  (3D Viewport > Sidebar > View > Display Modes > Save Behaviour)
-#    Apply Bounds + Wireframe : switch the whole file to the working state now
-#    Make File Portable       : switch the whole file to the saved-file state now
-#                               (handy to see what machines without the add-on get)
-#
-#  SCOPE
-#    The automatic behaviour (open / save / enable / disable and the two buttons
-#    above) covers EVERY object in the file: all scenes, nested, hidden and
-#    excluded collections. A collection has no display type of its own.
-#    The Collection / All / Selected / Unselected buttons and the context menus act
-#    on the CURRENT SCENE: All / Unselected = that scene's objects, Collection =
-#    the active collection.
-#
-#  Files saved by older versions of this add-on still contain Bounds objects. Open
-#  them once with the add-on active and save again to make them portable.
-#
-#  INSTALL: Preferences > Add-ons > Install from Disk... (legacy add-on, uses bl_info).
-#===================================
 
 import bpy
 from bpy.types import Operator, Panel, Menu
 from bpy.props import EnumProperty
 from bpy.app.handlers import persistent
 
-# Live-session state captured right before a save so it can be put back afterwards:
-#   {"shading": {space_pointer:  shading_type},
-#    "display": {object_pointer: display_type},
-#    "orig":    {object_pointer: remembered display type (custom property value)}}
-# Pointers are only used inside the save window, where no undo can happen.
-_snapshot = None
+#===================================
+# HOW IT WORKS
+#
+#  SAVE  Every object -> Wire and every 3D viewport -> Wireframe is written into
+#        the file, then your session is put straight back. The file itself holds
+#        Wire + Wireframe, so it opens as wireframe on ANY machine, with or without
+#        this add-on.
+#  OPEN  With the add-on on, every object -> OPEN_AS and every viewport -> Wireframe.
+#
+#  Bounds is never written to a file: a Bounds object is drawn as a box in every
+#  viewport mode, and a machine without the add-on has no code to change it back.
+#
+#  Files saved by older versions may still hold Bounds objects: open them once with
+#  the add-on on and save again. Keep only ONE copy of the add-on enabled — an older
+#  copy running as well would still write Bounds on save.
+#===================================
 
-# Custom property that remembers the display type an object had before the add-on
-# switched it to Bounds. It lives on the object itself, so it follows renames and
-# undo (pointers and names would go stale). Stripped from every object right before
-# a save.
-_PROP = "_dm_orig_display"
-
-# Display types an object may have in a saved file (never Bounds)
-_FILE_TYPES = {'WIRE', 'SOLID', 'TEXTURED'}
-
-# Seconds to wait before touching the viewports after a file opens or the add-on
-# registers (they are not always ready the instant load_post fires).
-_APPLY_DELAY = 0.3
+# Display type given to every object when a file is opened on a machine that has the
+# add-on: 'WIRE' (default, same as the saved file) or 'BOUNDS' (boxes while you work).
+# Saved files are always Wire, whatever this is set to.
+OPEN_AS = 'WIRE'
 
 
 #===================================
-# --- Core helpers — iterate bpy.data.screens (NOT window_manager) ---
+# --- Tables (one source for the enums, buttons, menus and tooltips) ---
 #===================================
-def _iter_all_view3d_spaces():
-    """Every 3D Viewport space across every screen, visible or not."""
+_OP = "objectsdisplay.objects_viewport_display"
+
+# (identifier, label, icon)
+_MODES = (
+    ('BOUNDS',   "Bounds",   'PIVOT_BOUNDBOX'),
+    ('WIRE',     "Wire",     'MOD_WIREFRAME'),
+    ('SOLID',    "Solid",    'SHADING_SOLID'),
+    ('TEXTURED', "Textured", 'TEXTURE'),
+)
+# (identifier, label, tooltip wording), in panel order.
+# All / Unselected / Collection act on the CURRENT SCENE.
+_SCOPES = (
+    ('COLLECTION', "Collection", "the objects in the active collection"),
+    ('ALL',        "All",        "all objects in this scene"),
+    ('SELECTED',   "Selected",   "the selected objects"),
+    ('UNSELECTED', "Unselected", "the unselected objects in this scene"),
+)
+_MODE_LABEL = {mode: label for mode, label, _ in _MODES}
+_SCOPE_TEXT = {scope: text for scope, _, text in _SCOPES}
+# Collection-name tags the buttons add / remove: "_WIRE", " BOUNDS", "-SOLID", ...
+_TAGS = tuple(sep + mode for sep in "_ -" for mode, _, _ in _MODES)
+
+
+#===================================
+# --- Core: set everything, and put back what a save changed ---
+#===================================
+# What the last save changed, so it can be put back: (object, old display type) and
+# (3D viewport space, old shading type). Empty whenever no save is in progress.
+_prev_objs = []
+_prev_views = []
+
+
+def _viewports():
+    """Every 3D viewport space in every screen, visible or not."""
     for screen in bpy.data.screens:
         for area in screen.areas:
-            if area.type != 'VIEW_3D':
-                continue
-            for space in area.spaces:
-                if space.type == 'VIEW_3D':
-                    yield space
+            if area.type == 'VIEW_3D':
+                for space in area.spaces:
+                    if space.type == 'VIEW_3D':
+                        yield space
 
 
-def _set_all_viewport_shading(mode):
-    count = 0
-    for space in _iter_all_view3d_spaces():
-        try:
-            if space.shading.type != mode:
-                space.shading.type = mode
-            count += 1
-        except Exception:
-            pass
-    return count
-
-
-def _set_object_display(obj, mode):
-    """Set one object's display type. When it is switched TO Bounds, remember the
-    type it had (on the object) so a save can write it back."""
-    current = obj.display_type
-    if current == mode:
-        return
-    if mode == 'BOUNDS':
-        obj[_PROP] = current
-    obj.display_type = mode
-
-
-def _set_all_objects_display(mode):
-    """Every object in the file: all scenes, all collections (nested, hidden and
-    excluded ones included) and objects that are not linked to any scene."""
+def _set_all(display, shading, remember=False):
+    """Every object -> `display`, every 3D viewport -> `shading`: all scenes, all
+    collections, hidden or not. With remember=True whatever actually changed is
+    recorded so _restore() can put it back."""
     for obj in bpy.data.objects:
         try:
-            _set_object_display(obj, mode)
-        except Exception:
+            old = obj.display_type
+            if old != display:
+                obj.display_type = display
+                if remember:
+                    _prev_objs.append((obj, old))
+        except Exception:               # linked / read-only data
             pass
-
-
-def _revert_bounds_objects():
-    """Every Bounds object gets back the display type it had before (Wire if
-    unknown). Also removes the add-on's bookkeeping property from every object so
-    it can never end up in a saved file. Returns how many objects were reverted."""
-    count = 0
-    for obj in bpy.data.objects:
+    for space in _viewports():
         try:
-            if obj.display_type == 'BOUNDS':
-                orig = obj.get(_PROP)
-                obj.display_type = orig if orig in _FILE_TYPES else 'WIRE'
-                count += 1
+            old = space.shading.type
+            if old != shading:
+                space.shading.type = shading
+                if remember:
+                    _prev_views.append((space, old))
         except Exception:
             pass
+
+
+def _restore():
+    """Put back what the last save changed. Called by save_post and, as a safety net
+    for a save that fails (save_post never fires then), by a timer — hence the
+    explicit `return None` (= run once)."""
+    while _prev_objs:
+        obj, old = _prev_objs.pop()
         try:
-            if _PROP in obj:
-                del obj[_PROP]
-        except Exception:
+            obj.display_type = old
+        except Exception:               # object no longer exists
             pass
-    return count
-
-
-def _apply_working_state():
-    """Bounds + Wireframe — what you see in Blender while the add-on is active.
-    Returns the number of viewports set."""
-    _set_all_objects_display('BOUNDS')
-    return _set_all_viewport_shading('WIREFRAME')
-
-
-def _apply_file_state():
-    """What gets written into the .blend: Wireframe viewports and no Bounds objects.
-    Returns (objects reverted from Bounds, viewports set)."""
-    reverted = _revert_bounds_objects()
-    return reverted, _set_all_viewport_shading('WIREFRAME')
-
-
-#===================================
-# --- Snapshot / restore of the live session around a save ---
-#===================================
-def _take_snapshot():
-    snap = {"shading": {}, "display": {}, "orig": {}}
-    for space in _iter_all_view3d_spaces():
+    while _prev_views:
+        space, old = _prev_views.pop()
         try:
-            snap["shading"][space.as_pointer()] = space.shading.type
+            space.shading.type = old
         except Exception:
             pass
-    for obj in bpy.data.objects:
-        try:
-            ptr = obj.as_pointer()
-            snap["display"][ptr] = obj.display_type
-            orig = obj.get(_PROP)
-            if orig is not None:
-                snap["orig"][ptr] = orig
-        except Exception:
-            pass
-    return snap
-
-
-def _restore_snapshot():
-    """Put the live session back exactly as it was before the save wrote the file
-    state: viewport shading, every object's display type and its remembered type."""
-    global _snapshot
-    snap, _snapshot = _snapshot, None
-    if not snap:
-        return
-
-    for space in _iter_all_view3d_spaces():
-        wanted = snap["shading"].get(space.as_pointer())
-        if wanted is None:
-            continue
-        try:
-            if space.shading.type != wanted:
-                space.shading.type = wanted
-        except Exception:
-            pass
-
-    for obj in bpy.data.objects:
-        ptr = obj.as_pointer()
-        wanted = snap["display"].get(ptr)
-        if wanted is not None:
-            try:
-                if obj.display_type != wanted:
-                    obj.display_type = wanted
-            except Exception:
-                pass
-        orig = snap["orig"].get(ptr)
-        if orig is not None:
-            try:
-                obj[_PROP] = orig
-            except Exception:
-                pass
-
-
-def _restore_snapshot_once():
-    """Timer entry point. Returning None tells Blender to run it a single time —
-    kept in its own function so that contract can't be broken by editing
-    _restore_snapshot()."""
-    _restore_snapshot()
     return None
 
 
 #===================================
-# --- Manual operators (whole file: all scenes) ---
-#===================================
-class OBJECTDISPLAY_OT_apply_fallback(Operator):
-    """Immediately set every object in the file (all scenes) to Bounds and all viewports to Wireframe.
-This is the same state the add-on applies whenever a file is opened"""
-    bl_idname = "objectsdisplay.apply_fallback"
-    bl_label = "Apply Bounds + Wireframe"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        n = _apply_working_state()
-        self.report({'INFO'}, f"Bounds + Wireframe applied to {n} viewport(s)")
-        return {'FINISHED'}
-
-
-class OBJECTDISPLAY_OT_make_portable(Operator):
-    """Switch the whole file to what machines without the add-on will see: Bounds objects get their previous display type back (Wire if unknown) and all viewports go to Wireframe.
-Use "Apply Bounds + Wireframe" to switch back"""
-    bl_idname = "objectsdisplay.make_portable"
-    bl_label = "Make File Portable"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        objs, views = _apply_file_state()
-        self.report({'INFO'},
-                    f"{objs} object(s) taken out of Bounds; "
-                    f"{views} viewport(s) set to Wireframe")
-        return {'FINISHED'}
-
-
-#===================================
-# --- Save / Load Handlers (@persistent so they survive file loads) ---
+# --- Save / load handlers (@persistent so they survive file loads) ---
 #===================================
 @persistent
-def _save_pre_handler(*_args):
-    global _snapshot
-
-    # If an earlier save's restore is still pending, its snapshot is the true
-    # session state — keep it instead of snapshotting the already-changed state.
-    if _snapshot is None:
-        _snapshot = _take_snapshot()
-
-    # Safety net: if the save fails, save_post never fires. Timers only run once
-    # Blender's main loop is free again (i.e. after the save), so this always restores.
-    if not bpy.app.timers.is_registered(_restore_snapshot_once):
-        bpy.app.timers.register(_restore_snapshot_once, first_interval=0.1)
-
-    # Write the portable state into the file about to be saved:
-    # Wireframe viewports, no Bounds objects.
-    _apply_file_state()
+def _on_save_pre(*_):
+    # Written into the file: Wire objects, Wireframe viewports. Items already in that
+    # state are skipped, so if an earlier restore is still pending, its record (the
+    # true session state) is kept untouched.
+    _set_all('WIRE', 'WIREFRAME', remember=True)
+    if not bpy.app.timers.is_registered(_restore):
+        bpy.app.timers.register(_restore, first_interval=0.1)
 
 
 @persistent
-def _save_post_handler(*_args):
-    # The file is fully written now — put the live session back right away
-    _restore_snapshot()
+def _on_save_post(*_):
+    _restore()
+    if bpy.app.timers.is_registered(_restore):
+        bpy.app.timers.unregister(_restore)
 
 
-def _post_load_apply():
-    # Timer callback: returns None = run once
-    _apply_working_state()
+def _apply_open_state():
+    """Timer callback (returns None = run once)."""
+    _set_all(OPEN_AS if OPEN_AS in _MODE_LABEL else 'WIRE', 'WIREFRAME')
     return None
 
 
 @persistent
-def _load_post_handler(*_args):
-    global _snapshot
-    _snapshot = None          # a snapshot from the previous file is meaningless now
+def _on_load_post(*_):
+    _prev_objs.clear()          # records from the previous file are meaningless now
+    _prev_views.clear()
     # Viewports aren't ready the instant load_post fires; defer.
-    if not bpy.app.timers.is_registered(_post_load_apply):
-        bpy.app.timers.register(_post_load_apply, first_interval=_APPLY_DELAY)
+    if not bpy.app.timers.is_registered(_apply_open_state):
+        bpy.app.timers.register(_apply_open_state, first_interval=0.3)
 
 
 #===================================
-# --- Main Operator (acts on the CURRENT SCENE) ---
+# --- Operators ---
 #===================================
+class OBJECTDISPLAY_OT_apply_wireframe(Operator):
+    """Set every object in the file (all scenes) to Wire and every 3D viewport to Wireframe — the state files are saved in"""
+    bl_idname = "objectsdisplay.apply_wireframe"
+    bl_label = "Apply Wireframe Now"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        _set_all('WIRE', 'WIREFRAME')
+        self.report({'INFO'}, "All objects set to Wire, all viewports to Wireframe")
+        return {'FINISHED'}
+
+
 class OBJECTSDISPLAY_OT_objects_viewport_display(Operator):
     """Set the viewport display mode of the chosen objects"""
-    bl_idname = "objectsdisplay.objects_viewport_display"
+    bl_idname = _OP
     bl_label = "Objects Viewport Display"
     bl_options = {'REGISTER', 'UNDO'}
 
     select_method: EnumProperty(
         name="Select Method",
-        items=[
-            ('ALL',        "All",        "All objects",        0),
-            ('SELECTED',   "Selected",   "Selected objects",   1),
-            ('UNSELECTED', "Unselected", "Unselected objects", 2),
-            ('COLLECTION', "Collection", "Collection objects", 3),
-        ],
+        items=[(sid, label, label + " objects", i)
+               for i, (sid, label, _) in enumerate(_SCOPES)],
         default='SELECTED',
     )
     display_mode: EnumProperty(
         name="Display Mode",
-        items=[
-            ('BOUNDS',   "Bounds",   "Bounds mode",   0),
-            ('WIRE',     "Wire",     "Wire mode",     1),
-            ('SOLID',    "Solid",    "Solid mode",    2),
-            ('TEXTURED', "Textured", "Textured mode", 3),
-        ],
+        items=[(mid, label, label + " mode", i)
+               for i, (mid, label, _) in enumerate(_MODES)],
         default='TEXTURED',
     )
 
-    def _iter_selected(self, context):
-        if not context.selected_objects:
-            self.report({'INFO'}, "No objects are selected")
-            return []
-        return list(context.selected_objects)
+    def _targets(self, context):
+        method = self.select_method
+        scene_objs = context.scene.objects
 
-    def _iter_unselected(self, context):
-        if not context.selected_objects:
-            self.report({'INFO'}, "Nothing selected — operating on all objects")
-            return list(context.scene.objects)
-        sel = set(context.selected_objects)
-        return [o for o in context.scene.objects if o not in sel]
+        if method == 'ALL':
+            return list(scene_objs)
 
-    def _iter_collection(self, context):
-        active = context.view_layer.active_layer_collection
-        if active == context.view_layer.layer_collection:
+        if method in ('SELECTED', 'UNSELECTED'):
+            selected = list(context.selected_objects or ())
+            if not selected:
+                self.report({'INFO'}, "No objects are selected" if method == 'SELECTED'
+                            else "Nothing selected — operating on all objects")
+            if method == 'SELECTED':
+                return selected
+            chosen = set(selected)
+            return [o for o in scene_objs if o not in chosen]
+
+        # COLLECTION
+        view_layer = context.view_layer
+        active = view_layer.active_layer_collection
+        if active == view_layer.layer_collection:
             self.report({'WARNING'}, "Select a specific collection, not the scene root")
             return []
-        coll = active.collection
-        if not coll.all_objects:
+        objs = list(active.collection.all_objects)
+        if not objs:
             self.report({'INFO'}, "Collection is empty")
-            return []
-        return list(coll.all_objects)
+        return objs
 
-    def _rename_collection(self, context, mode):
+    def _tag_collection(self, context, mode):
+        """Add / remove the _WIRE / _BOUNDS tag on the active collection's name.
+        Only those two "light" modes get a tag; Solid / Textured is the normal
+        state, so for them the old tag is simply removed."""
         coll = context.view_layer.active_layer_collection.collection
         if (coll == context.scene.collection or
-                coll.library is not None or
-                coll.override_library is not None):
+                coll.library is not None or coll.override_library is not None):
             self.report({'INFO'}, "Collection name is read-only; skipping rename")
             return
-        for suffix in ("_WIRE", "_BOUNDS", "_SOLID", "_TEXTURED",
-                       " WIRE", " BOUNDS", " SOLID", " TEXTURED",
-                       "-WIRE", "-BOUNDS", "-SOLID", "-TEXTURED"):
-            if coll.name.endswith(suffix):
-                coll.name = coll.name[: -len(suffix)]
+        name = coll.name
+        for tag in _TAGS:
+            if name.endswith(tag):
+                name = name[:-len(tag)]
                 break
-        # Only the two "light" modes get a tag. Solid / Textured is the normal state,
-        # so for those the old tag is simply removed (by the loop above).
         if mode in ('WIRE', 'BOUNDS'):
-            coll.name += "_" + mode
+            name += "_" + mode
+        coll.name = name or coll.name
 
     def execute(self, context):
-        objects = []
-        match self.select_method:
-            case 'ALL':        objects = list(context.scene.objects)
-            case 'SELECTED':   objects = self._iter_selected(context)
-            case 'UNSELECTED': objects = self._iter_unselected(context)
-            case 'COLLECTION': objects = self._iter_collection(context)
-
+        mode = self.display_mode
         changed = 0
-        for obj in objects:
+        for obj in self._targets(context):
             try:
-                _set_object_display(obj, self.display_mode)
+                if obj.display_type != mode:
+                    obj.display_type = mode
                 changed += 1
-            except Exception:
+            except Exception:           # linked / read-only data
                 pass
-
-        # Only tag the collection name when something was actually changed
-        if self.select_method == 'COLLECTION' and changed:
-            self._rename_collection(context, self.display_mode)
+        # Only tag the collection name when something was actually processed
+        if changed and self.select_method == 'COLLECTION':
+            self._tag_collection(context, mode)
         return {'FINISHED'}
 
     @classmethod
     def description(cls, context, properties):
-        scope = {
-            'ALL': "all objects in this scene",
-            'SELECTED': "the selected objects",
-            'UNSELECTED': "the unselected objects in this scene",
-            'COLLECTION': "the objects in the active collection",
-        }.get(properties.select_method, "")
-        mode = {
-            'BOUNDS': "Bounds", 'WIRE': "Wire",
-            'SOLID': "Solid", 'TEXTURED': "Textured",
-        }.get(properties.display_mode, "")
+        scope = _SCOPE_TEXT.get(properties.select_method, "")
+        mode = _MODE_LABEL.get(properties.display_mode, "")
         return f"Set {scope} to display as {mode}"
 
 
 #===================================
-# --- Sidebar Panel ---
+# --- Sidebar panel ---
 #===================================
 class OBJECTDISPLAY_PT_objectdisplay_panel(Panel):
     bl_label = "Display Modes"
@@ -426,67 +279,58 @@ class OBJECTDISPLAY_PT_objectdisplay_panel(Panel):
 
         box = layout.box()
         box.label(text="Viewport Visibility:", icon='RESTRICT_VIEW_OFF')
-        for scope in ('Collection', 'All', 'Selected', 'Unselected'):
+        for scope, scope_label, _ in _SCOPES:
             row = box.row(align=True)
-            row.label(text=scope + ":")
-            for mode, icon in (
-                ('BOUNDS',   'PIVOT_BOUNDBOX'),
-                ('WIRE',     'MOD_WIREFRAME'),
-                ('SOLID',    'SHADING_SOLID'),
-                ('TEXTURED', 'TEXTURE'),
-            ):
-                op = row.operator("objectsdisplay.objects_viewport_display",
-                                  text="", icon=icon)
-                op.select_method = scope.upper()
-                op.display_mode  = mode
+            row.label(text=scope_label + ":")
+            for mode, _label, icon in _MODES:
+                op = row.operator(_OP, text="", icon=icon)
+                op.select_method = scope
+                op.display_mode = mode
 
-        box2 = layout.box()
-        box2.label(text="Save Behaviour:", icon='FILE_TICK')
-        col = box2.column(align=True)
-        col.label(text="Saved file: Wireframe, no Bounds")
-        col.label(text="Opened here: Bounds + Wireframe")
-        col = box2.column(align=True)
-        col.operator("objectsdisplay.apply_fallback",
-                     icon='SHADING_WIRE', text="Apply Bounds + Wireframe")
-        col.operator("objectsdisplay.make_portable",
-                     icon='FILE_TICK', text="Make File Portable")
+        box = layout.box()
+        box.label(text="Files save as Wire + Wireframe", icon='FILE_TICK')
+        box.operator("objectsdisplay.apply_wireframe", icon='SHADING_WIRE')
 
 
 #===================================
-# --- Menus ---
+# --- Context menus ---
 #===================================
-def _draw_viewport_menu(layout, scope_label, scope_id):
-    for mode, icon, text in (
-        ('BOUNDS',   'PIVOT_BOUNDBOX',  f"Display {scope_label} as bounds"),
-        ('WIRE',     'MOD_WIREFRAME',   f"Display {scope_label} as wire"),
-        ('SOLID',    'SHADING_SOLID',   f"Display {scope_label} as solid"),
-        ('TEXTURED', 'TEXTURE',         f"Display {scope_label} as textured"),
-    ):
-        op = layout.operator("objectsdisplay.objects_viewport_display",
-                             text=text, icon=icon)
-        op.select_method = scope_id
-        op.display_mode  = mode
+def _draw_modes(layout, noun, scope):
+    for mode, label, icon in _MODES:
+        op = layout.operator(_OP, text=f"Display {noun} as {label.lower()}", icon=icon)
+        op.select_method = scope
+        op.display_mode = mode
 
 
-class OBJECTDISPLAY_MT_viewport_object_submenu(Menu):
+class OBJECTDISPLAY_MT_object_submenu(Menu):
     bl_label = "Object Display Mode"
-    bl_idname = "OBJECTDISPLAY_MT_viewport_object_submenu"
+    bl_idname = "OBJECTDISPLAY_MT_object_submenu"
+
     def draw(self, context):
-        _draw_viewport_menu(self.layout, "selected", 'SELECTED')
+        _draw_modes(self.layout, "selected", 'SELECTED')
 
 
-class OBJECTDISPLAY_MT_outliner_object_submenu(Menu):
+class OBJECTDISPLAY_MT_collection_submenu(Menu):
     bl_label = "Object Display Mode"
-    bl_idname = "OBJECTDISPLAY_MT_outliner_object_submenu"
+    bl_idname = "OBJECTDISPLAY_MT_collection_submenu"
+
     def draw(self, context):
-        _draw_viewport_menu(self.layout, "selected", 'SELECTED')
+        _draw_modes(self.layout, "collection", 'COLLECTION')
 
 
-class OBJECTDISPLAY_MT_outliner_collection_submenu(Menu):
-    bl_label = "Object Display Mode"
-    bl_idname = "OBJECTDISPLAY_MT_outliner_collection_submenu"
-    def draw(self, context):
-        _draw_viewport_menu(self.layout, "collection", 'COLLECTION')
+def _menu_object(self, context):
+    self.layout.separator()
+    self.layout.menu(OBJECTDISPLAY_MT_object_submenu.bl_idname)
+
+
+def _menu_collection(self, context):
+    self.layout.separator()
+    self.layout.menu(OBJECTDISPLAY_MT_collection_submenu.bl_idname)
+
+
+def _menu_viewport_object(self, context):
+    if context.mode == 'OBJECT':
+        _menu_object(self, context)
 
 
 #===================================
@@ -495,97 +339,71 @@ class OBJECTDISPLAY_MT_outliner_collection_submenu(Menu):
 classes = (
     OBJECTDISPLAY_PT_objectdisplay_panel,
     OBJECTSDISPLAY_OT_objects_viewport_display,
-    OBJECTDISPLAY_OT_apply_fallback,
-    OBJECTDISPLAY_OT_make_portable,
-    OBJECTDISPLAY_MT_viewport_object_submenu,
-    OBJECTDISPLAY_MT_outliner_object_submenu,
-    OBJECTDISPLAY_MT_outliner_collection_submenu,
+    OBJECTDISPLAY_OT_apply_wireframe,
+    OBJECTDISPLAY_MT_object_submenu,
+    OBJECTDISPLAY_MT_collection_submenu,
+)
+
+_HANDLERS = (
+    ("save_pre",  _on_save_pre),
+    ("save_post", _on_save_post),
+    ("load_post", _on_load_post),
+)
+
+# (menu class name, draw function)
+_MENU_HOOKS = (
+    ("OUTLINER_MT_context_menu",      _menu_object),
+    ("OUTLINER_MT_object",            _menu_object),
+    ("OUTLINER_MT_collection",        _menu_collection),
+    ("VIEW3D_MT_object_context_menu", _menu_viewport_object),
 )
 
 
-def _menu_outliner_object(self, context):
-    self.layout.separator()
-    self.layout.menu("OBJECTDISPLAY_MT_outliner_object_submenu")
-
-
-def _menu_outliner_collection(self, context):
-    self.layout.separator()
-    self.layout.menu("OBJECTDISPLAY_MT_outliner_collection_submenu")
-
-
-def _menu_viewport_object(self, context):
-    if context.mode != 'OBJECT':
+def _hook_menu(name, fn, add):
+    """Add (or just remove) a draw function on a menu, looked up by name so a menu
+    that doesn't exist in some Blender version is skipped instead of breaking the
+    whole add-on. Removing first keeps register() safe to run twice."""
+    menu = getattr(bpy.types, name, None)
+    if menu is None:
         return
-    self.layout.separator()
-    self.layout.menu("OBJECTDISPLAY_MT_viewport_object_submenu")
+    try:
+        menu.remove(fn)
+    except Exception:
+        pass
+    if add:
+        menu.append(fn)
 
 
 def register():
+    # Handlers first: whatever happens to the UI part below, saving still works.
+    for name, fn in _HANDLERS:
+        handlers = getattr(bpy.app.handlers, name)
+        if fn not in handlers:
+            handlers.append(fn)
+
     for cls in classes:
         bpy.utils.register_class(cls)
-
-    bpy.types.OUTLINER_MT_context_menu.append(_menu_outliner_object)
-    bpy.types.OUTLINER_MT_object.append(_menu_outliner_object)
-    bpy.types.OUTLINER_MT_collection.append(_menu_outliner_collection)
-    bpy.types.VIEW3D_MT_object_context_menu.append(_menu_viewport_object)
-
-    bpy.app.handlers.save_pre.append(_save_pre_handler)
-    bpy.app.handlers.save_post.append(_save_post_handler)
-    bpy.app.handlers.load_post.append(_load_post_handler)
-
-    # load_post does not cover the scene Blender starts with (the add-on registers
-    # after it has loaded) nor enabling the add-on mid-session, so apply the working
-    # state once from here as well. Deferred: nothing in bpy.data is touched while
-    # registering.
-    if not bpy.app.timers.is_registered(_post_load_apply):
-        bpy.app.timers.register(_post_load_apply, first_interval=_APPLY_DELAY)
+    for name, fn in _MENU_HOOKS:
+        _hook_menu(name, fn, add=True)
 
 
 def unregister():
-    # Drop pending timers first so nothing fires halfway through the clean-up
-    for fn in (_restore_snapshot_once, _post_load_apply):
+    _restore()                                  # a save that never finished
+    for fn in (_restore, _apply_open_state):    # pending timers
+        if bpy.app.timers.is_registered(fn):
+            bpy.app.timers.unregister(fn)
+
+    for name, fn in _HANDLERS:
+        handlers = getattr(bpy.app.handlers, name, [])
+        if fn in handlers:
+            handlers.remove(fn)
+    for name, fn in _MENU_HOOKS:
+        _hook_menu(name, fn, add=False)
+    for cls in reversed(classes):
         try:
-            if bpy.app.timers.is_registered(fn):
-                bpy.app.timers.unregister(fn)
+            bpy.utils.unregister_class(cls)
         except Exception:
             pass
-
-    # Put the session back if a save left a snapshot pending...
-    try:
-        _restore_snapshot()
-    except Exception:
-        pass
-    # ...then leave it portable: Bounds objects go back to their real display type
-    # (viewports stay as they are), so a plain File > Save after disabling the
-    # add-on does not write Bounds into the file.
-    try:
-        _revert_bounds_objects()
-    except Exception:
-        pass
-
-    for handler, collection in (
-        (_save_pre_handler,  bpy.app.handlers.save_pre),
-        (_save_post_handler, bpy.app.handlers.save_post),
-        (_load_post_handler, bpy.app.handlers.load_post),
-    ):
-        try:
-            collection.remove(handler)
-        except (ValueError, AttributeError):
-            pass
-
-    for hook, owner in (
-        (_menu_outliner_object,     bpy.types.OUTLINER_MT_context_menu),
-        (_menu_outliner_object,     bpy.types.OUTLINER_MT_object),
-        (_menu_outliner_collection, bpy.types.OUTLINER_MT_collection),
-        (_menu_viewport_object,     bpy.types.VIEW3D_MT_object_context_menu),
-    ):
-        try:
-            owner.remove(hook)
-        except (ValueError, AttributeError):
-            pass
-
-    for cls in reversed(classes):
-        bpy.utils.unregister_class(cls)
 
 
 if __name__ == "__main__":
