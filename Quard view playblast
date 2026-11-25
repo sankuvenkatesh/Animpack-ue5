@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Playblast Quad View",
     "author": "Venkatesh Sanku",
-    "version": (1, 8, 0),
+    "version": (1, 8, 1),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > Playblast",
     "description": "Capture viewport screenshots and animation playblasts, including Quad View",
@@ -11,6 +11,7 @@ bl_info = {
 import bpy
 import os
 import re
+import glob
 import shutil
 import subprocess
 import time
@@ -573,7 +574,6 @@ class QP_OT_screenshot_quadview_anim(bpy.types.Operator):
             context.view_layer.update()
             try:
                 self.area.tag_redraw()
-                # FIX: Added context override for redraw_timer
                 with context.temp_override(
                     window=context.window,
                     screen=context.screen,
@@ -799,6 +799,19 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
             output_width -= output_width % 2
             output_height -= output_height % 2
 
+            output_dir = os.path.dirname(output_path) or os.getcwd()
+            ensure_folder(output_dir)
+
+            # Remove any previous MP4 at the target path so detection is reliable.
+            try:
+                if os.path.isfile(output_path):
+                    os.remove(output_path)
+            except Exception:
+                pass
+
+            # Snapshot existing MP4s so we can identify the file Blender generates.
+            existing_mp4 = set(glob.glob(os.path.join(output_dir, "*.mp4")))
+
             render = temp_scene.render
             render.resolution_x = output_width
             render.resolution_y = output_height
@@ -806,10 +819,12 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
             render.fps = source_scene.render.fps
             render.fps_base = float(source_scene.render.fps_base) * max(1, int(source_scene.qp_props.frame_step))
             render.use_sequencer = True
-            render.filepath = os.path.splitext(output_path)[0]
+
+            # FIX: In Blender 5.2, render.filepath is a DIRECTORY for video output.
+            render.filepath = output_dir
             render.use_file_extension = True
 
-            # FIX: Blender 5.x requires media_type = 'VIDEO' instead of file_format = 'FFMPEG'
+            # FIX: media_type replaces file_format='FFMPEG' for video.
             render.image_settings.media_type = 'VIDEO'
             try:
                 render.image_settings.color_mode = 'RGB'
@@ -827,7 +842,6 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
                 ffmpeg.audio_codec = 'NONE'
             except Exception:
                 pass
-            # FIX: Use a valid CRF preset; 'NONE' is invalid.
             try:
                 ffmpeg.constant_rate_factor = 'MEDIUM'
             except Exception:
@@ -868,22 +882,42 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
                 )
             )
 
-            # FIX: Use temp_override to ensure the correct scene is rendered.
             with bpy.context.temp_override(scene=temp_scene):
                 result = bpy.ops.render.render(animation=True)
 
             if not result or 'FINISHED' not in result:
                 raise RuntimeError("Blender VSE render returned {}".format(result))
 
-            expected_output = os.path.splitext(output_path)[0] + ".mp4"
-            if not os.path.isfile(expected_output) or os.path.getsize(expected_output) <= 0:
-                if os.path.isfile(output_path) and os.path.getsize(output_path) > 0:
-                    expected_output = output_path
-                else:
-                    raise RuntimeError("VSE completed but MP4 output was not found: {}".format(expected_output))
+            # Identify the newly created MP4 file.
+            new_mp4 = set(glob.glob(os.path.join(output_dir, "*.mp4"))) - existing_mp4
+            if not new_mp4:
+                # Fallback: pick the most recently modified MP4 in the folder.
+                all_mp4 = glob.glob(os.path.join(output_dir, "*.mp4"))
+                if all_mp4:
+                    new_mp4 = {max(all_mp4, key=os.path.getmtime)}
 
-            size_mb = os.path.getsize(expected_output) / (1024.0 * 1024.0)
-            print("Playblast Quad View: VSE video created: {} ({:.2f} MB)".format(expected_output, size_mb))
+            if not new_mp4:
+                raise RuntimeError(
+                    "VSE render completed, but no MP4 file was found in: {}".format(output_dir)
+                )
+
+            generated_file = new_mp4.pop()
+
+            # Move/rename the generated MP4 to the user's requested output path.
+            if os.path.abspath(generated_file) != os.path.abspath(output_path):
+                try:
+                    if os.path.isfile(output_path):
+                        os.remove(output_path)
+                    shutil.move(generated_file, output_path)
+                except Exception as exc:
+                    print("Playblast Quad View: Could not rename VSE output:", exc)
+                    output_path = generated_file
+
+            if not os.path.isfile(output_path) or os.path.getsize(output_path) <= 0:
+                raise RuntimeError("VSE output file is missing or empty: {}".format(output_path))
+
+            size_mb = os.path.getsize(output_path) / (1024.0 * 1024.0)
+            print("Playblast Quad View: VSE video created: {} ({:.2f} MB)".format(output_path, size_mb))
             self.report({'INFO'}, "MP4 video created with Blender VSE")
             return {'FINISHED'}
 
@@ -969,7 +1003,7 @@ def register():
         bpy.utils.register_class(cls)
 
     bpy.types.Scene.qp_props = PointerProperty(type=QP_Props)
-    print("Playblast Quad View 1.8.0 registered for Blender 5.2+")
+    print("Playblast Quad View 1.8.1 registered for Blender 5.2+")
 
 
 def unregister():
