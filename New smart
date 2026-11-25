@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Smart Curve Tools",
     "author": "Venkatesh Sanku",
-    "version": (2, 1, 0),
+    "version": (2, 2, 0),
     "blender": (5, 2, 0),
     "location": "Graph Editor > Sidebar > Smart Curve Tools",
     "description": (
@@ -28,69 +28,81 @@ def _unique_fcurves(curves):
     """Return valid F-Curves without duplicates."""
     result = []
     seen = set()
+
     for fc in curves:
         try:
             pointer = fc.as_pointer()
-        except (AttributeError, ReferenceError):
+        except (AttributeError, ReferenceError, RuntimeError):
             continue
+
         if pointer not in seen:
             seen.add(pointer)
             result.append(fc)
+
     return result
 
 
 def _action_fcurves(action, anim_data=None):
     """
-    Blender 5.x supports layered Actions with slots/channel-bags.
-    Older/legacy Actions may still expose action.fcurves, so both layouts
-    are handled without assuming one particular Action representation.
+    Collect F-Curves from legacy Actions and Blender 5.x layered Actions.
+
+    In Blender 5.x, layered Action curves live in channel-bags inside
+    Action layers and strips. The assigned Action Slot is preferred so that
+    curves belonging to another slot are not accidentally mixed in.
     """
     if action is None:
         return []
 
     curves = []
 
-    # Legacy Action API (where available).
+    # Legacy Action API (kept for compatibility with older Blender files).
     try:
         legacy_curves = action.fcurves
         curves.extend(list(legacy_curves))
-    except (AttributeError, RuntimeError, TypeError):
+    except (AttributeError, ReferenceError, RuntimeError, TypeError):
         pass
 
-    # Blender 5.0+ layered Action API.
+    # Blender 5.x layered Action API.
     try:
         layers = list(action.layers)
-    except (AttributeError, RuntimeError, TypeError):
+    except (AttributeError, ReferenceError, RuntimeError, TypeError):
         layers = []
 
     if layers:
-        slots = []
-        active_slot = getattr(anim_data, "action_slot", None) if anim_data else None
+        active_slot = None
+        if anim_data is not None:
+            try:
+                active_slot = anim_data.action_slot
+            except (AttributeError, ReferenceError, RuntimeError, TypeError):
+                active_slot = None
+
         if active_slot is not None:
             slots = [active_slot]
         else:
             try:
                 slots = list(action.slots)
-            except (AttributeError, RuntimeError, TypeError):
+            except (AttributeError, ReferenceError, RuntimeError, TypeError):
                 slots = []
 
         for layer in layers:
             try:
                 strips = list(layer.strips)
-            except (AttributeError, RuntimeError, TypeError):
+            except (AttributeError, ReferenceError, RuntimeError, TypeError):
                 continue
 
             for strip in strips:
                 for slot in slots:
                     try:
                         channelbag = strip.channelbag(slot)
-                    except (AttributeError, RuntimeError, TypeError):
+                    except (AttributeError, ReferenceError, RuntimeError, TypeError):
                         channelbag = None
+
                     if channelbag is None:
                         continue
+
                     try:
                         curves.extend(list(channelbag.fcurves))
-                    except (AttributeError, RuntimeError, TypeError):
+                    except (AttributeError, ReferenceError, RuntimeError, TypeError):
                         pass
 
     return _unique_fcurves(curves)
@@ -108,14 +120,14 @@ def get_graph_fcurves(context):
     except (AttributeError, ReferenceError, RuntimeError, TypeError):
         pass
 
-    # Include curves from the Graph Editor's edited object.
+    # Include curves from the Graph Editor's edited object when available.
     try:
         space = context.space_data
         if space and space.type == 'GRAPH_EDITOR':
             edit_obj = getattr(space, "edit_object", None)
             if edit_obj and edit_obj.animation_data:
-                adt = edit_obj.animation_data
-                fcurves.extend(_action_fcurves(adt.action, adt))
+                anim_data = edit_obj.animation_data
+                fcurves.extend(_action_fcurves(anim_data.action, anim_data))
     except (AttributeError, ReferenceError, RuntimeError, TypeError):
         pass
 
@@ -123,8 +135,8 @@ def get_graph_fcurves(context):
     try:
         obj = context.active_object
         if obj and obj.animation_data:
-            adt = obj.animation_data
-            fcurves.extend(_action_fcurves(adt.action, adt))
+            anim_data = obj.animation_data
+            fcurves.extend(_action_fcurves(anim_data.action, anim_data))
     except (AttributeError, ReferenceError, RuntimeError, TypeError):
         pass
 
@@ -136,19 +148,26 @@ def auto_fix_bad_keyframes(fcurve):
     try:
         points = fcurve.keyframe_points
         count = len(points)
+
         for i in range(count):
             value = float(points[i].co[1])
             if math.isfinite(value):
                 continue
 
             left = next(
-                (float(points[j].co[1]) for j in range(i - 1, -1, -1)
-                 if math.isfinite(float(points[j].co[1]))),
+                (
+                    float(points[j].co[1])
+                    for j in range(i - 1, -1, -1)
+                    if math.isfinite(float(points[j].co[1]))
+                ),
                 None,
             )
             right = next(
-                (float(points[j].co[1]) for j in range(i + 1, count)
-                 if math.isfinite(float(points[j].co[1]))),
+                (
+                    float(points[j].co[1])
+                    for j in range(i + 1, count)
+                    if math.isfinite(float(points[j].co[1]))
+                ),
                 None,
             )
 
@@ -160,7 +179,9 @@ def auto_fix_bad_keyframes(fcurve):
                 points[i].co[1] = right
             else:
                 points[i].co[1] = 0.0
+
         fcurve.update()
+
     except (AttributeError, ReferenceError, RuntimeError, TypeError, ValueError):
         pass
 
@@ -172,7 +193,9 @@ def set_bezier_and_auto_clamp_handles(fcurve):
             kp.interpolation = 'BEZIER'
             kp.handle_left_type = 'AUTO_CLAMPED'
             kp.handle_right_type = 'AUTO_CLAMPED'
+
         fcurve.update()
+
     except (AttributeError, ReferenceError, RuntimeError, TypeError):
         pass
 
@@ -189,13 +212,11 @@ def smooth_keyframes(
     preserve_ends=True,
     all_keyframes=False,
 ):
-    """
-    Smooth key values using the original three-neighbor averaging logic.
-    Keyframe X positions and handles are not moved by this function.
-    """
+    """Smooth key values using three-neighbor averaging."""
     try:
         keyframes = fcurve.keyframe_points
         n = len(keyframes)
+
         if n < 3:
             return {'moved': 0, 'max_delta': 0.0}
 
@@ -210,6 +231,7 @@ def smooth_keyframes(
                 return {'moved': 0, 'max_delta': 0.0}
 
         values = [float(kp.co[1]) for kp in keyframes]
+
         if not all(math.isfinite(v) for v in values):
             auto_fix_bad_keyframes(fcurve)
             values = [float(kp.co[1]) for kp in keyframes]
@@ -247,6 +269,7 @@ def smooth_keyframes(
 
                 delta = new_value - center
                 new_values[i] = new_value
+
                 if abs(delta) > 0.0:
                     stats['moved'] += 1
                     stats['max_delta'] = max(
@@ -273,63 +296,98 @@ def smooth_keyframes(
 def nearest_equivalent_euler(previous_value, current_value):
     """Return the equivalent angle nearest to the previous angle."""
     twopi = 2.0 * math.pi
+
     while current_value - previous_value > math.pi:
         current_value -= twopi
+
     while current_value - previous_value < -math.pi:
         current_value += twopi
+
     return current_value
 
 
 def get_selection_info(context):
+    """Get the active object or active pose bone and its rotation mode."""
     obj = context.active_object
     if obj is None:
         return None, None, ""
 
     if obj.type == 'ARMATURE':
         bone = getattr(context, "active_pose_bone", None)
+
+        # Graph Editor contexts do not always expose active_pose_bone.
+        if bone is None:
+            try:
+                bone = obj.pose.bones.active
+            except (AttributeError, ReferenceError, RuntimeError):
+                bone = None
+
         if bone is not None:
             try:
                 return bone, bone.rotation_mode, bone.path_from_id()
             except (AttributeError, ReferenceError, RuntimeError):
-                return bone, bone.rotation_mode, f'pose.bones["{bone.name}"]'
+                escaped_name = bone.name.replace("\\", "\\\\").replace('"', '\\"')
+                return (
+                    bone,
+                    bone.rotation_mode,
+                    f'pose.bones["{escaped_name}"]',
+                )
 
     return obj, getattr(obj, "rotation_mode", "XYZ"), ""
 
 
 def get_rotation_fcurves(mode_code, all_fcurves, rna_path_prefix):
+    """
+    Find the complete rotation channel set in array-index order.
+
+    Quaternion continuity must always operate on W, X, Y and Z together.
+    Returning a partial quaternion channel set would cause invalid indexing
+    or produce an incorrect orientation, so missing channels are reported.
+    """
     try:
         if mode_code == "EULER":
             channel = "rotation_euler"
-            num_channels = 3
+            expected_indices = (0, 1, 2)
         else:
             channel = "rotation_quaternion"
-            num_channels = 4
+            expected_indices = (0, 1, 2, 3)
 
-        if rna_path_prefix:
-            prefix = rna_path_prefix + "."
-            found = [
-                fc for fc in all_fcurves
-                if fc.data_path.startswith(prefix)
-                and fc.data_path.endswith(channel)
-            ]
-        else:
-            found = [
-                fc for fc in all_fcurves
-                if fc.data_path == channel
-            ]
-
-        found = sorted(
-            found,
-            key=lambda fc: getattr(fc, "array_index", 0)
+        expected_path = (
+            f"{rna_path_prefix}.{channel}"
+            if rna_path_prefix else channel
         )
-        found = found[:num_channels]
 
-        if not found:
-            return None, f"No {channel} F-Curves found."
+        indexed_curves = {}
 
-        return found, None
+        for fc in all_fcurves:
+            try:
+                if fc.data_path != expected_path:
+                    continue
 
-    except (AttributeError, ReferenceError, RuntimeError, TypeError):
+                index = int(fc.array_index)
+                if index in expected_indices and index not in indexed_curves:
+                    indexed_curves[index] = fc
+            except (AttributeError, ReferenceError, RuntimeError, TypeError, ValueError):
+                continue
+
+        missing = [
+            index for index in expected_indices
+            if index not in indexed_curves
+        ]
+
+        if missing:
+            channel_names = (
+                "W, X, Y, Z" if mode_code == "QUATERNION" else "X, Y, Z"
+            )
+            return None, (
+                f"Incomplete {channel} F-Curves. Missing array index: "
+                f"{missing}. Expected channels: {channel_names}. "
+                "Check the active Action and Action Slot in the Graph Editor."
+            )
+
+        return [indexed_curves[i] for i in expected_indices], None
+
+    except (AttributeError, ReferenceError, RuntimeError, TypeError, ValueError):
         return None, "Error finding rotation curves."
 
 
@@ -349,6 +407,7 @@ def get_fcurve_keyframe_map(fcurve):
 
 
 def collect_keyframes_with_handles_any(curves):
+    """Collect the union of keyframe times and each channel's key data."""
     try:
         axis_keyframes = [get_fcurve_keyframe_map(fc) for fc in curves]
         frames = sorted({
@@ -356,10 +415,12 @@ def collect_keyframes_with_handles_any(curves):
             for mapping in axis_keyframes
             for frame in mapping.keys()
         })
+
         if not frames:
             return []
 
         keyframe_info = []
+
         for frame in frames:
             key_points = [mapping.get(frame) for mapping in axis_keyframes]
             values = [
@@ -397,11 +458,13 @@ def collect_keyframes_with_handles_any(curves):
 
 
 def unwrap_keyframe_values_euler_any(keyframes):
+    """Unwrap Euler channels independently, avoiding +/- 2-pi jumps."""
     result = []
     previous = None
 
     for info in keyframes:
         values = info['value']
+
         if previous is None:
             fixed = list(values)
         else:
@@ -417,19 +480,27 @@ def unwrap_keyframe_values_euler_any(keyframes):
             'value': fixed,
             'handles': info['handles'],
         })
-        previous = [
-            fixed[i] if fixed[i] is not None
-            else (previous[i] if previous else None)
-            for i in range(len(fixed))
-        ]
+
+        if previous is None:
+            previous = list(fixed)
+        else:
+            previous = [
+                fixed[i] if fixed[i] is not None else previous[i]
+                for i in range(len(fixed))
+            ]
 
     return result
 
 
 def unwrap_keyframe_values_quaternion_any(keyframes):
     """
-    Quaternion q and -q represent the same orientation. Flip a complete
-    quaternion when its dot product with the previous quaternion is negative.
+    Apply quaternion sign continuity to complete W, X, Y, Z samples.
+
+    Quaternion q and -q represent the same orientation. Each complete sample
+    is normalized, then negated when its dot product with the previous sample
+    is negative. All four channels must have keys at the same frames; silently
+    filling missing component keys can create a quaternion that was never
+    actually keyed by the animator, so mismatched samples are rejected.
     """
     result = []
     previous = None
@@ -437,39 +508,56 @@ def unwrap_keyframe_values_quaternion_any(keyframes):
     for info in keyframes:
         values = info['value']
 
-        # Quaternion filtering requires all four channels at each sample.
-        # Missing channels are filled from the preceding sample (or identity).
-        complete = [
-            values[i] if values[i] is not None
-            else (previous[i] if previous is not None else
-                  (1.0 if i == 0 else 0.0))
-            for i in range(4)
-        ]
+        if len(values) != 4:
+            raise ValueError(
+                "Quaternion continuity requires exactly four channels: W, X, Y and Z."
+            )
 
-        quat = Quaternion(complete)
+        if any(value is None for value in values):
+            raise ValueError(
+                "Quaternion keyframes are not aligned. All four channels "
+                "(W, X, Y, Z) must have keyframes at the same frames."
+            )
+
+        if not all(math.isfinite(float(value)) for value in values):
+            raise ValueError(
+                "Quaternion contains a non-finite keyframe value. "
+                "Clean the invalid keys and try again."
+            )
+
+        quat = Quaternion(tuple(float(value) for value in values))
+
         if quat.length > 1e-12:
             quat.normalize()
         else:
             quat = Quaternion((1.0, 0.0, 0.0, 0.0))
 
         if previous is not None:
-            prev_quat = Quaternion(previous)
-            if prev_quat.dot(quat) < 0.0:
+            previous_quat = Quaternion(previous)
+            if previous_quat.dot(quat) < 0.0:
                 quat.negate()
 
         fixed = [quat.w, quat.x, quat.y, quat.z]
+
         result.append({
             'frame': info['frame'],
             'value': fixed,
             'handles': info['handles'],
         })
+
         previous = fixed[:]
 
     return result
 
 
 def preserve_and_update_fcurve_points_any(curves, keyframe_infos):
-    """Write filtered values and restore each point's original handles."""
+    """
+    Write filtered values and preserve handle shape relative to each key.
+
+    When a value is shifted (for example by +/- 2*pi for Euler continuity),
+    both handle Y coordinates are shifted by the same amount. This preserves
+    the tangent offsets instead of leaving handles at their old absolute Y.
+    """
     try:
         for axis, fcurve in enumerate(curves):
             frame_map = get_fcurve_keyframe_map(fcurve)
@@ -483,24 +571,39 @@ def preserve_and_update_fcurve_points_any(curves, keyframe_infos):
                 if kp is None or value is None:
                     continue
 
-                kp.co[1] = value
+                old_value = float(kp.co[1])
+                new_value = float(value)
+                delta = new_value - old_value
 
+                if not math.isfinite(new_value):
+                    continue
+
+                kp.co[1] = new_value
+
+                # Restore handle types first, then apply the translated
+                # coordinates. Missing handle records are ignored safely.
                 if handle_info['handle_left_type'] is not None:
                     kp.handle_left_type = handle_info['handle_left_type']
                 if handle_info['handle_right_type'] is not None:
                     kp.handle_right_type = handle_info['handle_right_type']
 
-                # Restore coordinates after restoring handle types because
-                # changing handle types may recalculate handle positions.
-                if handle_info['handle_left'] is not None:
-                    kp.handle_left = handle_info['handle_left']
-                if handle_info['handle_right'] is not None:
-                    kp.handle_right = handle_info['handle_right']
+                left_handle = handle_info['handle_left']
+                right_handle = handle_info['handle_right']
+
+                if left_handle is not None:
+                    new_left = left_handle.copy()
+                    new_left.y += delta
+                    kp.handle_left = new_left
+
+                if right_handle is not None:
+                    new_right = right_handle.copy()
+                    new_right.y += delta
+                    kp.handle_right = new_right
 
             fcurve.update()
 
     except (AttributeError, ReferenceError, RuntimeError, TypeError, ValueError):
-        pass
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -510,7 +613,7 @@ def preserve_and_update_fcurve_points_any(curves, keyframe_infos):
 class ROTATION_OT_smart_euler_filter(bpy.types.Operator):
     """Apply Euler angle or Quaternion sign continuity to rotation curves."""
     bl_idname = "graph.smart_euler_filter"
-    bl_label = "Smart Euler Filter"
+    bl_label = "Smart Euler / Quaternion Filter"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -519,11 +622,13 @@ class ROTATION_OT_smart_euler_filter(bpy.types.Operator):
 
     def execute(self, context):
         fcurves = get_graph_fcurves(context)
+
         if not fcurves:
-            self.report({'ERROR'}, "No F-Curves found.")
+            self.report({'ERROR'}, "No F-Curves found in the current Graph Editor.")
             return {'CANCELLED'}
 
         entity, rotation_mode, path_prefix = get_selection_info(context)
+
         if entity is None:
             self.report({'ERROR'}, "No active object or active pose bone.")
             return {'CANCELLED'}
@@ -535,8 +640,11 @@ class ROTATION_OT_smart_euler_filter(bpy.types.Operator):
         )
 
         rotation_curves, error = get_rotation_fcurves(
-            mode_code, fcurves, path_prefix
+            mode_code,
+            fcurves,
+            path_prefix,
         )
+
         if rotation_curves is None:
             self.report({'ERROR'}, error)
             return {'CANCELLED'}
@@ -547,39 +655,48 @@ class ROTATION_OT_smart_euler_filter(bpy.types.Operator):
         ]
 
         if mode_code == "QUATERNION":
-            # A quaternion is a four-component value. Filtering only one
-            # selected component would produce an invalid sign-continuity
-            # calculation, so process all four channels together.
+            # Quaternion is a four-component rotation. Never filter just one
+            # selected component; process all four channels as one value.
             curves_to_process = rotation_curves
-            selection_note = "all quaternion channels"
+            selection_note = "all four quaternion channels (W, X, Y, Z)"
         else:
+            # Euler channels can be filtered independently when selected.
             curves_to_process = (
                 selected_curves if selected_curves else rotation_curves
             )
             selection_note = (
                 "selected Euler channels"
-                if selected_curves else "all Euler channels"
+                if selected_curves else "all three Euler channels"
             )
 
         keyframes = collect_keyframes_with_handles_any(curves_to_process)
+
         if not keyframes:
-            self.report({'ERROR'}, "No rotation keyframes found.")
+            self.report({'ERROR'}, "No rotation keyframes found on these channels.")
             return {'CANCELLED'}
 
-        if mode_code == "EULER":
-            processed = unwrap_keyframe_values_euler_any(keyframes)
-        else:
-            processed = unwrap_keyframe_values_quaternion_any(keyframes)
+        try:
+            if mode_code == "EULER":
+                processed = unwrap_keyframe_values_euler_any(keyframes)
+            else:
+                processed = unwrap_keyframe_values_quaternion_any(keyframes)
 
-        preserve_and_update_fcurve_points_any(curves_to_process, processed)
+            preserve_and_update_fcurve_points_any(
+                curves_to_process,
+                processed,
+            )
+
+        except (IndexError, KeyError, TypeError, ValueError, RuntimeError) as exc:
+            self.report({'ERROR'}, f"Rotation continuity failed: {exc}")
+            return {'CANCELLED'}
 
         if context.area:
             context.area.tag_redraw()
 
         self.report(
             {'INFO'},
-            f"{mode_code} continuity applied to "
-            f"{len(curves_to_process)} channel(s) ({selection_note})."
+            f"{mode_code} continuity applied to {len(curves_to_process)} "
+            f"channel(s): {selection_note}.",
         )
         return {'FINISHED'}
 
@@ -592,6 +709,7 @@ class CurveSmoothProperties(bpy.types.PropertyGroup):
         min=1,
         max=50,
     )
+
     strength: bpy.props.FloatProperty(
         name="Strength",
         description="Smoothing intensity (0-1)",
@@ -599,6 +717,7 @@ class CurveSmoothProperties(bpy.types.PropertyGroup):
         min=0.0,
         max=1.0,
     )
+
     sensitivity: bpy.props.FloatProperty(
         name="Sensitivity",
         description="Sensitivity falloff (0-1)",
@@ -606,6 +725,7 @@ class CurveSmoothProperties(bpy.types.PropertyGroup):
         min=0.0,
         max=1.0,
     )
+
     preserve_ends: bpy.props.BoolProperty(
         name="Preserve Ends",
         description="Do not smooth the first and last selected keyframes",
@@ -642,6 +762,7 @@ class CurveSmoothOperator(bpy.types.Operator):
                 kp for kp in fcurve.keyframe_points
                 if kp.select_control_point
             ]
+
             if len(selected_keys) < 3:
                 continue
 
@@ -653,8 +774,10 @@ class CurveSmoothOperator(bpy.types.Operator):
                 settings.preserve_ends,
                 all_keyframes=False,
             )
+
             if stats['moved'] > 0:
                 set_bezier_and_auto_clamp_handles(fcurve)
+
             smoothed_count += 1
             total_keys += stats['moved']
             biggest_move = max(biggest_move, stats['max_delta'])
@@ -662,7 +785,7 @@ class CurveSmoothOperator(bpy.types.Operator):
         if smoothed_count == 0:
             self.report(
                 {'WARNING'},
-                "Not enough selected keyframes to smooth (need at least 3)."
+                "Not enough selected keyframes to smooth (need at least 3).",
             )
             return {'CANCELLED'}
 
@@ -672,7 +795,7 @@ class CurveSmoothOperator(bpy.types.Operator):
         self.report(
             {'INFO'},
             f"Smoothed {total_keys} keyframe updates in "
-            f"{smoothed_count} F-Curve(s). Largest change: {biggest_move:.4f}."
+            f"{smoothed_count} F-Curve(s). Largest change: {biggest_move:.4f}.",
         )
         return {'FINISHED'}
 
@@ -711,6 +834,7 @@ class CurveSmoothAllOperator(bpy.types.Operator):
                 settings.preserve_ends,
                 all_keyframes=True,
             )
+
             if stats['moved'] > 0:
                 set_bezier_and_auto_clamp_handles(fcurve)
 
@@ -728,7 +852,7 @@ class CurveSmoothAllOperator(bpy.types.Operator):
         self.report(
             {'INFO'},
             f"Batch smoothed {total_keys} keyframe updates in "
-            f"{smoothed_count} F-Curve(s). Largest change: {biggest_move:.4f}."
+            f"{smoothed_count} F-Curve(s). Largest change: {biggest_move:.4f}.",
         )
         return {'FINISHED'}
 
@@ -791,6 +915,7 @@ class SMARTCURVETOOLS_PT_panel(bpy.types.Panel):
             text="Batch Smooth All F-Curves",
             icon='FCURVE',
         )
+
         layout.separator()
         layout.operator(
             "graph.reset_curve_smooth_values",
@@ -819,7 +944,10 @@ def register():
             bpy.utils.register_class(cls)
         except RuntimeError:
             # Allows safe re-run from Blender's Text Editor.
-            bpy.utils.unregister_class(cls)
+            try:
+                bpy.utils.unregister_class(cls)
+            except RuntimeError:
+                pass
             bpy.utils.register_class(cls)
 
     if not hasattr(bpy.types.Scene, "curve_smooth_settings"):
