@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Playblast Quad View",
     "author": "Venkatesh Sanku",
-    "version": (1, 8, 1),
+    "version": (1, 8, 2),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > Playblast",
     "description": "Capture viewport screenshots and animation playblasts, including Quad View",
@@ -802,15 +802,18 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
             output_dir = os.path.dirname(output_path) or os.getcwd()
             ensure_folder(output_dir)
 
-            # Remove any previous MP4 at the target path so detection is reliable.
+            # Remove any previous video at the target path so detection is reliable.
             try:
                 if os.path.isfile(output_path):
                     os.remove(output_path)
             except Exception:
                 pass
 
-            # Snapshot existing MP4s so we can identify the file Blender generates.
-            existing_mp4 = set(glob.glob(os.path.join(output_dir, "*.mp4")))
+            # Snapshot existing video files so we can identify the file Blender generates.
+            video_extensions = ("*.mp4", "*.mov", "*.mkv", "*.avi")
+            existing_videos = set()
+            for ext in video_extensions:
+                existing_videos.update(glob.glob(os.path.join(output_dir, ext)))
 
             render = temp_scene.render
             render.resolution_x = output_width
@@ -824,8 +827,10 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
             render.filepath = output_dir
             render.use_file_extension = True
 
-            # FIX: media_type replaces file_format='FFMPEG' for video.
+            # FIX: media_type MUST be set before file_format.
             render.image_settings.media_type = 'VIDEO'
+            render.image_settings.file_format = 'FFMPEG'  # <-- CRUCIAL
+
             try:
                 render.image_settings.color_mode = 'RGB'
             except Exception:
@@ -888,22 +893,28 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
             if not result or 'FINISHED' not in result:
                 raise RuntimeError("Blender VSE render returned {}".format(result))
 
-            # Identify the newly created MP4 file.
-            new_mp4 = set(glob.glob(os.path.join(output_dir, "*.mp4"))) - existing_mp4
-            if not new_mp4:
-                # Fallback: pick the most recently modified MP4 in the folder.
-                all_mp4 = glob.glob(os.path.join(output_dir, "*.mp4"))
-                if all_mp4:
-                    new_mp4 = {max(all_mp4, key=os.path.getmtime)}
+            # Identify the newly created video file.
+            new_videos = set()
+            for ext in video_extensions:
+                new_videos.update(glob.glob(os.path.join(output_dir, ext)))
+            new_videos -= existing_videos
 
-            if not new_mp4:
+            if not new_videos:
+                # Fallback: pick the most recently modified video in the folder.
+                all_videos = []
+                for ext in video_extensions:
+                    all_videos.extend(glob.glob(os.path.join(output_dir, ext)))
+                if all_videos:
+                    new_videos = {max(all_videos, key=os.path.getmtime)}
+
+            if not new_videos:
                 raise RuntimeError(
-                    "VSE render completed, but no MP4 file was found in: {}".format(output_dir)
+                    "VSE render completed, but no video file was found in: {}".format(output_dir)
                 )
 
-            generated_file = new_mp4.pop()
+            generated_file = new_videos.pop()
 
-            # Move/rename the generated MP4 to the user's requested output path.
+            # Move/rename the generated file to the user's requested output path.
             if os.path.abspath(generated_file) != os.path.abspath(output_path):
                 try:
                     if os.path.isfile(output_path):
@@ -1003,7 +1014,7 @@ def register():
         bpy.utils.register_class(cls)
 
     bpy.types.Scene.qp_props = PointerProperty(type=QP_Props)
-    print("Playblast Quad View 1.8.1 registered for Blender 5.2+")
+    print("Playblast Quad View 1.8.2 registered for Blender 5.2+")
 
 
 def unregister():
