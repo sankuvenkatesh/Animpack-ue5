@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Playblast Quad View",
     "author": "Venkatesh Sanku",
-    "version": (1, 7, 0),
+    "version": (1, 8, 0),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > Playblast",
     "description": "Capture viewport screenshots and animation playblasts, including Quad View",
@@ -202,8 +202,6 @@ def save_image_with_settings(context, source_png, target_path, image_format, qua
 
         image = bpy.data.images.load(source_png, check_existing=False)
 
-        # save_render uses the active scene's ImageFormatSettings. Unlike the
-        # old implementation, it is called without an unsupported quality kwarg.
         try:
             image.save_render(target_path, scene=scene)
             success = os.path.isfile(target_path) and os.path.getsize(target_path) > 0
@@ -242,9 +240,11 @@ def capture_area_screenshot(context, area, filepath):
     if area is None or region is None:
         raise RuntimeError("The VIEW_3D window region is unavailable")
 
+    screen = context.screen
     result = None
     with context.temp_override(
         window=context.window,
+        screen=screen,
         area=area,
         region=region,
     ):
@@ -348,6 +348,7 @@ class QP_OT_switch_layout(bpy.types.Operator):
         try:
             with context.temp_override(
                 window=context.window,
+                screen=context.screen,
                 area=area,
                 region=region,
             ):
@@ -572,7 +573,14 @@ class QP_OT_screenshot_quadview_anim(bpy.types.Operator):
             context.view_layer.update()
             try:
                 self.area.tag_redraw()
-                bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
+                # FIX: Added context override for redraw_timer
+                with context.temp_override(
+                    window=context.window,
+                    screen=context.screen,
+                    area=self.area,
+                    region=self.region,
+                ):
+                    bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
             except Exception:
                 pass
 
@@ -702,7 +710,6 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
         crf_value = max(0, min(51, crf_value))
         scale = max(0.25, min(1.0, float(props.resolution_scale)))
 
-        # Always make the output dimensions even; yuv420p requires even width/height.
         scale_filter = (
             "scale=trunc(iw*{:.4f}/2)*2:trunc(ih*{:.4f}/2)*2"
         ).format(scale, scale)
@@ -772,7 +779,6 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
             temp_scene.render.engine = source_scene.render.engine
             temp_scene.sequence_editor_create()
 
-            # Blender 5.2 uses SequenceEditor.strips (not the old .sequences API).
             strips = temp_scene.sequence_editor.strips
             strip = strips.new_image(
                 name="PlayblastFrames",
@@ -802,9 +808,9 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
             render.use_sequencer = True
             render.filepath = os.path.splitext(output_path)[0]
             render.use_file_extension = True
-            render.image_settings.file_format = 'FFMPEG'
 
-            # Keep the captured viewport images in RGB and use MP4/H.264 output.
+            # FIX: Blender 5.x requires media_type = 'VIDEO' instead of file_format = 'FFMPEG'
+            render.image_settings.media_type = 'VIDEO'
             try:
                 render.image_settings.color_mode = 'RGB'
             except Exception:
@@ -821,8 +827,9 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
                 ffmpeg.audio_codec = 'NONE'
             except Exception:
                 pass
+            # FIX: Use a valid CRF preset; 'NONE' is invalid.
             try:
-                ffmpeg.constant_rate_factor = 'NONE'
+                ffmpeg.constant_rate_factor = 'MEDIUM'
             except Exception:
                 pass
             quality = max(0, min(100, int(source_scene.qp_props.video_quality)))
@@ -837,7 +844,6 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
             except Exception:
                 pass
 
-            # Copy basic color-management choices so VSE output matches the source scene.
             for owner_name, properties in (
                 ("view_settings", ("view_transform", "look", "exposure", "gamma")),
                 ("display_settings", ("display_device",)),
@@ -862,14 +868,15 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
                 )
             )
 
-            result = bpy.ops.render.render(animation=True, scene=temp_scene.name)
+            # FIX: Use temp_override to ensure the correct scene is rendered.
+            with bpy.context.temp_override(scene=temp_scene):
+                result = bpy.ops.render.render(animation=True)
+
             if not result or 'FINISHED' not in result:
                 raise RuntimeError("Blender VSE render returned {}".format(result))
 
-            # Blender appends the extension for FFMPEG when use_file_extension is enabled.
             expected_output = os.path.splitext(output_path)[0] + ".mp4"
             if not os.path.isfile(expected_output) or os.path.getsize(expected_output) <= 0:
-                # Some builds may honor the literal filepath instead.
                 if os.path.isfile(output_path) and os.path.getsize(output_path) > 0:
                     expected_output = output_path
                 else:
@@ -944,8 +951,6 @@ classes = (
 
 
 def register():
-    # Make repeated Text Editor runs safe by unregistering previous classes
-    # with the same Blender RNA names before registering this version.
     for cls in reversed(classes):
         existing = getattr(bpy.types, cls.__name__, None)
         if existing is not None:
@@ -964,7 +969,7 @@ def register():
         bpy.utils.register_class(cls)
 
     bpy.types.Scene.qp_props = PointerProperty(type=QP_Props)
-    print("Playblast Quad View 1.7.0 registered for Blender 5.2+")
+    print("Playblast Quad View 1.8.0 registered for Blender 5.2+")
 
 
 def unregister():
