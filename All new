@@ -1,7 +1,6 @@
-
 # -*- coding: utf-8 -*-
 """
-Combined Animation & Gizmo Tools - v2.0.0
+Combined Animation & Gizmo Tools - v2.1.0
 Blender 5.2.4 LTS Compatible
 
 Features:
@@ -9,7 +8,7 @@ Features:
     - Action Slot selector (Blender 4.4+)
     - Undo / Redo buttons
     - Action to Scene Range
-    - Graph Editor Paste Connect
+    - Graph Editor Paste Connect (Works from Timeline & Dopesheet too)
     - Gizmo size controls
     - Gizmo Preferences shortcut
 
@@ -23,7 +22,7 @@ Location:
 bl_info = {
     "name": "Combined Animation & Gizmo Tools",
     "author": "Venkatesh Sanku",
-    "version": (2, 0, 0),
+    "version": (2, 1, 0),
     "blender": (5, 2, 0),
     "location": (
         "Timeline / Dope Sheet / Graph Editor header, "
@@ -57,25 +56,17 @@ def get_active_action(context):
 
 
 def ensure_action_slot(anim, obj, preferred_identifier=None):
-    """
-    Ensure the assigned action has a suitable slot.
-
-    Compatible with Blender 4.4+ slotted Actions.
-    """
-
+    """Ensure the assigned action has a suitable slot."""
     action = anim.action
 
     if action is None:
         return
-
     if not hasattr(anim, "action_slot"):
         return
-
     if anim.action_slot is not None:
         return
 
     slots = getattr(action, "slots", None)
-
     if slots is None:
         return
 
@@ -84,44 +75,31 @@ def ensure_action_slot(anim, obj, preferred_identifier=None):
     # Try to restore the previous slot.
     if preferred_identifier:
         slot = next(
-            (
-                s for s in slots
-                if s.identifier == preferred_identifier
-            ),
+            (s for s in slots if s.identifier == preferred_identifier),
             None
         )
 
     # Find an existing suitable slot.
     if slot is None:
         suitable = getattr(anim, "action_suitable_slots", None)
-
         if suitable is not None:
             try:
                 slot = next(iter(suitable), None)
-            except Exception:
+            except (StopIteration, TypeError):
                 slot = None
 
     # Create a slot if necessary.
     if slot is None:
         try:
-            slot = slots.new(
-                id_type='OBJECT',
-                name=obj.name
-            )
-        except Exception as exc:
-            print(
-                f"[Combined Tools] "
-                f"Could not create Action Slot: {exc}"
-            )
+            slot = slots.new(id_type='OBJECT', name=obj.name)
+        except RuntimeError as exc:
+            print(f"[Combined Tools] Could not create Action Slot: {exc}")
             return
 
     try:
         anim.action_slot = slot
-    except Exception as exc:
-        print(
-            f"[Combined Tools] "
-            f"Could not assign Action Slot: {exc}"
-        )
+    except (RuntimeError, AttributeError) as exc:
+        print(f"[Combined Tools] Could not assign Action Slot: {exc}")
 
 
 # ============================================================
@@ -129,9 +107,7 @@ def ensure_action_slot(anim, obj, preferred_identifier=None):
 # ============================================================
 
 class ANIM_OT_new_action(bpy.types.Operator):
-
     """Create a new Action or duplicate the current Action"""
-
     bl_idname = "anim.new_action"
     bl_label = "New Action"
     bl_options = {'REGISTER', 'UNDO'}
@@ -141,9 +117,7 @@ class ANIM_OT_new_action(bpy.types.Operator):
         return get_active_object(context) is not None
 
     def execute(self, context):
-
         obj = get_active_object(context)
-
         anim = obj.animation_data
 
         if anim is None:
@@ -151,69 +125,37 @@ class ANIM_OT_new_action(bpy.types.Operator):
 
         # Prevent editing actions during NLA tweak mode.
         if getattr(anim, "use_tweak_mode", False):
-            self.report(
-                {'WARNING'},
-                "Exit NLA tweak mode first"
-            )
+            self.report({'WARNING'}, "Exit NLA tweak mode first")
             return {'CANCELLED'}
 
         source = anim.action
-
         preferred_slot = None
 
         if source is not None:
-
             old_slot = getattr(anim, "action_slot", None)
-
             if old_slot is not None:
                 preferred_slot = old_slot.identifier
 
-            # Preserve the original Action when it is about
-            # to lose its only user.
-            if (
-                source.users <= 1
-                and not source.use_fake_user
-            ):
+            # Preserve original Action
+            if source.users <= 1 and not source.use_fake_user:
                 source.use_fake_user = True
 
             try:
                 new_action = source.copy()
-            except Exception as exc:
-                self.report(
-                    {'ERROR'},
-                    f"Action duplication failed: {exc}"
-                )
+            except RuntimeError as exc:
+                self.report({'ERROR'}, f"Action duplication failed: {exc}")
                 return {'CANCELLED'}
-
         else:
-
-            new_action = bpy.data.actions.new(
-                name="Action"
-            )
+            new_action = bpy.data.actions.new(name="Action")
 
         try:
             anim.action = new_action
-
-            ensure_action_slot(
-                anim,
-                obj,
-                preferred_slot
-            )
-
-        except Exception as exc:
-
-            self.report(
-                {'ERROR'},
-                f"Could not assign new Action: {exc}"
-            )
-
+            ensure_action_slot(anim, obj, preferred_slot)
+        except RuntimeError as exc:
+            self.report({'ERROR'}, f"Could not assign new Action: {exc}")
             return {'CANCELLED'}
 
-        self.report(
-            {'INFO'},
-            f"Created Action: {new_action.name}"
-        )
-
+        self.report({'INFO'}, f"Created Action: {new_action.name}")
         return {'FINISHED'}
 
 
@@ -222,12 +164,9 @@ class ANIM_OT_new_action(bpy.types.Operator):
 # ============================================================
 
 class ANIM_OT_action_to_scene_range(bpy.types.Operator):
-
     """Set scene range using the active Action range"""
-
     bl_idname = "anim.action_to_scene_range"
     bl_label = "Action to Scene Range"
-
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -235,24 +174,17 @@ class ANIM_OT_action_to_scene_range(bpy.types.Operator):
         return get_active_action(context) is not None
 
     def execute(self, context):
-
         action = get_active_action(context)
-
         if action is None:
             return {'CANCELLED'}
 
         start, end = action.frame_range
-
         scene = context.scene
 
         scene.frame_start = math.floor(start)
         scene.frame_end = math.ceil(end)
 
-        self.report(
-            {'INFO'},
-            f"Scene Range: {scene.frame_start} - {scene.frame_end}"
-        )
-
+        self.report({'INFO'}, f"Scene Range: {scene.frame_start} - {scene.frame_end}")
         return {'FINISHED'}
 
 
@@ -262,61 +194,23 @@ class ANIM_OT_action_to_scene_range(bpy.types.Operator):
 
 _value_offset_name = None
 
-
 def paste_value_offset_item():
-
-    """
-    Detect the current-frame-value option from
-    Graph Editor Paste RNA properties.
-
-    Only successful lookups are cached.
-    """
-
+    """Detect current-frame-value option from Graph Editor Paste RNA."""
     global _value_offset_name
-
     if _value_offset_name is not None:
         return _value_offset_name
 
     try:
-
-        prop = (
-            bpy.ops.graph.paste
-            .get_rna_type()
-            .properties["value_offset"]
-        )
-
-        names = [
-            item.identifier
-            for item in prop.enum_items
-        ]
-
-    except Exception:
-
+        prop = bpy.ops.graph.paste.get_rna_type().properties["value_offset"]
+        names = [item.identifier for item in prop.enum_items]
+    except (AttributeError, KeyError):
         return None
 
-    candidates = (
-        "CURRENT_FRAME_VALUE",
-        "CURRENT_FRAME",
-        "CFRA",
-    )
-
-    found = next(
-        (
-            name for name in candidates
-            if name in names
-        ),
-        None
-    )
+    candidates = ("CURRENT_FRAME_VALUE", "CURRENT_FRAME", "CFRA")
+    found = next((name for name in candidates if name in names), None)
 
     if found is None:
-
-        found = next(
-            (
-                name for name in names
-                if "FRAME" in name
-            ),
-            None
-        )
+        found = next((name for name in names if "FRAME" in name), None)
 
     if found is not None:
         _value_offset_name = found
@@ -325,54 +219,52 @@ def paste_value_offset_item():
 
 
 class PASTE_CONNECT(bpy.types.Operator):
-
-    """
-    Paste copied keyframes while connecting the
-    first pasted key to the current curve value.
-    """
-
+    """Paste copied keyframes while connecting the first pasted key to the current curve value."""
     bl_idname = "pasteconnect.pasteconnect"
     bl_label = "Paste Connect"
-
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
     def poll(cls, context):
-
         return (
             context.area is not None
-            and context.area.type == 'GRAPH_EDITOR'
+            and context.area.type in {'GRAPH_EDITOR', 'DOPESHEET_EDITOR'}
         )
 
     def execute(self, context):
-
         value_offset = paste_value_offset_item()
 
         if value_offset is None:
-
-            self.report(
-                {'WARNING'},
-                "Current Frame Value option is unavailable"
-            )
-
+            self.report({'WARNING'}, "Current Frame Value option is unavailable")
             return {'CANCELLED'}
 
+        graph_area = None
+        if context.area.type == 'DOPESHEET_EDITOR':
+            for window in context.window_manager.windows:
+                for area in window.screen.areas:
+                    if area.type == 'GRAPH_EDITOR':
+                        graph_area = area
+                        break
+                if graph_area:
+                    break
+            
+            if not graph_area:
+                self.report({'WARNING'}, "Paste Connect requires a Graph Editor open somewhere in the workspace")
+                return {'CANCELLED'}
+        else:
+            graph_area = context.area
+
         try:
-
-            result = bpy.ops.graph.paste(
-                offset='START',
-                value_offset=value_offset,
-                merge='OVER_RANGE',
-                flipped=False,
-            )
-
+            # Blender Context Override
+            with context.temp_override(area=graph_area):
+                result = bpy.ops.graph.paste(
+                    offset='START',
+                    value_offset=value_offset,
+                    merge='OVER_RANGE',
+                    flipped=False,
+                )
         except (RuntimeError, TypeError) as exc:
-
-            self.report(
-                {'WARNING'},
-                f"Paste Connect failed: {exc}"
-            )
-
+            self.report({'WARNING'}, f"Paste Connect failed: {exc}")
             return {'CANCELLED'}
 
         if 'FINISHED' not in result:
@@ -386,134 +278,68 @@ class PASTE_CONNECT(bpy.types.Operator):
 # ============================================================
 
 def _draw_undo_redo(layout):
-
     row = layout.row(align=True)
-
-    row.operator(
-        "ed.undo",
-        text="",
-        icon='LOOP_BACK'
-    )
-
-    row.operator(
-        "ed.redo",
-        text="",
-        icon='LOOP_FORWARDS'
-    )
-
+    row.operator("ed.undo", text="", icon='LOOP_BACK')
+    row.operator("ed.redo", text="", icon='LOOP_FORWARDS')
 
 def _draw_range_button(layout, context):
-
     if get_active_action(context) is not None:
-
-        layout.operator(
-            "anim.action_to_scene_range",
-            text="",
-            icon='TIME'
-        )
-
+        layout.operator("anim.action_to_scene_range", text="", icon='TIME')
 
 def _draw_action_selector(layout, context):
-
     obj = get_active_object(context)
-
     if obj is None:
         return
 
     anim = obj.animation_data
-
     if anim is None:
-
-        layout.operator(
-            "anim.new_action",
-            text="New Action",
-            icon='ADD'
-        )
-
+        layout.operator("anim.new_action", text="New Action", icon='ADD')
         return
 
-    layout.template_ID(
-        anim,
-        "action",
-        new="anim.new_action"
-    )
+    layout.template_ID(anim, "action", new="anim.new_action")
 
     # Blender 4.4+ Action Slot selector.
-    if (
-        anim.action is not None
-        and hasattr(anim, "action_slot")
-        and hasattr(anim, "action_suitable_slots")
-    ):
-
+    if (anim.action is not None 
+        and hasattr(anim, "action_slot") 
+        and hasattr(anim, "action_suitable_slots")):
+        
         layout.prop_search(
-            anim,
-            "action_slot",
-            anim,
-            "action_suitable_slots",
-            text=""
+            anim, "action_slot", anim, "action_suitable_slots", text=""
         )
 
-
 def cagt_draw_dopesheet_header(self, context):
-
     mode = context.space_data.mode
-
-    if mode not in {
-        'TIMELINE',
-        'DOPESHEET',
-        'ACTION',
-        'SHAPEKEY'
-    }:
+    if mode not in {'TIMELINE', 'DOPESHEET', 'ACTION', 'SHAPEKEY'}:
         return
 
     layout = self.layout
-
     layout.separator()
 
     if mode == 'DOPESHEET':
-
-        _draw_action_selector(
-            layout,
-            context
-        )
+        _draw_action_selector(layout, context)
 
     _draw_undo_redo(layout)
+    _draw_range_button(layout, context)
 
-    _draw_range_button(
-        layout,
-        context
-    )
-
+    # Added Paste Connect to Timeline/Dopesheet
+    layout.separator()
+    layout.operator(PASTE_CONNECT.bl_idname, icon='PASTEDOWN')
 
 def cagt_draw_graph_header(self, context):
-
     layout = self.layout
-
     layout.separator()
 
-    _draw_action_selector(
-        layout,
-        context
-    )
-
+    _draw_action_selector(layout, context)
     _draw_undo_redo(layout)
+    _draw_range_button(layout, context)
 
-    _draw_range_button(
-        layout,
-        context
-    )
-
+    layout.separator()
+    layout.operator(PASTE_CONNECT.bl_idname, icon='PASTEDOWN')
 
 def cagt_draw_paste_connect(self, context):
-
     layout = self.layout
-
     layout.separator()
-
-    layout.operator(
-        PASTE_CONNECT.bl_idname,
-        icon='PASTEDOWN'
-    )
+    layout.operator(PASTE_CONNECT.bl_idname, icon='PASTEDOWN')
 
 
 # ============================================================
@@ -521,114 +347,56 @@ def cagt_draw_paste_connect(self, context):
 # ============================================================
 
 def change_gizmo_size(context, step):
-
-    """
-    Change global viewport gizmo size.
-
-    Returns False if unavailable.
-    """
-
     view = context.preferences.view
-
     if not hasattr(view, "gizmo_size"):
         return False
 
     try:
-
-        view.gizmo_size = max(
-            10,
-            min(
-                200,
-                view.gizmo_size + step
-            )
-        )
-
+        view.gizmo_size = max(10, min(200, view.gizmo_size + step))
         return True
-
-    except Exception as exc:
-
-        print(
-            f"[Combined Tools] Gizmo size error: {exc}"
-        )
-
+    except (AttributeError, TypeError) as exc:
+        print(f"[Combined Tools] Gizmo size error: {exc}")
         return False
 
-
 class VIEW3D_OT_gizmo_bigger(bpy.types.Operator):
-
     """Increase transform gizmo size"""
-
     bl_idname = "view3d.gizmo_bigger"
     bl_label = "Increase Gizmo Size"
-
     bl_options = {'REGISTER'}
 
     def execute(self, context):
-
         if not change_gizmo_size(context, +10):
-
-            self.report(
-                {'WARNING'},
-                "Gizmo size is unavailable"
-            )
-
+            self.report({'WARNING'}, "Gizmo size is unavailable")
             return {'CANCELLED'}
-
         return {'FINISHED'}
-
 
 class VIEW3D_OT_gizmo_smaller(bpy.types.Operator):
-
     """Decrease transform gizmo size"""
-
     bl_idname = "view3d.gizmo_smaller"
     bl_label = "Decrease Gizmo Size"
-
     bl_options = {'REGISTER'}
 
     def execute(self, context):
-
         if not change_gizmo_size(context, -10):
-
-            self.report(
-                {'WARNING'},
-                "Gizmo size is unavailable"
-            )
-
+            self.report({'WARNING'}, "Gizmo size is unavailable")
             return {'CANCELLED'}
-
         return {'FINISHED'}
 
-
 class VIEW3D_OT_open_gizmo_prefs(bpy.types.Operator):
-
     """Open Preferences > Viewport"""
-
     bl_idname = "view3d.open_gizmo_prefs"
     bl_label = "Open Gizmo Preferences"
 
     def execute(self, context):
-
         try:
-
             context.preferences.active_section = 'VIEWPORT'
-
-        except Exception:
+        except AttributeError:
             pass
 
         try:
-
-            bpy.ops.screen.userpref_show(
-                'INVOKE_DEFAULT'
-            )
-
-        except Exception as exc:
-
-            self.report(
-                {'WARNING'},
-                f"Could not open Preferences: {exc}"
-            )
-
+            bpy.ops.screen.userpref_show('INVOKE_DEFAULT')
+        except RuntimeError as exc:
+            self.report({'WARNING'}, f"Could not open Preferences: {exc}")
             return {'CANCELLED'}
 
         return {'FINISHED'}
@@ -639,57 +407,27 @@ class VIEW3D_OT_open_gizmo_prefs(bpy.types.Operator):
 # ============================================================
 
 class VIEW3D_PT_gizmo_panel(bpy.types.Panel):
-
     """Gizmo size controls"""
-
     bl_label = "Gizmo Tools"
     bl_idname = "VIEW3D_PT_gizmo_panel"
-
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Tool"
 
     def draw(self, context):
-
         layout = self.layout
-
         view = context.preferences.view
 
         if not hasattr(view, "gizmo_size"):
-
-            layout.label(
-                text="Gizmo size unavailable",
-                icon='ERROR'
-            )
-
+            layout.label(text="Gizmo size unavailable", icon='ERROR')
             return
 
-        layout.label(
-            text="Gizmo Size"
-        )
-
+        layout.label(text="Gizmo Size")
         row = layout.row(align=True)
-
-        row.operator(
-            "view3d.gizmo_smaller",
-            text="-"
-        )
-
-        row.prop(
-            view,
-            "gizmo_size",
-            text=""
-        )
-
-        row.operator(
-            "view3d.gizmo_bigger",
-            text="+"
-        )
-
-        layout.operator(
-            "view3d.open_gizmo_prefs",
-            icon='PREFERENCES'
-        )
+        row.operator("view3d.gizmo_smaller", text="-")
+        row.prop(view, "gizmo_size", text="")
+        row.operator("view3d.gizmo_bigger", text="+")
+        layout.operator("view3d.open_gizmo_prefs", icon='PREFERENCES')
 
 
 # ============================================================
@@ -697,149 +435,72 @@ class VIEW3D_PT_gizmo_panel(bpy.types.Panel):
 # ============================================================
 
 classes = (
-
     ANIM_OT_new_action,
     ANIM_OT_action_to_scene_range,
     PASTE_CONNECT,
-
     VIEW3D_OT_gizmo_bigger,
     VIEW3D_OT_gizmo_smaller,
     VIEW3D_OT_open_gizmo_prefs,
-
     VIEW3D_PT_gizmo_panel,
-
 )
-
 
 _UI_HOOKS = (
-
-    (
-        "DOPESHEET_HT_header",
-        cagt_draw_dopesheet_header
-    ),
-
-    (
-        "GRAPH_HT_header",
-        cagt_draw_graph_header
-    ),
-
-    (
-        "GRAPH_MT_context_menu",
-        cagt_draw_paste_connect
-    ),
-
-    (
-        "GRAPH_MT_key",
-        cagt_draw_paste_connect
-    ),
-
+    ("DOPESHEET_HT_header", cagt_draw_dopesheet_header),
+    ("GRAPH_HT_header", cagt_draw_graph_header),
+    ("GRAPH_MT_context_menu", cagt_draw_paste_connect),
+    ("GRAPH_MT_key", cagt_draw_paste_connect),
 )
-
 
 _attached = []
 
-
 def _attach(type_name, fn):
-
-    target = getattr(
-        bpy.types,
-        type_name,
-        None
-    )
-
+    target = getattr(bpy.types, type_name, None)
     if target is None:
-
-        print(
-            f"[Combined Tools] "
-            f"{type_name} unavailable"
-        )
-
+        print(f"[Combined Tools] {type_name} unavailable")
         return
 
     try:
-
         # Avoid duplicate callbacks.
-        old_funcs = (
-            getattr(
-                getattr(target, "draw", None),
-                "_draw_funcs",
-                None
-            )
-            or ()
-        )
-
+        old_funcs = getattr(getattr(target, "draw", None), "_draw_funcs", None) or ()
         for old in list(old_funcs):
-
             if getattr(old, "__name__", "") == fn.__name__:
                 target.remove(old)
 
         target.append(fn)
-
-        _attached.append(
-            (target, fn)
-        )
-
-    except Exception as exc:
-
-        print(
-            f"[Combined Tools] "
-            f"Could not attach {type_name}: {exc}"
-        )
+        _attached.append((target, fn))
+    except (AttributeError, ValueError, RuntimeError) as exc:
+        print(f"[Combined Tools] Could not attach {type_name}: {exc}")
 
 
 def register():
-
     for cls in classes:
-
         try:
             bpy.utils.register_class(cls)
-
         except ValueError:
-
-            # Already registered.
-            print(
-                f"[Combined Tools] "
-                f"{cls.__name__} already registered"
-            )
+            print(f"[Combined Tools] {cls.__name__} already registered")
 
     for type_name, fn in _UI_HOOKS:
+        _attach(type_name, fn)
 
-        _attach(
-            type_name,
-            fn
-        )
-
-    print(
-        "Combined Animation & Gizmo Tools "
-        "v2.0.0 loaded - Blender 5.2+"
-    )
+    print("Combined Animation & Gizmo Tools v2.1.0 loaded - Blender 5.2+")
 
 
 def unregister():
-
     for target, fn in reversed(_attached):
-
         try:
             target.remove(fn)
-
-        except Exception:
+        except ValueError:
             pass
-
     _attached.clear()
 
     for cls in reversed(classes):
-
         try:
             bpy.utils.unregister_class(cls)
-
-        except Exception:
+        except RuntimeError:
             pass
 
-    print(
-        "Combined Animation & Gizmo Tools unloaded"
-    )
+    print("Combined Animation & Gizmo Tools unloaded")
 
 
 if __name__ == "__main__":
-
     register()
