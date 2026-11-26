@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Playblast Quad View",
     "author": "Venkatesh Sanku",
-    "version": (1, 9, 3),
+    "version": (1, 9, 5),
     "blender": (5, 2, 4),
     "location": "View3D > Sidebar > Playblast",
-    "description": "Capture viewport screenshots and animation playblasts, including Quad View",
+    "description": "Capture viewport screenshots and animation playblasts. Auto-names based on .blend file (Screenshot/Playblast).",
     "category": "3D View",
 }
 
@@ -16,6 +16,7 @@ import subprocess
 import tempfile
 import time
 import traceback
+import atexit
 
 from bpy.props import (
     StringProperty, BoolProperty, IntProperty,
@@ -26,11 +27,24 @@ _PLAYBLAST_RUNNING = False
 _ACTIVE_PLAYBLAST_OPERATOR = None
 
 _VIDEO_EXTENSIONS = (".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v")
-
+_TEMP_FOLDERS = set()
 
 # ---------------------------------------------------------------------------
 # GENERAL HELPERS
 # ---------------------------------------------------------------------------
+
+def register_temp_folder(folder):
+    """Register temporary folders for auto-cleanup on exit."""
+    if folder not in _TEMP_FOLDERS:
+        _TEMP_FOLDERS.add(folder)
+
+def cleanup_all_temp_folders():
+    """Automatically clean up all registered temp folders when Blender closes."""
+    for folder in _TEMP_FOLDERS:
+        clean_folder(folder)
+
+atexit.register(cleanup_all_temp_folders)
+
 
 def get_view3d_area(context):
     area = getattr(context, "area", None)
@@ -53,12 +67,6 @@ def get_window_region(area):
 
 
 def get_viewport_capture_rect(area, window):
-    """
-    Compute bounding rectangle covering ALL VIEW_3D WINDOW regions in window
-    pixel coordinates: ((min_x, min_y), (max_x, max_y)), end non-inclusive,
-    matching Blender 5.2+ Window.screenshot(region=...).
-    Single View -> 1 WINDOW region; Quad View -> all 4 WINDOW regions combined.
-    """
     if area is None or window is None:
         return None
     win_regions = [
@@ -79,11 +87,6 @@ def get_viewport_capture_rect(area, window):
 
 
 def hide_viewport_ui(space, shading_mode=None, hide_overlays=True):
-    """
-    Temporarily hide overlapping viewport UI (N-panel, toolbar, header, gizmos,
-    and optionally overlays) so Window.screenshot() captures clean pixels even
-    when Region Overlap is enabled. Returns a dict for restore_viewport_ui().
-    """
     old_settings = {}
     if space is None:
         return old_settings
@@ -120,8 +123,8 @@ def restore_viewport_ui(space, old_settings):
                 space.overlay.show_overlays = value
             else:
                 setattr(space, name, value)
-        except Exception as exc:
-            print("Playblast: restore {} failed: {}".format(name, exc))
+        except Exception:
+            pass
 
 
 def ensure_folder(path):
@@ -137,11 +140,28 @@ def safe_remove_timer(wm, timer):
             pass
 
 
-def resolve_user_path(filepath, default_name="quadview_render.mp4"):
-    raw = (filepath or ("//" + default_name)).strip()
+def resolve_user_path(filepath, default_name="quadview_render.mp4", is_image=False):
+    # Image ayithe "_screenshot", lekapothe "_playblast" ani fix chestundi
+    suffix = "_screenshot" if is_image else "_playblast"
+    
+    # Automatic ga .blend file name extract cheyadam
+    if bpy.data.filepath:
+        blend_name = os.path.splitext(bpy.path.basename(bpy.data.filepath))[0]
+        auto_name = blend_name + suffix
+    else:
+        auto_name = "quadview" + suffix
+
+    raw = (filepath or "").strip()
+    
+    # User path change cheyakapothe (default unte), auto_name apply cheyadam
+    if raw in ("", "//", "//quadview_render.mp4", "//quadview_render"):
+        raw = "//" + auto_name
+
+    # File inka save cheyakapothe temp folder ki route cheyadam
     if raw.startswith("//") and not bpy.data.filepath:
-        rel = raw[2:].lstrip("/\\") or default_name
+        rel = raw[2:].lstrip("/\\") or auto_name
         return os.path.join(tempfile.gettempdir(), rel)
+
     resolved = bpy.path.abspath(raw)
     if not os.path.isabs(resolved):
         resolved = os.path.join(tempfile.gettempdir(), resolved)
@@ -149,21 +169,23 @@ def resolve_user_path(filepath, default_name="quadview_render.mp4"):
 
 
 def get_output_path(filepath):
-    resolved = resolve_user_path(filepath, "quadview_render.mp4")
+    resolved = resolve_user_path(filepath, "quadview_render.mp4", is_image=False)
     root, _ext = os.path.splitext(resolved)
     return (root or resolved) + ".mp4"
 
 
 def get_temp_folder(output_path):
-    return os.path.splitext(output_path)[0] + "_temp"
+    folder = os.path.splitext(output_path)[0] + "_temp"
+    register_temp_folder(folder)
+    return folder
 
 
 def clean_folder(path):
     if path and os.path.isdir(path):
         try:
             shutil.rmtree(path)
-        except Exception as exc:
-            print("Playblast: temporary-folder cleanup failed:", repr(exc))
+        except Exception:
+            pass
 
 
 def get_frame_files(folder):
@@ -201,11 +223,6 @@ def wait_for_file(filepath, timeout=4.0):
 
 
 def capture_viewport_png(context, area, filepath):
-    """
-    Blender 5.2+ preferred path:
-      Window.screenshot(region=...) across ALL WINDOW regions -> imbuf.write().
-    screenshot_area is retained as a fallback.
-    """
     window = context.window
     region = get_window_region(area)
     if window is None or region is None:
@@ -222,10 +239,8 @@ def capture_viewport_png(context, area, filepath):
 
     primary_error = None
 
-    # Blender 5.2+ Window.screenshot API (captures all 4 quadrants in Quad View).
     try:
         import imbuf
-
         rect = get_viewport_capture_rect(area, window)
         if rect is None:
             raise RuntimeError("Could not compute VIEW_3D capture rectangle")
@@ -253,9 +268,7 @@ def capture_viewport_png(context, area, filepath):
         raise RuntimeError("Window.screenshot did not write a valid PNG")
     except Exception as exc:
         primary_error = exc
-        print("Playblast: Window.screenshot path failed:", repr(exc))
 
-    # Fallback operator path.
     try:
         with context.temp_override(
             window=window,
@@ -304,10 +317,6 @@ def image_dimensions(filepath):
 
 
 def resolve_imbuf_file_type(imbuf_mod, image_format, target_ext):
-    """
-    Resolve an exact writable ImBuf file_type identifier in Blender 5.2+
-    (handles e.g. 'TIFF' vs 'TIF' dynamically via imbuf.file_types).
-    """
     file_types = getattr(imbuf_mod, "file_types", None)
     if not file_types:
         return image_format
@@ -333,8 +342,6 @@ def convert_png(context, source_png, target_path, image_format, quality):
         shutil.copy2(source_png, target_path)
         return os.path.isfile(target_path) and os.path.getsize(target_path) > 0
 
-    # Preferred Blender 5.2+ path: direct imbuf conversion (honors quality,
-    # avoids double color management and scene.render.image_settings mutation).
     try:
         import imbuf
         ibuf = imbuf.load(source_png)
@@ -353,10 +360,9 @@ def convert_png(context, source_png, target_path, image_format, quality):
                 pass
         if os.path.isfile(target_path) and os.path.getsize(target_path) > 0:
             return True
-    except Exception as exc:
-        print("Playblast: imbuf convert_png fallback:", repr(exc))
+    except Exception:
+        pass
 
-    # Safe fallback via bpy.data.images.
     image = None
     try:
         image = bpy.data.images.load(source_png, check_existing=False)
@@ -388,11 +394,6 @@ def quality_to_crf_enum(quality):
 
 
 def build_vse_image_sequence(strips, folder, images):
-    """
-    Create a single VSE ImageStrip from `images` and self-verify that all
-    elements and frame lookups resolve properly. If Blender fails to expand
-    the sequence on a given build, fall back to 1-frame strips automatically.
-    """
     frame_count = len(images)
     first_path = os.path.join(folder, images[0])
 
@@ -421,7 +422,6 @@ def build_vse_image_sequence(strips, folder, images):
         except Exception:
             pass
 
-    # Runtime self-verification: confirm elements count & frame-2 resolution.
     seq_ok = (len(strip.elements) == frame_count)
     if seq_ok and frame_count >= 2 and hasattr(strip, "strip_elem_from_frame"):
         try:
@@ -439,8 +439,6 @@ def build_vse_image_sequence(strips, folder, images):
     if seq_ok:
         return "sequence"
 
-    # Safe fallback: one 1-frame strip per image (still scaled via STRETCH).
-    print("Playblast VSE: sequence self-check failed; falling back to per-frame strips")
     strips.remove(strip)
     for index, filename in enumerate(images):
         image_path = os.path.join(folder, filename)
@@ -460,10 +458,6 @@ def build_vse_image_sequence(strips, folder, images):
 
 
 def find_encoded_video(encode_dir, preferred_path=None):
-    """
-    Locate the exact non-empty video file written by Blender inside an
-    isolated empty staging directory `encode_dir`.
-    """
     if preferred_path:
         try:
             abs_pref = bpy.path.abspath(preferred_path)
@@ -501,6 +495,7 @@ class QP_Props(bpy.types.PropertyGroup):
     render_filepath: StringProperty(
         name="Save Path", subtype='FILE_PATH',
         default="//quadview_render.mp4",
+        description="Path to save the output. Leave as default to auto-name based on .blend file",
     )
     is_quad_active: BoolProperty(default=False, options={'SKIP_SAVE'})
     is_playblasting: BoolProperty(default=False, options={'SKIP_SAVE'})
@@ -601,7 +596,10 @@ class QP_OT_screenshot_quadview(bpy.types.Operator):
         props = context.scene.qp_props
         area = get_view3d_area(context)
         space = area.spaces.active if area else None
-        filepath = resolve_user_path(props.render_filepath, "quadview_render")
+        
+        # is_image=True ga set chesam, so _screenshot ani ostundi
+        filepath = resolve_user_path(props.render_filepath, "quadview_render", is_image=True)
+        
         root, _ext = os.path.splitext(filepath)
         extension = {
             'PNG': '.png', 'JPEG': '.jpg',
@@ -732,7 +730,7 @@ class QP_OT_screenshot_quadview_anim(bpy.types.Operator):
     def modal(self, context, event):
         if event.type == 'ESC':
             self.finish_capture(context)
-            self.report({'WARNING'}, "Cancelled. Captured PNG frames were retained.")
+            self.report({'WARNING'}, "Cancelled. Temp files will be auto-cleaned on exit.")
             return {'CANCELLED'}
 
         if event.type != 'TIMER':
@@ -759,11 +757,6 @@ class QP_OT_screenshot_quadview_anim(bpy.types.Operator):
             if not os.path.isfile(filepath) or os.path.getsize(filepath) <= 0:
                 raise RuntimeError("Frame PNG was not written completely")
 
-            print(
-                "Playblast: captured scene frame {} -> {}".format(
-                    self.frame, os.path.basename(filepath)
-                )
-            )
             self.frame += self.step
             self.capture_index += 1
             return {'RUNNING_MODAL'}
@@ -831,8 +824,6 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
         if fps <= 0:
             fps = 24.0
 
-        print("Playblast: encoding {} frames at {:.4f} FPS".format(len(images), fps))
-
         if props.use_ffmpeg:
             ffmpeg_path = shutil.which("ffmpeg")
             if ffmpeg_path and self.encode_with_ffmpeg(
@@ -872,22 +863,15 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
                 stderr=subprocess.PIPE, text=True, check=False,
             )
             if completed.returncode != 0:
-                print("FFmpeg error:\n{}".format(completed.stderr[-8000:]))
                 return False
             if not os.path.isfile(output_path) or os.path.getsize(output_path) <= 0:
                 return False
             self.report({'INFO'}, "MP4 created using external FFmpeg")
             return True
-        except Exception as exc:
-            print("FFmpeg launch failed:", repr(exc))
+        except Exception:
             return False
 
     def encode_with_vse(self, context, output_path, folder, images, fps):
-        """
-        Build a temporary scene with a self-verified VSE image-sequence strip
-        and render into an isolated staging folder so Blender's exact generated
-        video filename is always detected reliably.
-        """
         source_scene = context.scene
         temp_scene = None
         encode_dir = os.path.join(folder, "_vse_out")
@@ -904,7 +888,6 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
             temp_scene = bpy.data.scenes.new("QP_Playblast_Encode_TEMP")
             temp_scene.render.engine = source_scene.render.engine
 
-            # Set target resolution BEFORE adding strips so fit_method='STRETCH' scales properly.
             scale = max(
                 0.25,
                 min(1.0, float(source_scene.qp_props.resolution_scale)),
@@ -923,7 +906,6 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
             render.use_sequencer = True
             render.use_compositing = False
 
-            # Avoid double color management (AgX/Filmic) on already display-referred PNGs.
             try:
                 temp_scene.display_settings.display_device = (
                     source_scene.display_settings.display_device
@@ -938,7 +920,6 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
             except Exception:
                 pass
 
-            # Build and self-verify image sequence strip (with automatic per-frame fallback).
             editor = temp_scene.sequence_editor_create()
             strips = editor.strips if hasattr(editor, "strips") else editor.sequences
             mode = build_vse_image_sequence(strips, folder, images)
@@ -948,7 +929,6 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
             temp_scene.frame_end = frame_count
             temp_scene.frame_set(1)
 
-            # Blender 5.0+ requires media_type = 'VIDEO' BEFORE file_format = 'FFMPEG'.
             image_settings = render.image_settings
             if hasattr(image_settings, "media_type"):
                 image_settings.media_type = 'VIDEO'
@@ -972,8 +952,6 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
             except Exception:
                 pass
 
-            # Render into a clean empty staging folder so we always find the
-            # exact file Blender wrote without risking unrelated user files.
             clean_folder(encode_dir)
             ensure_folder(encode_dir)
             render.use_file_extension = True
@@ -984,12 +962,6 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
                 preferred_path = render.frame_path(frame=temp_scene.frame_start)
             except Exception:
                 pass
-
-            print(
-                "Playblast VSE ({}): {} frames, {}x{}, {:.4f} FPS -> {}".format(
-                    mode, frame_count, out_w, out_h, fps, output_path
-                )
-            )
 
             result = bpy.ops.render.render(
                 animation=True,
@@ -1014,14 +986,11 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
                 raise RuntimeError("Final MP4 is missing or empty")
 
             size_mb = os.path.getsize(output_path) / (1024.0 * 1024.0)
-            print("Playblast VSE SUCCESS: {} ({:.2f} MB)".format(output_path, size_mb))
             self.report({'INFO'}, "MP4 created with Blender VSE ({:.2f} MB)".format(size_mb))
             return {'FINISHED'}
 
         except Exception as exc:
-            print("\n========== PLAYBLAST VSE ERROR ==========")
             traceback.print_exc()
-            print("=========================================\n")
             self.report({'ERROR'}, "VSE encoding failed: {}".format(exc))
             return {'CANCELLED'}
 
@@ -1030,8 +999,8 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
             if temp_scene is not None:
                 try:
                     bpy.data.scenes.remove(temp_scene)
-                except Exception as exc:
-                    print("Playblast: temporary scene cleanup failed:", repr(exc))
+                except Exception:
+                    pass
 
 
 # ---------------------------------------------------------------------------
@@ -1104,7 +1073,7 @@ def register():
         bpy.utils.register_class(cls)
 
     bpy.types.Scene.qp_props = PointerProperty(type=QP_Props)
-    print("Playblast Quad View 1.9.3 registered for Blender 5.2+ LTS")
+    print("Playblast Quad View 1.9.5 registered for Blender 5.2+ LTS")
 
 
 def unregister():
