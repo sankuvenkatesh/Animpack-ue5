@@ -1,24 +1,37 @@
 """
-Keyframe Tools Interval  -  v3.1.1  (Blender 5.1+)
+Keyframe Tools Interval - v3.2.1 (Blender 5.2.4 LTS)
 
-Delete or bake keyframes at an interval on
-  * selected bones   (Pose Mode)   : position / rotation / scale + numeric bone custom properties
-  * selected objects (Object Mode) : position / rotation / scale
+Delete or bake keyframes at an interval on:
+  * Selected bones   (Pose Mode): location / rotation / scale + numeric bone custom properties
+  * Selected objects (Object Mode): location / rotation / scale
 
-Install: Edit > Preferences > Add-ons > Install from Disk (or run it from the Text Editor).
-Panel  : 3D Viewport > Sidebar (N) > Item tab > "Keyframe Interval Tools".
+Install:
+  Edit > Preferences > Add-ons > Install from Disk
+  Select this .py file, enable the add-on, then open the 3D Viewport Sidebar (N).
 
-What changed in 3.1.1
-  * Fixed AttributeError: 'Bone' object has no attribute 'select' in Blender 5.1.
-    Bone selection is now resolved robustly via Bone.select, Bone.select_get(),
-    PoseBone.select, and finally bpy.context.selected_pose_bones.
+Panel:
+  3D Viewport > Sidebar (N) > Item tab > Keyframe Interval Tools
+
+Blender 5.2.4 compatibility:
+  * Uses Blender's slotted Action / Action Slot / Channelbag animation API.
+  * Does not use the removed Action.fcurves API on Blender 5.x.
+  * Resolves PoseBone selection before legacy Bone selection fallbacks.
+  * Uses the assigned Action slot when finding or creating F-Curves.
+  * Baking updates keys already on a sampled frame instead of creating duplicates.
+
+Interval behaviour is unchanged:
+  * End Frame is exclusive.
+  * Interval 0: process every frame in the frame range.
+  * Interval N: keep Start, Start + (N + 1), ...
+      - Normal: process all frames between those kept frames.
+      - Inverse: process only the kept frames.
 """
 
 bl_info = {
     "name": "Keyframe Tools Interval",
     "author": "Venkatesh Sanku",
-    "version": (3, 1, 1),
-    "blender": (5, 1, 0),
+    "version": (3, 2, 1),
+    "blender": (5, 2, 4),
     "location": "View3D > Sidebar > Item",
     "description": "Delete or bake keyframes by interval on transforms and bone custom properties",
     "category": "Animation",
@@ -38,11 +51,11 @@ SETTINGS_ATTR = "keyframe_interval_settings"
 
 
 # ============================================================================
-# FRAME / INTERVAL LOGIC  (pure python, touches no Blender data)
+# FRAME / INTERVAL LOGIC
 # ============================================================================
 
 def get_frame_range(settings):
-    """End frame is exclusive, like in the original add-on."""
+    """Return the processing range. End frame is exclusive."""
     start = int(settings.start_frame)
     end = int(settings.end_frame)
 
@@ -54,10 +67,16 @@ def get_frame_range(settings):
 
 def iter_target_frames(start, end, interval, inverse):
     """
-    interval = 0 : normal -> every frame            | inverse -> no frame
-    interval = n : the frames start, start+(n+1), start+2(n+1) ... are "kept"
-                   normal  -> every OTHER frame (the in-betweens)
-                   inverse -> only the kept frames
+    Yield frames to process.
+
+    interval = 0:
+        normal  -> every frame
+        inverse -> no frame
+
+    interval = N:
+        Every (N + 1)th frame beginning at Start is a kept frame.
+        normal  -> process the in-between frames
+        inverse -> process only the kept frames
     """
     if interval <= 0:
         if not inverse:
@@ -84,7 +103,6 @@ def count_target_frames(start, end, interval, inverse):
         return 0 if inverse else total
 
     kept = len(range(start, end, interval + 1))
-
     return kept if inverse else total - kept
 
 
@@ -94,10 +112,11 @@ def build_target_frames(settings):
     if frame_range is None:
         return []
 
+    start, end = frame_range
     return list(
         iter_target_frames(
-            frame_range[0],
-            frame_range[1],
+            start,
+            end,
             int(settings.interval),
             bool(settings.inverse_interval),
         )
@@ -109,7 +128,7 @@ def build_target_frames(settings):
 # ============================================================================
 
 def _all_channels_update(self, context):
-    # Keep the (greyed-out) individual toggles in sync with "All Channels".
+    """When All Channels is enabled, turn on every individual channel."""
     if self.all_channels:
         self.pos = True
         self.rot = True
@@ -171,7 +190,7 @@ def get_settings(context):
 
 
 def channel_flags(settings):
-    """(use_pos, use_rot, use_scl, use_custom) - 'All Channels' overrides the rest."""
+    """Return (use_pos, use_rot, use_scl, use_custom). All Channels overrides."""
     if settings.all_channels:
         return True, True, True, True
 
@@ -184,99 +203,129 @@ def channel_flags(settings):
 
 
 # ============================================================================
-# TARGETS  (what will be affected)
+# TARGETS
 # ============================================================================
 
 class Target:
-    """One animated thing: an object, or a pose bone of an armature object."""
+    """One animated target: an Object or one of its PoseBones."""
 
     __slots__ = ("owner", "struct", "group", "is_bone")
 
     def __init__(self, owner, struct, group, is_bone):
-        self.owner = owner      # the Object that owns the animation data
-        self.struct = struct    # the Object itself, or its PoseBone
-        self.group = group      # F-Curve group name for newly created curves
+        self.owner = owner
+        self.struct = struct
+        self.group = group
         self.is_bone = is_bone
 
 
 def bone_is_visible(bone):
-    """Robust visibility check across Blender versions."""
+    """Check bone visibility with API fallbacks."""
     if bone is None:
         return True
 
-    visible = getattr(bone, "is_visible", None)
-    if visible is not None:
-        return bool(visible)
+    try:
+        visible = getattr(bone, "is_visible", None)
+        if visible is not None:
+            return bool(visible)
+    except (AttributeError, TypeError, KeyError, IndexError, ValueError, RuntimeError, ReferenceError, ImportError):
+        pass
 
-    hide = getattr(bone, "hide", None)
-    if hide is not None:
-        return not hide
+    try:
+        hide = getattr(bone, "hide", None)
+        if hide is not None:
+            return not bool(hide)
+    except (AttributeError, TypeError, KeyError, IndexError, ValueError, RuntimeError, ReferenceError, ImportError):
+        pass
 
     return True
 
 
-def _pose_bone_selected(pb):
-    """
-    Robustly return True if a pose bone is selected.
+def _same_rna_item(a, b):
+    """Compare Blender RNA wrappers without relying only on Python identity."""
+    if a is b:
+        return True
 
-    Blender 5.1 does not always expose 'select' on the Bone reached via
-    pose_bone.bone, so we try multiple APIs and fall back to the context.
-    """
+    try:
+        return a.as_pointer() == b.as_pointer()
+    except (AttributeError, TypeError, KeyError, IndexError, ValueError, RuntimeError, ReferenceError, ImportError):
+        return False
+
+
+def _pose_bone_selected(pb, context=None, owner=None):
+    """Return True when the PoseBone is selected, using version-safe fallbacks."""
+    # Blender 5.x exposes selection directly on PoseBone. Prefer this API.
+    try:
+        selected = getattr(pb, "select", None)
+        if selected is not None:
+            return bool(selected)
+    except (AttributeError, TypeError, KeyError, IndexError, ValueError, RuntimeError, ReferenceError, ImportError):
+        pass
+
     bone = getattr(pb, "bone", None)
 
+    # Older builds expose a selection getter on Bone.
     if bone is not None:
-        # Classic property (Blender 2.x - 4.x, still present on many builds).
-        sel = getattr(bone, "select", None)
-        if sel is not None:
-            return bool(sel)
-
-        # Newer API: select_get() on the Bone itself.
         getter = getattr(bone, "select_get", None)
-        if getter is not None:
+        if callable(getter):
             try:
                 return bool(getter())
-            except Exception:
+            except (AttributeError, TypeError, KeyError, IndexError, ValueError, RuntimeError, ReferenceError, ImportError):
                 pass
 
-    # Some builds expose select on the PoseBone instead.
-    sel = getattr(pb, "select", None)
-    if sel is not None:
-        return bool(sel)
+        # Legacy fallback. Some Blender versions do not expose Bone.select.
+        try:
+            selected = getattr(bone, "select", None)
+            if selected is not None:
+                return bool(selected)
+        except (AttributeError, TypeError, KeyError, IndexError, ValueError, RuntimeError, ReferenceError, ImportError):
+            pass
 
-    # Last resort: ask the context (valid for the active armature).
+    # Context fallback is useful for the active armature on older builds.
+    if context is None:
+        context = bpy.context
+
     try:
-        selected = bpy.context.selected_pose_bones
-    except Exception:
-        selected = None
+        if owner is None or context.object is owner:
+            selected_bones = context.selected_pose_bones
+        else:
+            selected_bones = None
+    except (AttributeError, TypeError, KeyError, IndexError, ValueError, RuntimeError, ReferenceError, ImportError):
+        selected_bones = None
 
-    if selected:
-        for spb in selected:
-            if spb is pb:
+    if selected_bones:
+        for selected_bone in selected_bones:
+            if _same_rna_item(selected_bone, pb):
                 return True
 
     return False
 
 
-def selected_pose_bones(obj):
-    pose = getattr(obj, "pose", None)
+def selected_pose_bones(obj, context=None):
+    if getattr(obj, "type", None) != 'ARMATURE':
+        return []
 
-    if obj.type != 'ARMATURE' or pose is None:
+    pose = getattr(obj, "pose", None)
+    if pose is None:
         return []
 
     result = []
 
     for pb in pose.bones:
-        if _pose_bone_selected(pb) and bone_is_visible(pb.bone):
-            result.append(pb)
+        if _pose_bone_selected(pb, context=context, owner=obj):
+            if bone_is_visible(getattr(pb, "bone", None)):
+                result.append(pb)
 
     return result
 
 
 def collect_targets(context):
     """
-    Pose Mode   -> selected bones of every armature that is in Pose Mode
-                   (works even if the armature OBJECT itself is not selected)
-    Object Mode -> selected objects
+    Pose Mode:
+        Collect selected bones from every armature in the current Pose Mode set.
+        The armature object does not need to be the active selected object.
+
+    Object Mode:
+        Collect selected objects.
     """
     targets = []
 
@@ -289,20 +338,23 @@ def collect_targets(context):
         seen = set()
 
         for obj in objects:
-            if obj.type != 'ARMATURE':
+            if getattr(obj, "type", None) != 'ARMATURE':
                 continue
 
-            key = obj.as_pointer()
+            try:
+                key = obj.as_pointer()
+            except (AttributeError, TypeError, KeyError, IndexError, ValueError, RuntimeError, ReferenceError, ImportError):
+                key = id(obj)
 
             if key in seen:
                 continue
 
             seen.add(key)
 
-            for pb in selected_pose_bones(obj):
+            for pb in selected_pose_bones(obj, context):
                 targets.append(Target(obj, pb, pb.name, True))
 
-    else:
+    elif context.mode == 'OBJECT':
         for obj in context.selected_objects:
             targets.append(Target(obj, obj, OBJECT_GROUP, False))
 
@@ -313,7 +365,10 @@ def group_by_owner(targets):
     groups = {}
 
     for target in targets:
-        key = target.owner.as_pointer()
+        try:
+            key = target.owner.as_pointer()
+        except (AttributeError, TypeError, KeyError, IndexError, ValueError, RuntimeError, ReferenceError, ImportError):
+            key = id(target.owner)
 
         if key not in groups:
             groups[key] = (target.owner, [])
@@ -324,17 +379,24 @@ def group_by_owner(targets):
 
 
 def is_editable(owner):
-    return owner.library is None or owner.override_library is not None
+    try:
+        return owner.library is None or owner.override_library is not None
+    except (AttributeError, TypeError, KeyError, IndexError, ValueError, RuntimeError, ReferenceError, ImportError):
+        return False
 
 
 def filter_usable_targets(targets, problems):
-    """Drop owners we must not touch (linked data, NLA tweak mode)."""
+    """Skip linked read-only owners and owners in NLA tweak mode."""
     usable = []
     rejected = set()
 
     for target in targets:
         owner = target.owner
-        key = owner.as_pointer()
+
+        try:
+            key = owner.as_pointer()
+        except (AttributeError, TypeError, KeyError, IndexError, ValueError, RuntimeError, ReferenceError, ImportError):
+            key = id(owner)
 
         if key in rejected:
             continue
@@ -344,7 +406,10 @@ def filter_usable_targets(targets, problems):
         if not is_editable(owner):
             reason = "linked data is read-only"
         else:
-            anim = owner.animation_data
+            try:
+                anim = owner.animation_data
+            except (AttributeError, TypeError, KeyError, IndexError, ValueError, RuntimeError, ReferenceError, ImportError):
+                anim = None
 
             if anim is not None and getattr(anim, "use_tweak_mode", False):
                 reason = "NLA tweak mode is on (leave it first)"
@@ -362,19 +427,11 @@ def filter_usable_targets(targets, problems):
 def describe_targets(context):
     if context.mode == 'POSE':
         count = len(collect_targets(context))
-
-        if count:
-            return f"Selected bones: {count}"
-
-        return "No bones selected (Pose Mode)"
+        return f"Selected bones: {count}" if count else "No bones selected (Pose Mode)"
 
     if context.mode == 'OBJECT':
         count = len(context.selected_objects)
-
-        if count:
-            return f"Selected objects: {count}"
-
-        return "No objects selected"
+        return f"Selected objects: {count}" if count else "No objects selected"
 
     return "Switch to Object or Pose Mode"
 
@@ -387,63 +444,90 @@ def nothing_selected_message(context):
 
 
 # ============================================================================
-# ANIMATION DATA HELPERS  (slotted actions: Blender 4.4+ / 5.x)
+# ANIMATION DATA HELPERS - ACTION SLOTS / CHANNELBAGS (BLENDER 5.x)
 # ============================================================================
 
 def find_channelbag(anim, action):
-    """Channelbag (= the F-Curves) of the slot assigned to this animation data."""
-    slot = getattr(anim, "action_slot", None)
+    """Return the channelbag belonging to the assigned Action Slot."""
+    if anim is None or action is None:
+        return None
 
+    # Preferred 5.x helper: it follows the slot assigned to this AnimData.
+    try:
+        from bpy_extras import anim_utils
+        getter = getattr(anim_utils, "animdata_get_channelbag_for_assigned_slot", None)
+        if callable(getter):
+            bag = getter(anim)
+            if bag is not None:
+                return bag
+    except (AttributeError, TypeError, KeyError, IndexError, ValueError, RuntimeError, ReferenceError, ImportError):
+        pass
+
+    slot = getattr(anim, "action_slot", None)
     if slot is None:
         return None
 
+    # Compatibility helper available in several slotted-Action builds.
     try:
         from bpy_extras import anim_utils
-        return anim_utils.action_get_channelbag_for_slot(action, slot)
-    except (ImportError, AttributeError):
+        getter = getattr(anim_utils, "action_get_channelbag_for_slot", None)
+        if callable(getter):
+            bag = getter(action, slot)
+            if bag is not None:
+                return bag
+    except (AttributeError, TypeError, KeyError, IndexError, ValueError, RuntimeError, ReferenceError, ImportError):
         pass
 
-    for layer in action.layers:
-        for strip in layer.strips:
-            if strip.type == 'KEYFRAME':
-                bag = strip.channelbag(slot)
-
-                if bag is not None:
-                    return bag
+    # Direct API fallback.
+    try:
+        for layer in action.layers:
+            for strip in layer.strips:
+                if getattr(strip, "type", None) == 'KEYFRAME':
+                    bag = strip.channelbag(slot)
+                    if bag is not None:
+                        return bag
+    except (AttributeError, TypeError, KeyError, IndexError, ValueError, RuntimeError, ReferenceError, ImportError):
+        pass
 
     return None
 
 
 def get_fcurves(owner):
-    """(list of F-Curves, remove function) for the action assigned to `owner`."""
-    anim = owner.animation_data
+    """Return (F-Curves, remove-function) for the owner's active Action slot."""
+    anim = getattr(owner, "animation_data", None)
     action = anim.action if anim is not None else None
 
     if action is None:
         return [], None
 
-    if hasattr(action, "layers"):               # Blender 4.4+ / 5.x
+    # Blender 4.4+ / 5.x: F-Curves live in the assigned slot's channelbag.
+    if hasattr(action, "layers"):
         bag = find_channelbag(anim, action)
-
         if bag is None:
             return [], None
 
-        return list(bag.fcurves), bag.fcurves.remove
+        curves = bag.fcurves
+        return list(curves), curves.remove
 
-    return list(action.fcurves), action.fcurves.remove    # Blender <= 4.3
+    # Legacy fallback for Blender versions that still expose Action.fcurves.
+    curves = action.fcurves
+    return list(curves), curves.remove
 
 
 def escape_identifier(name):
-    fn = getattr(bpy.utils, "escape_identifier", None)
+    escape_fn = getattr(bpy.utils, "escape_identifier", None)
 
-    if fn is not None:
-        return fn(name)
+    if callable(escape_fn):
+        try:
+            return escape_fn(name)
+        except (AttributeError, TypeError, KeyError, IndexError, ValueError, RuntimeError, ReferenceError, ImportError):
+            pass
 
-    return name.replace("\\", "\\\\").replace('"', '\\"')
+    return str(name).replace("\\", "\\\\").replace('"', '\\"')
 
 
 def rotation_prop(struct):
-    mode = struct.rotation_mode
+    mode = getattr(struct, "rotation_mode", 'XYZ')
 
     if mode == 'QUATERNION':
         return "rotation_quaternion"
@@ -459,40 +543,38 @@ def rotation_prop(struct):
 # ============================================================================
 
 def remove_keys_at_frames(fcurve, frame_set):
-    """Remove the keyframes that sit exactly on one of `frame_set`."""
+    """Remove keyframes whose X coordinate matches one of the requested frames."""
     points = fcurve.keyframe_points
     count = len(points)
 
     if count == 0:
         return 0
 
-    co = [0.0] * (count * 2)
-    points.foreach_get("co", co)
+    coordinates = [0.0] * (count * 2)
+    points.foreach_get("co", coordinates)
 
     hits = []
 
-    for i in range(count):
-        x = co[i * 2]
+    for index in range(count):
+        x = coordinates[index * 2]
         frame = round(x)
 
         if frame in frame_set and abs(x - frame) < 1e-3:
-            hits.append(i)
+            hits.append(index)
 
     if not hits:
         return 0
 
-    for i in reversed(hits):
-        points.remove(points[i], fast=True)
+    for index in reversed(hits):
+        points.remove(points[index], fast=True)
 
     fcurve.update()
-
     return len(hits)
 
 
 def delete_keys_for_owner(owner, targets, flags, frame_set):
-    """Returns (keyframes removed, F-Curves changed)."""
+    """Return (keyframes removed, F-Curves changed)."""
     use_pos, use_rot, use_scl, use_custom = flags
-
     fcurves, remove_fcurve = get_fcurves(owner)
 
     if not fcurves:
@@ -508,7 +590,7 @@ def delete_keys_for_owner(owner, targets, flags, frame_set):
             exact_paths.add(struct.path_from_id("location"))
 
         if use_rot:
-            exact_paths.update(struct.path_from_id(p) for p in ROTATION_PROPS)
+            exact_paths.update(struct.path_from_id(prop) for prop in ROTATION_PROPS)
 
         if use_scl:
             exact_paths.add(struct.path_from_id("scale"))
@@ -524,7 +606,6 @@ def delete_keys_for_owner(owner, targets, flags, frame_set):
 
     for fcurve in fcurves:
         path = fcurve.data_path
-
         wanted = path in exact_paths or (
             custom_prefixes and path.startswith(custom_prefixes)
         )
@@ -541,9 +622,13 @@ def delete_keys_for_owner(owner, targets, flags, frame_set):
             if len(fcurve.keyframe_points) == 0:
                 emptied.append(fcurve)
 
-    # Same as Blender: an F-Curve without keys is removed.
+    # Remove curves that became completely empty, as in the original add-on.
     for fcurve in emptied:
-        remove_fcurve(fcurve)
+        try:
+            remove_fcurve(fcurve)
+        except (AttributeError, TypeError, KeyError, IndexError, ValueError, RuntimeError, ReferenceError, ImportError):
+            # Keep the remaining operation safe if Blender refuses a removal.
+            pass
 
     return removed, changed
 
@@ -553,10 +638,10 @@ def delete_keys_for_owner(owner, targets, flags, frame_set):
 # ============================================================================
 
 def custom_prop_info(struct, key):
-    """(count, is_array) for numeric custom properties, (0, False) otherwise."""
+    """Return (component_count, is_array) for numeric custom properties."""
     try:
         value = struct[key]
-    except Exception:
+    except (AttributeError, TypeError, KeyError, IndexError, ValueError, RuntimeError, ReferenceError, ImportError):
         return 0, False
 
     if isinstance(value, (bool, int, float)):
@@ -567,42 +652,44 @@ def custom_prop_info(struct, key):
 
     try:
         count = len(value)
-
-        if count and all(isinstance(v, (bool, int, float)) for v in value):
+        if count and all(isinstance(component, (bool, int, float)) for component in value):
             return count, True
-    except TypeError:
+    except (TypeError, ValueError):
         pass
 
     return 0, False
 
 
 class BakeChannel:
-    """One property (e.g. a bone's location) that is sampled and then keyed."""
+    """One property that is sampled and then keyed on the selected frames."""
 
     __slots__ = (
         "owner", "struct", "kind", "key", "data_path",
         "group", "count", "is_array", "values",
     )
 
-    def __init__(self, owner, struct, kind, key, data_path, group, count, is_array=True):
+    def __init__(
+        self, owner, struct, kind, key, data_path, group,
+        count, is_array=True,
+    ):
         self.owner = owner
         self.struct = struct
-        self.kind = kind            # "rna" or "custom"
+        self.kind = kind
         self.key = key
         self.data_path = data_path
         self.group = group
         self.count = count
         self.is_array = is_array
-        self.values = []            # one list of `count` floats per sampled frame
+        self.values = []
 
     def read(self):
         if self.kind == "rna":
-            return list(getattr(self.struct, self.key))
+            return [float(value) for value in getattr(self.struct, self.key)]
 
         value = self.struct[self.key]
 
         if self.is_array:
-            return [float(v) for v in value]
+            return [float(component) for component in value]
 
         return [float(value)]
 
@@ -613,7 +700,6 @@ def build_bake_channels(targets, flags):
 
     for target in targets:
         struct = target.struct
-
         rna_props = []
 
         if use_pos:
@@ -626,31 +712,51 @@ def build_bake_channels(targets, flags):
             rna_props.append("scale")
 
         for prop in rna_props:
+            try:
+                count = len(getattr(struct, prop))
+            except (AttributeError, TypeError, KeyError, IndexError, ValueError, RuntimeError, ReferenceError, ImportError):
+                continue
+
             channels.append(
                 BakeChannel(
-                    target.owner, struct, "rna", prop,
-                    struct.path_from_id(prop), target.group,
-                    len(getattr(struct, prop)),
+                    target.owner,
+                    struct,
+                    "rna",
+                    prop,
+                    struct.path_from_id(prop),
+                    target.group,
+                    count,
                 )
             )
 
         if use_custom and target.is_bone:
-            base = struct.path_from_id()
+            base_path = struct.path_from_id()
 
-            for key in struct.keys():
+            try:
+                custom_keys = list(struct.keys())
+            except (AttributeError, TypeError, KeyError, IndexError, ValueError, RuntimeError, ReferenceError, ImportError):
+                custom_keys = []
+
+            for key in custom_keys:
                 if key == "_RNA_UI":
                     continue
 
                 count, is_array = custom_prop_info(struct, key)
-
                 if not count:
                     continue
 
+                data_path = base_path + '["' + escape_identifier(key) + '"]'
+
                 channels.append(
                     BakeChannel(
-                        target.owner, struct, "custom", key,
-                        base + '["{}"]'.format(escape_identifier(key)),
-                        target.group, count, is_array,
+                        target.owner,
+                        struct,
+                        "custom",
+                        key,
+                        data_path,
+                        target.group,
+                        count,
+                        is_array,
                     )
                 )
 
@@ -658,55 +764,99 @@ def build_bake_channels(targets, flags):
 
 
 def ensure_slot(owner, anim, action):
-    slot = anim.action_slot
-
+    """Find a compatible existing slot or create one for this owner."""
+    slot = getattr(anim, "action_slot", None)
     if slot is not None:
         return slot
 
-    wanted = "OB" + owner.name
+    # If the Action already has a compatible slot, reuse it.
+    try:
+        suitable = list(anim.action_suitable_slots)
+        if suitable:
+            slot = suitable[0]
+            anim.action_slot = slot
+            return slot
+    except (AttributeError, TypeError, KeyError, IndexError, ValueError, RuntimeError, ReferenceError, ImportError):
+        pass
 
-    for candidate in action.slots:
-        if getattr(candidate, "identifier", None) == wanted:
-            slot = candidate
-            break
+    # Prefer an exact name match before creating a new slot.
+    owner_name = getattr(owner, "name", "Object")
 
-    if slot is None:
-        slot = action.slots.new(id_type='OBJECT', name=owner.name)
+    try:
+        for candidate in action.slots:
+            if (
+                getattr(candidate, "target_id_type", None) == 'OBJECT'
+                and getattr(candidate, "name_display", None) == owner_name
+            ):
+                anim.action_slot = candidate
+                return candidate
 
+            if getattr(candidate, "identifier", None) == "OB" + owner_name:
+                anim.action_slot = candidate
+                return candidate
+    except (AttributeError, TypeError, KeyError, IndexError, ValueError, RuntimeError, ReferenceError, ImportError):
+        pass
+
+    slot = action.slots.new(id_type='OBJECT', name=owner_name)
     anim.action_slot = slot
-
     return slot
 
 
 def ensure_channelbag(action, slot):
+    """Ensure and return a channelbag for the slot, preferring Blender's helper."""
     try:
         from bpy_extras import anim_utils
-        ensure = getattr(anim_utils, "action_ensure_channelbag_for_slot", None)
-
-        if ensure is not None:
-            return ensure(action, slot)
-    except ImportError:
+        ensure_fn = getattr(anim_utils, "action_ensure_channelbag_for_slot", None)
+        if callable(ensure_fn):
+            bag = ensure_fn(action, slot)
+            if bag is not None:
+                return bag
+    except (AttributeError, TypeError, KeyError, IndexError, ValueError, RuntimeError, ReferenceError, ImportError):
         pass
 
-    layer = action.layers[0] if len(action.layers) else action.layers.new("Layer")
-    strip = layer.strips[0] if len(layer.strips) else layer.strips.new(type='KEYFRAME')
+    # Direct fallback: find an existing bag in a KEYFRAME strip.
+    for layer in action.layers:
+        for strip in layer.strips:
+            if getattr(strip, "type", None) != 'KEYFRAME':
+                continue
+
+            try:
+                bag = strip.channelbag(slot)
+            except (AttributeError, TypeError, KeyError, IndexError, ValueError, RuntimeError, ReferenceError, ImportError):
+                bag = None
+
+            if bag is not None:
+                return bag
+
+    # No bag exists: use the first layer or create one, then a KEYFRAME strip.
+    if len(action.layers):
+        layer = action.layers[0]
+    else:
+        layer = action.layers.new("Layer")
+
+    strip = None
+    for candidate in layer.strips:
+        if getattr(candidate, "type", None) == 'KEYFRAME':
+            strip = candidate
+            break
+
+    if strip is None:
+        strip = layer.strips.new(type='KEYFRAME')
 
     return strip.channelbag(slot, ensure=True)
 
 
 class AnimStore:
-    """Finds or creates the F-Curves of one object (slotted-action aware)."""
+    """Find or create F-Curves on one owner's assigned Action Slot."""
 
     def __init__(self, owner):
         self.owner = owner
 
         anim = owner.animation_data
-
         if anim is None:
             anim = owner.animation_data_create()
 
         action = anim.action
-
         if action is None:
             action = bpy.data.actions.new(owner.name + "Action")
             anim.action = action
@@ -714,30 +864,56 @@ class AnimStore:
         self.action = action
         self.bag = None
 
-        if hasattr(action, "layers"):           # Blender 4.4+ / 5.x
+        if hasattr(action, "layers"):
             slot = ensure_slot(owner, anim, action)
             self.bag = ensure_channelbag(action, slot)
 
     def fcurve(self, data_path, index, group):
         if self.bag is not None:
-            return self.bag.fcurves.ensure(
-                data_path, index=index, group_name=group
-            )
+            curves = self.bag.fcurves
 
-        fcurve = self.action.fcurves.find(data_path, index=index)    # <= 4.3
+            ensure_fn = getattr(curves, "ensure", None)
+            if callable(ensure_fn):
+                return ensure_fn(data_path, index=index, group_name=group)
 
+            fcurve = curves.find(data_path, index=index)
+            if fcurve is None:
+                fcurve = curves.new(data_path, index=index, group_name=group)
+            return fcurve
+
+        # Legacy fallback for pre-slotted Actions.
+        fcurve = self.action.fcurves.find(data_path, index=index)
         if fcurve is None:
             fcurve = self.action.fcurves.new(
-                data_path, index=index, action_group=group
+                data_path,
+                index=index,
+                action_group=group,
             )
-
         return fcurve
+
+
+def _write_or_update_key(points, frame, value, existing_by_frame):
+    """Update an existing key at this frame, otherwise insert a new key."""
+    point = existing_by_frame.get(frame)
+
+    if point is not None:
+        point.co[1] = value
+        return
+
+    point = points.insert(frame, value, options={'FAST'})
+    if point is not None:
+        existing_by_frame[frame] = point
 
 
 def write_channels(channels, frames):
     """
-    Insert the sampled values.
-    Returns (keys written, F-Curves written, locked F-Curves skipped, errors, owners).
+    Write sampled values.
+
+    Returns:
+      (keys written, F-Curves written, locked F-Curves skipped, errors, owners)
+
+    Existing keys exactly on the sampled frames are updated in place, preventing
+    duplicate keys when Bake is run more than once on the same frame range.
     """
     stores = {}
     written = 0
@@ -747,9 +923,12 @@ def write_channels(channels, frames):
 
     for channel in channels:
         try:
-            pointer = channel.owner.as_pointer()
-            store = stores.get(pointer)
+            try:
+                pointer = channel.owner.as_pointer()
+            except (AttributeError, TypeError, KeyError, IndexError, ValueError, RuntimeError, ReferenceError, ImportError):
+                pointer = id(channel.owner)
 
+            store = stores.get(pointer)
             if store is None:
                 store = AnimStore(channel.owner)
                 stores[pointer] = store
@@ -762,20 +941,31 @@ def write_channels(channels, frames):
                     continue
 
                 points = fcurve.keyframe_points
+                existing_by_frame = {}
+
+                for point in points:
+                    x = float(point.co[0])
+                    nearest = round(x)
+                    if abs(x - nearest) < 1e-4:
+                        existing_by_frame[nearest] = point
 
                 for frame, values in zip(frames, channel.values):
-                    points.insert(frame, values[index], options={'FAST'})
+                    _write_or_update_key(
+                        points,
+                        frame,
+                        values[index],
+                        existing_by_frame,
+                    )
 
                 fcurve.update()
-
                 written += len(frames)
                 curves += 1
 
-        except Exception as exc:
+        except (AttributeError, TypeError, KeyError, IndexError, ValueError, RuntimeError, ReferenceError, ImportError) as exc:
             traceback.print_exc()
             errors.append(f"{channel.owner.name}: {exc}")
 
-    return written, curves, locked, errors, [s.owner for s in stores.values()]
+    return written, curves, locked, errors, [store.owner for store in stores.values()]
 
 
 # ============================================================================
@@ -783,34 +973,26 @@ def write_channels(channels, frames):
 # ============================================================================
 
 def refresh_animation_editors(context):
-    for window in context.window_manager.windows:
-        screen = window.screen
-
-        if not screen:
-            continue
-
-        for area in screen.areas:
-            if area.type in {'GRAPH_EDITOR', 'DOPESHEET_EDITOR', 'NLA_EDITOR', 'VIEW_3D'}:
-                area.tag_redraw()
+    """Redraw only the active area; avoid scanning every window and editor."""
+    area = getattr(context, "area", None)
+    if area is not None:
+        area.tag_redraw()
 
 
 def tool_poll(context):
-    # Deliberately NOT based on the object selection: in Pose Mode the armature
-    # object is often not "selected", which used to grey the buttons out.
     return context.mode in {'OBJECT', 'POSE'}
 
 
-def join_messages(text, messages):
+def join_messages(base_text, messages):
     if messages:
-        return f"{text}  ({messages[0]})"
-
-    return text
+        return f"{base_text}  ({messages[0]})"
+    return base_text
 
 
 def safe_describe_targets(context):
     try:
         return describe_targets(context)
-    except Exception:
+    except (AttributeError, TypeError, KeyError, IndexError, ValueError, RuntimeError, ReferenceError, ImportError):
         return "Selection info unavailable"
 
 
@@ -843,7 +1025,7 @@ class KEYFRAME_INTERVAL_OT_delete(Operator):
     bl_idname = "keyframe_interval.delete"
     bl_label = "Delete Keyframes"
     bl_description = (
-        "Delete keyframes of the selected bones (Pose Mode) or objects "
+        "Delete keyframes of selected bones (Pose Mode) or objects "
         "(Object Mode) at the selected interval"
     )
     bl_options = {'REGISTER', 'UNDO'}
@@ -854,45 +1036,54 @@ class KEYFRAME_INTERVAL_OT_delete(Operator):
 
     def execute(self, context):
         settings = get_settings(context)
-
         frames = build_target_frames(settings)
 
         if not frames:
-            self.report({'WARNING'}, "No frames to process - check Start, End and Interval")
+            self.report(
+                {'WARNING'},
+                "No frames to process - check Start, End and Interval",
+            )
             return {'CANCELLED'}
 
         targets = collect_targets(context)
-
         if not targets:
             self.report({'WARNING'}, nothing_selected_message(context))
             return {'CANCELLED'}
 
         flags = channel_flags(settings)
-
         if not any(flags):
             self.report({'WARNING'}, "No channel type is enabled")
             return {'CANCELLED'}
 
         messages = []
         targets = filter_usable_targets(targets, messages)
-        frame_set = set(frames)
+        if not targets:
+            self.report(
+                {'WARNING'},
+                join_messages("No editable targets to process", messages),
+            )
+            return {'CANCELLED'}
 
+        frame_set = set(frames)
         removed = 0
         changed = 0
 
         for owner, owner_targets in group_by_owner(targets):
             try:
-                count, curves = delete_keys_for_owner(
-                    owner, owner_targets, flags, frame_set
+                count, changed_curves = delete_keys_for_owner(
+                    owner,
+                    owner_targets,
+                    flags,
+                    frame_set,
                 )
-            except Exception as exc:
+            except (AttributeError, TypeError, KeyError, IndexError, ValueError, RuntimeError, ReferenceError, ImportError) as exc:
                 traceback.print_exc()
                 messages.append(f"{owner.name}: {exc}")
                 continue
 
             if count:
                 removed += count
-                changed += curves
+                changed += changed_curves
                 owner.update_tag()
 
         if removed == 0:
@@ -912,7 +1103,8 @@ class KEYFRAME_INTERVAL_OT_delete(Operator):
         self.report(
             {'WARNING' if messages else 'INFO'},
             join_messages(
-                f"Deleted {removed} keyframes on {changed} F-Curves", messages
+                f"Deleted {removed} keyframes on {changed} F-Curves",
+                messages,
             ),
         )
 
@@ -924,7 +1116,7 @@ class KEYFRAME_INTERVAL_OT_bake(Operator):
     bl_idname = "keyframe_interval.bake"
     bl_label = "Bake Keyframes"
     bl_description = (
-        "Bake keyframes of the selected bones (Pose Mode) or objects "
+        "Bake keyframes of selected bones (Pose Mode) or objects "
         "(Object Mode) at the selected interval"
     )
     bl_options = {'REGISTER', 'UNDO'}
@@ -936,28 +1128,40 @@ class KEYFRAME_INTERVAL_OT_bake(Operator):
     def execute(self, context):
         scene = context.scene
         settings = get_settings(context)
-
         frames = build_target_frames(settings)
 
         if not frames:
-            self.report({'WARNING'}, "No frames to bake - check Start, End and Interval")
+            self.report(
+                {'WARNING'},
+                "No frames to bake - check Start, End and Interval",
+            )
             return {'CANCELLED'}
 
         targets = collect_targets(context)
-
         if not targets:
             self.report({'WARNING'}, nothing_selected_message(context))
             return {'CANCELLED'}
 
         flags = channel_flags(settings)
-
         if not any(flags):
             self.report({'WARNING'}, "No channel type is enabled")
             return {'CANCELLED'}
 
         messages = []
         targets = filter_usable_targets(targets, messages)
-        channels = build_bake_channels(targets, flags)
+        if not targets:
+            self.report(
+                {'WARNING'},
+                join_messages("No editable targets to bake", messages),
+            )
+            return {'CANCELLED'}
+
+        try:
+            channels = build_bake_channels(targets, flags)
+        except (AttributeError, TypeError, KeyError, IndexError, ValueError, RuntimeError, ReferenceError, ImportError) as exc:
+            traceback.print_exc()
+            self.report({'ERROR'}, f"Could not prepare bake channels: {exc}")
+            return {'CANCELLED'}
 
         if not channels:
             self.report(
@@ -967,37 +1171,53 @@ class KEYFRAME_INTERVAL_OT_bake(Operator):
             return {'CANCELLED'}
 
         # ------------------------------------------------------------------
-        # 1) Sample every frame first ...
+        # 1) Sample every requested frame before writing any new keys.
         # ------------------------------------------------------------------
         wm = context.window_manager
         original_frame = scene.frame_current
         original_subframe = scene.frame_subframe
+        sample_error = None
 
         wm.progress_begin(0, len(frames))
 
         try:
-            for i, frame in enumerate(frames):
+            for frame_index, frame in enumerate(frames):
                 scene.frame_set(frame)
 
                 for channel in channels:
                     channel.values.append(channel.read())
 
-                wm.progress_update(i + 1)
+                wm.progress_update(frame_index + 1)
+
+        except (AttributeError, TypeError, KeyError, IndexError, ValueError, RuntimeError, ReferenceError, ImportError) as exc:
+            traceback.print_exc()
+            sample_error = exc
+
         finally:
             wm.progress_end()
             scene.frame_set(original_frame, subframe=original_subframe)
 
+        if sample_error is not None:
+            self.report({'ERROR'}, f"Sampling failed: {sample_error}")
+            return {'CANCELLED'}
+
         # ------------------------------------------------------------------
-        # 2) ... then write the keys.
+        # 2) Write the sampled values into the assigned Action Slot.
         # ------------------------------------------------------------------
-        written, curves, locked, errors, owners = write_channels(channels, frames)
+        written, curve_count, locked, errors, owners = write_channels(
+            channels,
+            frames,
+        )
         messages.extend(errors)
 
         if locked:
             messages.append(f"{locked} locked F-Curves skipped")
 
         for owner in owners:
-            owner.update_tag()
+            try:
+                owner.update_tag()
+            except (AttributeError, TypeError, KeyError, IndexError, ValueError, RuntimeError, ReferenceError, ImportError):
+                pass
 
         context.view_layer.update()
         refresh_animation_editors(context)
@@ -1012,7 +1232,8 @@ class KEYFRAME_INTERVAL_OT_bake(Operator):
         self.report(
             {'WARNING' if messages else 'INFO'},
             join_messages(
-                f"Baked {written} keyframes on {curves} F-Curves", messages
+                f"Baked {written} keyframes on {curve_count} F-Curves",
+                messages,
             ),
         )
 
@@ -1035,45 +1256,42 @@ class VIEW3D_PT_kfi_tools(Panel):
     def draw(self, context):
         layout = self.layout
 
-        # Buttons first: always drawn, whatever happens further down. -----------
+        # Keep the main actions visible at the top of the panel.
         row = layout.row(align=True)
         row.scale_y = 1.3
         row.operator(KEYFRAME_INTERVAL_OT_delete.bl_idname, icon='KEY_HLT')
         row.operator(KEYFRAME_INTERVAL_OT_bake.bl_idname, icon='REC')
 
         layout.label(text=safe_describe_targets(context))
-
         settings = get_settings(context)
 
-        # Frame range --------------------------------------------------------
+        # Frame range.
         layout.separator()
         layout.label(text="Frame Range")
 
         row = layout.row(align=True)
         row.prop(settings, "start_frame", text="Start")
         row.prop(settings, "end_frame", text="End")
-
         layout.operator(KEYFRAME_INTERVAL_OT_scene_range.bl_idname)
 
-        # Interval -----------------------------------------------------------
+        # Interval settings.
         layout.prop(settings, "interval")
         layout.prop(settings, "inverse_interval")
 
-        # Channels -----------------------------------------------------------
+        # Channel selection.
         layout.separator()
         layout.label(text="Channels")
         layout.prop(settings, "all_channels", toggle=True)
 
-        col = layout.column(align=True)
-        col.enabled = not settings.all_channels
-        col.prop(settings, "pos")
-        col.prop(settings, "rot")
-        col.prop(settings, "scl")
-        col.prop(settings, "custom_props")
+        column = layout.column(align=True)
+        column.enabled = not settings.all_channels
+        column.prop(settings, "pos")
+        column.prop(settings, "rot")
+        column.prop(settings, "scl")
+        column.prop(settings, "custom_props")
 
-        # Preview ------------------------------------------------------------
+        # Live preview.
         layout.separator()
-
         box = layout.box()
         box.label(text="Live Preview")
 
@@ -1085,12 +1303,14 @@ class VIEW3D_PT_kfi_tools(Panel):
             start, end = frame_range
             interval = int(settings.interval)
             inverse = bool(settings.inverse_interval)
-
             total = count_target_frames(start, end, interval, inverse)
 
             shown = ", ".join(
-                str(f)
-                for f in islice(iter_target_frames(start, end, interval, inverse), 15)
+                str(frame)
+                for frame in islice(
+                    iter_target_frames(start, end, interval, inverse),
+                    15,
+                )
             )
 
             if total > 15:
@@ -1131,7 +1351,7 @@ def unregister():
     for cls in reversed(classes):
         try:
             bpy.utils.unregister_class(cls)
-        except RuntimeError:
+        except (RuntimeError, ValueError):
             pass
 
 
