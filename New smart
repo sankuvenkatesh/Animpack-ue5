@@ -1,8 +1,7 @@
-
 bl_info = {
     "name": "Smart Curve Tools",
     "author": "Venkatesh Sanku",
-    "version": (2, 2, 0),
+    "version": (2, 3, 0),
     "blender": (5, 2, 0),
     "location": "Graph Editor > Sidebar > Smart Curve Tools",
     "description": (
@@ -183,8 +182,8 @@ def auto_fix_bad_keyframes(fcurve):
 
         fcurve.update()
 
-    except (AttributeError, ReferenceError, RuntimeError, TypeError, ValueError):
-        pass
+    except (AttributeError, ReferenceError, RuntimeError, TypeError, ValueError) as exc:
+        print(f"[Smart Curve Tools] Warning: Failed to fix bad keyframes - {exc}")
 
 
 def set_bezier_and_auto_clamp_handles(fcurve):
@@ -197,8 +196,8 @@ def set_bezier_and_auto_clamp_handles(fcurve):
 
         fcurve.update()
 
-    except (AttributeError, ReferenceError, RuntimeError, TypeError):
-        pass
+    except (AttributeError, ReferenceError, RuntimeError, TypeError) as exc:
+        print(f"[Smart Curve Tools] Warning: Failed to set handle types - {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -286,7 +285,8 @@ def smooth_keyframes(
         fcurve.update()
         return stats
 
-    except (AttributeError, ReferenceError, RuntimeError, TypeError, ValueError):
+    except (AttributeError, ReferenceError, RuntimeError, TypeError, ValueError) as exc:
+        print(f"[Smart Curve Tools] Warning: Smoothing failed - {exc}")
         return {'moved': 0, 'max_delta': 0.0}
 
 
@@ -368,7 +368,8 @@ def get_rotation_fcurves(mode_code, all_fcurves, rna_path_prefix):
                 index = int(fc.array_index)
                 if index in expected_indices and index not in indexed_curves:
                     indexed_curves[index] = fc
-            except (AttributeError, ReferenceError, RuntimeError, TypeError, ValueError):
+            except (AttributeError, ReferenceError, RuntimeError, TypeError, ValueError) as exc:
+                print(f"[Smart Curve Tools] Skipped a curve during rotation check - {exc}")
                 continue
 
         missing = [
@@ -388,7 +389,8 @@ def get_rotation_fcurves(mode_code, all_fcurves, rna_path_prefix):
 
         return [indexed_curves[i] for i in expected_indices], None
 
-    except (AttributeError, ReferenceError, RuntimeError, TypeError, ValueError):
+    except (AttributeError, ReferenceError, RuntimeError, TypeError, ValueError) as exc:
+        print(f"[Smart Curve Tools] Error finding rotation curves - {exc}")
         return None, "Error finding rotation curves."
 
 
@@ -454,7 +456,8 @@ def collect_keyframes_with_handles_any(curves):
 
         return keyframe_info
 
-    except (AttributeError, ReferenceError, RuntimeError, TypeError, ValueError):
+    except (AttributeError, ReferenceError, RuntimeError, TypeError, ValueError) as exc:
+        print(f"[Smart Curve Tools] Error collecting keyframes - {exc}")
         return []
 
 
@@ -496,12 +499,6 @@ def unwrap_keyframe_values_euler_any(keyframes):
 def unwrap_keyframe_values_quaternion_any(keyframes):
     """
     Apply quaternion sign continuity to complete W, X, Y, Z samples.
-
-    Quaternion q and -q represent the same orientation. Each complete sample
-    is normalized, then negated when its dot product with the previous sample
-    is negative. All four channels must have keys at the same frames; silently
-    filling missing component keys can create a quaternion that was never
-    actually keyed by the animator, so mismatched samples are rejected.
     """
     result = []
     previous = None
@@ -526,9 +523,6 @@ def unwrap_keyframe_values_quaternion_any(keyframes):
                 "Clean the invalid keys and try again."
             )
 
-        # Do not use Quaternion.length here: calculate magnitude directly
-        # for compatibility with Blender builds where that attribute is not
-        # exposed by the Quaternion wrapper.
         components = [float(value) for value in values]
         magnitude = math.sqrt(sum(component * component for component in components))
 
@@ -559,10 +553,6 @@ def unwrap_keyframe_values_quaternion_any(keyframes):
 def preserve_and_update_fcurve_points_any(curves, keyframe_infos):
     """
     Write filtered values and preserve handle shape relative to each key.
-
-    When a value is shifted (for example by +/- 2*pi for Euler continuity),
-    both handle Y coordinates are shifted by the same amount. This preserves
-    the tangent offsets instead of leaving handles at their old absolute Y.
     """
     try:
         for axis, fcurve in enumerate(curves):
@@ -586,8 +576,6 @@ def preserve_and_update_fcurve_points_any(curves, keyframe_infos):
 
                 kp.co[1] = new_value
 
-                # Restore handle types first, then apply the translated
-                # coordinates. Missing handle records are ignored safely.
                 if handle_info['handle_left_type'] is not None:
                     kp.handle_left_type = handle_info['handle_left_type']
                 if handle_info['handle_right_type'] is not None:
@@ -608,7 +596,8 @@ def preserve_and_update_fcurve_points_any(curves, keyframe_infos):
 
             fcurve.update()
 
-    except (AttributeError, ReferenceError, RuntimeError, TypeError, ValueError):
+    except (AttributeError, ReferenceError, RuntimeError, TypeError, ValueError) as exc:
+        print(f"[Smart Curve Tools] Failed to preserve/update handles - {exc}")
         raise
 
 
@@ -617,9 +606,9 @@ def preserve_and_update_fcurve_points_any(curves, keyframe_infos):
 # ---------------------------------------------------------------------------
 
 class ROTATION_OT_smart_euler_filter(bpy.types.Operator):
-    """Apply Euler angle or Quaternion sign continuity to rotation curves."""
+    """Fix Gimbal Lock and apply Euler angle / Quaternion sign continuity"""
     bl_idname = "graph.smart_euler_filter"
-    bl_label = "Smart Euler / Quaternion Filter"
+    bl_label = "Fix Gimbal/Rotation Jumps"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -661,12 +650,9 @@ class ROTATION_OT_smart_euler_filter(bpy.types.Operator):
         ]
 
         if mode_code == "QUATERNION":
-            # Quaternion is a four-component rotation. Never filter just one
-            # selected component; process all four channels as one value.
             curves_to_process = rotation_curves
             selection_note = "all four quaternion channels (W, X, Y, Z)"
         else:
-            # Euler channels can be filtered independently when selected.
             curves_to_process = (
                 selected_curves if selected_curves else rotation_curves
             )
@@ -693,6 +679,7 @@ class ROTATION_OT_smart_euler_filter(bpy.types.Operator):
             )
 
         except (IndexError, KeyError, TypeError, ValueError, RuntimeError) as exc:
+            print(f"[Smart Curve Tools] Operator Execution Failed: {exc}")
             self.report({'ERROR'}, f"Rotation continuity failed: {exc}")
             return {'CANCELLED'}
 
@@ -897,7 +884,7 @@ class SMARTCURVETOOLS_PT_panel(bpy.types.Panel):
         layout.label(text="Smart Euler / Quaternion Filter:")
         layout.operator(
             "graph.smart_euler_filter",
-            text="Apply Rotation Continuity",
+            text="Fix Gimbal/Rotation Jumps",
             icon='CON_ROTLIKE',
         )
 
