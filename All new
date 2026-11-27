@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Combined Animation & Gizmo Tools - v2.1.0
+Combined Animation & Gizmo Tools - v2.1.2
 Blender 5.2.4 LTS Compatible
 
 Features:
@@ -8,24 +8,24 @@ Features:
     - Action Slot selector (Blender 4.4+)
     - Undo / Redo buttons
     - Action to Scene Range
-    - Graph Editor Paste Connect (Works from Context Menu & Key Menu)
+    - Graph Editor, Dopesheet & Timeline Paste Connect (Context/Key Menus)
     - Gizmo size controls
     - Gizmo Preferences shortcut
 
 Location:
     Timeline / Dope Sheet / Graph Editor headers (Action tools)
-    Graph Editor right-click (Paste Connect)
+    Graph Editor / Dope Sheet / Timeline right-click (Paste Connect)
     3D View > Sidebar > Tool
 """
 
 bl_info = {
     "name": "Combined Animation & Gizmo Tools",
     "author": "Venkatesh Sanku",
-    "version": (2, 1, 1),
+    "version": (2, 1, 2),
     "blender": (5, 2, 0),
     "location": (
         "Timeline / Dope Sheet / Graph Editor header, "
-        "Graph Editor right-click, "
+        "Editor right-click menus, "
         "3D View > Sidebar > Tool"
     ),
     "description": (
@@ -319,7 +319,7 @@ def cagt_draw_dopesheet_header(self, context):
 
     _draw_undo_redo(layout)
     _draw_range_button(layout, context)
-    # Paste Connect has been removed from Timeline & Dopesheet headers here
+    # Paste Connect is removed from headers
 
 def cagt_draw_graph_header(self, context):
     layout = self.layout
@@ -328,7 +328,7 @@ def cagt_draw_graph_header(self, context):
     _draw_action_selector(layout, context)
     _draw_undo_redo(layout)
     _draw_range_button(layout, context)
-    # Paste Connect has been removed from Graph Editor header here
+    # Paste Connect is removed from headers
 
 def cagt_draw_paste_connect(self, context):
     layout = self.layout
@@ -441,8 +441,14 @@ classes = (
 _UI_HOOKS = (
     ("DOPESHEET_HT_header", cagt_draw_dopesheet_header),
     ("GRAPH_HT_header", cagt_draw_graph_header),
-    ("GRAPH_MT_context_menu", cagt_draw_paste_connect), # Appears in Right-Click menu
+    
+    # Graph Editor Menus
+    ("GRAPH_MT_context_menu", cagt_draw_paste_connect),
     ("GRAPH_MT_key", cagt_draw_paste_connect),
+    
+    # Dope Sheet & Timeline Menus (Timeline uses Dope Sheet context menus for keyframes)
+    ("DOPESHEET_MT_context_menu", cagt_draw_paste_connect),
+    ("DOPESHEET_MT_key", cagt_draw_paste_connect),
 )
 
 _attached = []
@@ -476,7 +482,7 @@ def register():
     for type_name, fn in _UI_HOOKS:
         _attach(type_name, fn)
 
-    print("Combined Animation & Gizmo Tools v2.1.1 loaded - Blender 5.2+")
+    print("Combined Animation & Gizmo Tools v2.1.2 loaded - Blender 5.2+")
 
 
 def unregister():
