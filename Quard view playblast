@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Playblast Quad View",
     "author": "Venkatesh Sanku",
-    "version": (1, 9, 5),
+    "version": (1, 9, 6),
     "blender": (5, 2, 4),
     "location": "View3D > Sidebar > Playblast",
-    "description": "Capture viewport screenshots and animation playblasts. Auto-names based on .blend file (Screenshot/Playblast).",
+    "description": "Capture viewport screenshots (PNG) and animation playblasts. Auto-names based on .blend file (Screenshot/Playblast).",
     "category": "3D View",
 }
 
@@ -143,7 +143,7 @@ def safe_remove_timer(wm, timer):
 def resolve_user_path(filepath, default_name="quadview_render.mp4", is_image=False):
     # Image ayithe "_screenshot", lekapothe "_playblast" ani fix chestundi
     suffix = "_screenshot" if is_image else "_playblast"
-    
+
     # Automatic ga .blend file name extract cheyadam
     if bpy.data.filepath:
         blend_name = os.path.splitext(bpy.path.basename(bpy.data.filepath))[0]
@@ -152,7 +152,7 @@ def resolve_user_path(filepath, default_name="quadview_render.mp4", is_image=Fal
         auto_name = "quadview" + suffix
 
     raw = (filepath or "").strip()
-    
+
     # User path change cheyakapothe (default unte), auto_name apply cheyadam
     if raw in ("", "//", "//quadview_render.mp4", "//quadview_render"):
         raw = "//" + auto_name
@@ -316,68 +316,6 @@ def image_dimensions(filepath):
                 pass
 
 
-def resolve_imbuf_file_type(imbuf_mod, image_format, target_ext):
-    file_types = getattr(imbuf_mod, "file_types", None)
-    if not file_types:
-        return image_format
-
-    ft = file_types.get(image_format)
-    if ft is not None and getattr(ft, "has_write_file", True):
-        return image_format
-
-    ext_lower = (target_ext or "").lower()
-    for type_id, info in file_types.items():
-        if not getattr(info, "has_write_file", False):
-            continue
-        exts = tuple(e.lower() for e in getattr(info, "file_extensions", ()))
-        if ext_lower and ext_lower in exts:
-            return type_id
-
-    return image_format
-
-
-def convert_png(context, source_png, target_path, image_format, quality):
-    quality = max(0, min(100, int(quality)))
-    if image_format == 'PNG':
-        shutil.copy2(source_png, target_path)
-        return os.path.isfile(target_path) and os.path.getsize(target_path) > 0
-
-    try:
-        import imbuf
-        ibuf = imbuf.load(source_png)
-        try:
-            ext = os.path.splitext(target_path)[1]
-            ibuf.file_type = resolve_imbuf_file_type(imbuf, image_format, ext)
-            if image_format in {'JPEG', 'BMP'}:
-                ibuf.planes = 24
-            if image_format == 'JPEG':
-                ibuf.quality = quality
-            imbuf.write(ibuf, filepath=target_path)
-        finally:
-            try:
-                ibuf.free()
-            except Exception:
-                pass
-        if os.path.isfile(target_path) and os.path.getsize(target_path) > 0:
-            return True
-    except Exception:
-        pass
-
-    image = None
-    try:
-        image = bpy.data.images.load(source_png, check_existing=False)
-        image.filepath_raw = target_path
-        image.file_format = image_format
-        image.save()
-        return os.path.isfile(target_path) and os.path.getsize(target_path) > 0
-    finally:
-        if image:
-            try:
-                bpy.data.images.remove(image)
-            except Exception:
-                pass
-
-
 def quality_to_crf_enum(quality):
     quality = max(0, min(100, int(quality)))
     if quality >= 95:
@@ -521,23 +459,13 @@ class QP_Props(bpy.types.PropertyGroup):
         name="Quality", default=90, min=0, max=100,
         subtype='PERCENTAGE',
     )
-    image_format: EnumProperty(
-        name="Image Format",
-        items=[
-            ('PNG', "PNG", "Lossless image"),
-            ('JPEG', "JPEG", "Compressed image"),
-            ('BMP', "BMP", "Bitmap image"),
-            ('TIFF', "TIFF", "Tagged image"),
-        ],
-        default='PNG',
-    )
     shading_mode: EnumProperty(
         name="Viewport Shading",
         items=[
-            ('SOLID', "Solid", "Solid viewport shading"),
-            ('MATERIAL', "Material Preview", "Material Preview shading"),
-            ('RENDERED', "Rendered", "Rendered viewport shading"),
-            ('WIREFRAME', "Wireframe", "Wireframe viewport shading"),
+            ('WIREFRAME', "Wireframe", "Wireframe viewport shading", 'SHADING_WIRE', 0),
+            ('SOLID', "Solid", "Solid viewport shading", 'SHADING_SOLID', 1),
+            ('MATERIAL', "Material Preview", "Material Preview shading", 'SHADING_TEXTURE', 2),
+            ('RENDERED', "Rendered", "Rendered viewport shading", 'SHADING_RENDERED', 3),
         ],
         default='SOLID',
     )
@@ -580,13 +508,13 @@ class QP_OT_switch_layout(bpy.types.Operator):
 
 
 # ---------------------------------------------------------------------------
-# SINGLE SCREENSHOT
+# SINGLE SCREENSHOT (ALWAYS PNG)
 # ---------------------------------------------------------------------------
 
 class QP_OT_screenshot_quadview(bpy.types.Operator):
     bl_idname = "qp.screenshot_quadview"
     bl_label = "Playblast Screenshot"
-    bl_description = "Save the current 3D Viewport as an image"
+    bl_description = "Save the current 3D Viewport as a PNG image"
 
     @classmethod
     def poll(cls, context):
@@ -596,16 +524,12 @@ class QP_OT_screenshot_quadview(bpy.types.Operator):
         props = context.scene.qp_props
         area = get_view3d_area(context)
         space = area.spaces.active if area else None
-        
+
         # is_image=True ga set chesam, so _screenshot ani ostundi
         filepath = resolve_user_path(props.render_filepath, "quadview_render", is_image=True)
-        
+
         root, _ext = os.path.splitext(filepath)
-        extension = {
-            'PNG': '.png', 'JPEG': '.jpg',
-            'BMP': '.bmp', 'TIFF': '.tif',
-        }
-        target = root + extension.get(props.image_format, '.png')
+        target = (root or filepath) + ".png"
         ensure_folder(os.path.dirname(target))
         temp_png = target + ".capture_tmp.png"
 
@@ -619,11 +543,9 @@ class QP_OT_screenshot_quadview(bpy.types.Operator):
             capture_viewport_png(context, area, temp_png)
             if not os.path.isfile(temp_png) or os.path.getsize(temp_png) <= 0:
                 raise RuntimeError("Temporary screenshot PNG is missing or empty")
-            if not convert_png(
-                context, temp_png, target,
-                props.image_format, props.video_quality,
-            ):
-                raise RuntimeError("Could not write output image")
+            os.replace(temp_png, target)
+            if not os.path.isfile(target) or os.path.getsize(target) <= 0:
+                raise RuntimeError("Could not write output PNG image")
         except Exception as exc:
             traceback.print_exc()
             self.report({'ERROR'}, "Screenshot failed: {}".format(exc))
@@ -1004,7 +926,7 @@ class QP_OT_combine_images_to_video(bpy.types.Operator):
 
 
 # ---------------------------------------------------------------------------
-# UI
+# UI (STYLISH ICONS & MODERN LAYOUT)
 # ---------------------------------------------------------------------------
 
 class QP_PT_panel(bpy.types.Panel):
@@ -1013,31 +935,117 @@ class QP_PT_panel(bpy.types.Panel):
     bl_region_type = 'UI'
     bl_category = "Playblast"
 
+    @staticmethod
+    def draw_prop_with_icon(layout, data, prop_name, icon, text=None, slider=False):
+        row = layout.row(align=True)
+        icon_col = row.row(align=True)
+        icon_col.ui_units_x = 1.2
+        icon_col.label(text="", icon=icon)
+        if text is None:
+            row.prop(data, prop_name, slider=slider)
+        else:
+            row.prop(data, prop_name, text=text, slider=slider)
+
+    def draw_header(self, context):
+        self.layout.label(text="", icon='VIEW_CAMERA')
+
     def draw(self, context):
         layout = self.layout
         props = context.scene.qp_props
 
-        layout.operator("qp.switch_layout", icon='WINDOW')
-        layout.prop(props, "render_filepath")
+        area = get_view3d_area(context)
+        space = area.spaces.active if area else None
+        is_quad = bool(
+            space is not None
+            and hasattr(space, "region_quadviews")
+            and len(space.region_quadviews) > 0
+        )
 
-        row = layout.row(align=True)
-        row.operator("qp.screenshot_quadview", icon='IMAGE_DATA')
-        row.operator("qp.screenshot_quadview_anim", icon='RENDER_ANIMATION')
+        # --- QUICK ACTIONS ---
+        action_box = layout.box()
+        view_row = action_box.row(align=True)
+        view_row.scale_y = 1.25
+        view_row.operator(
+            "qp.switch_layout",
+            text="Quad View: ON" if is_quad else "Toggle Quad View",
+            icon='MESH_GRID',
+            depress=is_quad,
+        )
 
-        layout.separator()
-        layout.label(text="Capture Settings", icon='PREFERENCES')
-        layout.prop(props, "clean_screenshot")
-        layout.prop(props, "image_format")
-        layout.prop(props, "video_quality")
-        layout.prop(props, "use_ffmpeg")
-        layout.prop(props, "frame_step")
-        layout.prop(props, "resolution_scale")
-        layout.prop(props, "shading_mode")
+        action_box.separator(factor=0.35)
+        capture_row = action_box.row(align=True)
+        capture_row.scale_y = 1.45
+        capture_row.operator(
+            "qp.screenshot_quadview",
+            text="Screenshot",
+            icon='CAMERA_DATA',
+        )
+        capture_row.operator(
+            "qp.screenshot_quadview_anim",
+            text="Playblast",
+            icon='RENDER_ANIMATION',
+        )
 
+        # --- OUTPUT LOCATION ---
+        path_box = layout.box()
+        path_box.label(text="Output Path", icon='OUTPUT')
+        path_box.prop(props, "render_filepath", text="")
+
+        # --- CAPTURE SETTINGS ---
+        settings_box = layout.box()
+        settings_box.label(text="Capture Settings", icon='PREFERENCES')
+
+        # Viewport Shading icon selector bar
+        shade_row = settings_box.row(align=True)
+        icon_col = shade_row.row(align=True)
+        icon_col.ui_units_x = 1.2
+        icon_col.label(text="", icon='VIEW3D')
+        split = shade_row.split(factor=0.38, align=True)
+        split.label(text="Shading")
+        shade_btns = split.row(align=True)
+        shade_btns.prop(props, "shading_mode", expand=True, icon_only=True)
+
+        settings_box.separator(factor=0.35)
+
+        # Sliders & numeric fields with aligned icons
+        self.draw_prop_with_icon(
+            settings_box, props, "video_quality",
+            icon='FILE_MOVIE', slider=True,
+        )
+        self.draw_prop_with_icon(
+            settings_box, props, "resolution_scale",
+            icon='FULLSCREEN_ENTER', slider=True,
+        )
+        self.draw_prop_with_icon(
+            settings_box, props, "frame_step",
+            icon='NEXT_KEYFRAME',
+        )
+
+        settings_box.separator(factor=0.4)
+
+        # Modern toggle buttons with dynamic icons
+        toggle_col = settings_box.column(align=True)
+        toggle_col.prop(
+            props,
+            "clean_screenshot",
+            text="Hide UI on Screenshot",
+            toggle=True,
+            icon='HIDE_ON' if props.clean_screenshot else 'HIDE_OFF',
+        )
+        toggle_col.prop(
+            props,
+            "use_ffmpeg",
+            text="Encoder: External FFmpeg" if props.use_ffmpeg else "Encoder: Blender VSE",
+            toggle=True,
+            icon='CONSOLE' if props.use_ffmpeg else 'SEQUENCE',
+        )
+
+        # --- ACTIVE PLAYBLAST ALERT ---
         if props.is_playblasting:
-            box = layout.box()
-            box.label(text="PLAYBLAST IN PROGRESS", icon='TIME')
-            box.label(text="Press Esc to cancel", icon='INFO')
+            alert_box = layout.box()
+            alert_box.alert = True
+            alert_box.label(text="PLAYBLAST IN PROGRESS", icon='REC')
+            alert_box.label(text="Press Esc to cancel", icon='CANCEL')
 
 
 # ---------------------------------------------------------------------------
@@ -1073,7 +1081,7 @@ def register():
         bpy.utils.register_class(cls)
 
     bpy.types.Scene.qp_props = PointerProperty(type=QP_Props)
-    print("Playblast Quad View 1.9.5 registered for Blender 5.2+ LTS")
+    print("Playblast Quad View 1.9.6 registered for Blender 5.2+ LTS")
 
 
 def unregister():
