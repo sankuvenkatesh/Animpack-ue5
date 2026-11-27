@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Combined Animation & Gizmo Tools - v2.1.2
+Combined Animation & Gizmo Tools - v2.1.3
 Blender 5.2.4 LTS Compatible
 
 Features:
@@ -21,7 +21,7 @@ Location:
 bl_info = {
     "name": "Combined Animation & Gizmo Tools",
     "author": "Venkatesh Sanku",
-    "version": (2, 1, 2),
+    "version": (2, 1, 3),
     "blender": (5, 2, 0),
     "location": (
         "Timeline / Dope Sheet / Graph Editor header, "
@@ -237,15 +237,27 @@ class PASTE_CONNECT(bpy.types.Operator):
             self.report({'WARNING'}, "Current Frame Value option is unavailable")
             return {'CANCELLED'}
 
+        graph_window = context.window
         graph_area = None
+        graph_region = None
+
         if context.area.type == 'DOPESHEET_EDITOR':
-            for window in context.window_manager.windows:
-                for area in window.screen.areas:
-                    if area.type == 'GRAPH_EDITOR':
-                        graph_area = area
-                        break
-                if graph_area:
+            # 1. Try to find a Graph Editor in the current window first
+            for area in context.window.screen.areas:
+                if area.type == 'GRAPH_EDITOR':
+                    graph_area = area
                     break
+            
+            # 2. If not found, check all other windows
+            if not graph_area:
+                for window in context.window_manager.windows:
+                    for area in window.screen.areas:
+                        if area.type == 'GRAPH_EDITOR':
+                            graph_area = area
+                            graph_window = window
+                            break
+                    if graph_area:
+                        break
             
             if not graph_area:
                 self.report({'WARNING'}, "Paste Connect requires a Graph Editor open somewhere in the workspace")
@@ -253,9 +265,19 @@ class PASTE_CONNECT(bpy.types.Operator):
         else:
             graph_area = context.area
 
+        # Find the WINDOW region for the Graph Editor (critical for override)
+        for region in graph_area.regions:
+            if region.type == 'WINDOW':
+                graph_region = region
+                break
+                
+        if not graph_region:
+            self.report({'WARNING'}, "Graph Editor WINDOW region not found")
+            return {'CANCELLED'}
+
         try:
-            # Blender Context Override
-            with context.temp_override(area=graph_area):
+            # Blender Context Override (Needs window, area, and region to prevent 'area not found in screen')
+            with context.temp_override(window=graph_window, area=graph_area, region=graph_region):
                 result = bpy.ops.graph.paste(
                     offset='START',
                     value_offset=value_offset,
@@ -446,7 +468,7 @@ _UI_HOOKS = (
     ("GRAPH_MT_context_menu", cagt_draw_paste_connect),
     ("GRAPH_MT_key", cagt_draw_paste_connect),
     
-    # Dope Sheet & Timeline Menus (Timeline uses Dope Sheet context menus for keyframes)
+    # Dope Sheet & Timeline Menus
     ("DOPESHEET_MT_context_menu", cagt_draw_paste_connect),
     ("DOPESHEET_MT_key", cagt_draw_paste_connect),
 )
@@ -482,7 +504,7 @@ def register():
     for type_name, fn in _UI_HOOKS:
         _attach(type_name, fn)
 
-    print("Combined Animation & Gizmo Tools v2.1.2 loaded - Blender 5.2+")
+    print("Combined Animation & Gizmo Tools v2.1.3 loaded - Blender 5.2+")
 
 
 def unregister():
